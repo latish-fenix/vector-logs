@@ -14,14 +14,14 @@ import { useClusters, useMe } from "../session";
 
 // ------------------------------------------------------------------ constants
 
-const PAGE_SIZES = [25, 50, 100, 200];
-const PRESETS: [string, string][] = [
+export const PAGE_SIZES = [25, 50, 100, 200];
+export const PRESETS: [string, string][] = [
   ["now-15m", "Last 15 minutes"], ["now-1h", "Last hour"], ["now-4h", "Last 4 hours"], ["now-12h", "Last 12 hours"],
   ["now-24h", "Last 24 hours"], ["now-3d", "Last 3 days"], ["now-7d", "Last 7 days"],
 ];
-const DEFAULT_RANGE = "now-1h";
-const DEFAULT_COLS = ["log_time", "level", "service", "_message", "host"];
-const MESSAGE = "_message";
+export const DEFAULT_RANGE = "now-1h";
+export const DEFAULT_COLS = ["log_time", "level", "service", "_message", "host"];
+export const MESSAGE = "_message";
 
 const OPS: { op: FilterOp; label: string }[] = [
   { op: "is", label: "is" }, { op: "is_not", label: "is not" },
@@ -31,12 +31,12 @@ const OPS: { op: FilterOp; label: string }[] = [
   { op: "exists", label: "has a value" }, { op: "not_exists", label: "is empty" },
 ];
 const OP_LABEL = Object.fromEntries(OPS.map((o) => [o.op, o.label])) as Record<FilterOp, string>;
-const NEGATIVE: FilterOp[] = ["is_not", "not_one_of", "not_contains", "not_exists"];
+export const NEGATIVE: FilterOp[] = ["is_not", "not_one_of", "not_contains", "not_exists"];
 const FACET_TITLE: Record<string, string> = { level: "Level", service: "Service", host: "Host", exception: "Exception" };
 
 // ------------------------------------------------------------------ helpers
 
-function readJson<T>(s: string | null, fallback: T): T {
+export function readJson<T>(s: string | null, fallback: T): T {
   if (!s) return fallback;
   try {
     return JSON.parse(s) as T;
@@ -45,7 +45,7 @@ function readJson<T>(s: string | null, fallback: T): T {
   }
 }
 
-function filterText(f: LogFilter): string {
+export function filterText(f: LogFilter): string {
   switch (f.op) {
     case "exists": return `${f.field} has a value`;
     case "not_exists": return `${f.field} is empty`;
@@ -55,7 +55,7 @@ function filterText(f: LogFilter): string {
   }
 }
 
-function cellText(v: unknown): string {
+export function cellText(v: unknown): string {
   if (v === undefined || v === null) return "";
   if (typeof v === "string") return v;
   if (typeof v === "number" || typeof v === "boolean") return String(v);
@@ -89,11 +89,11 @@ export function LevelBadge({ level }: { level: unknown }) {
   return <span className={`lv lv-${key.toLowerCase()}`}><span className="swatch" style={{ background: LEVEL_VAR[key] ?? LEVEL_VAR.OTHER }} />{u}</span>;
 }
 
-function isRelative(v: string) {
+export function isRelative(v: string) {
   return /^now(-\d+[smhdw])?$/.test(v);
 }
 
-function rangeLabel(start: string, end: string, zone: Zone): string {
+export function rangeLabel(start: string, end: string, zone: Zone): string {
   const preset = PRESETS.find(([v]) => v === start && end === "now");
   if (preset) return preset[1];
   const f = (v: string) => (isRelative(v) ? v : fmtTime(Date.parse(v), zone, false));
@@ -102,7 +102,7 @@ function rangeLabel(start: string, end: string, zone: Zone): string {
 
 // ------------------------------------------------------------------ page
 
-export function Logs() {
+export function Overview() {
   const { clusterId = "" } = useParams();
   const me = useMe().data!;
   const clusters = useClusters();
@@ -187,13 +187,16 @@ export function Logs() {
   const copyLink = () => copyText(window.location.href).then(() => toast("Link copied. Anyone with access to this cluster can open it."));
 
   if (clusters.data && !clusters.data.some((c) => c.id === clusterId)) {
-    return clusters.data.length ? <Navigate to={`/logs/${enc(clusters.data[0].id)}`} replace /> : <Navigate to="/" replace />;
+    return clusters.data.length ? <Navigate to={`/overview/${enc(clusters.data[0].id)}`} replace /> : <Navigate to="/" replace />;
   }
 
   const lastOff = Math.max(0, Math.floor((total - 1) / size) * size);
   return (
-    <Page wide crumbs={[{ label: "Logs", to: "/" }, { label: clusterId }]} title={`Logs · ${clusterId}`}
-      actions={<ZoneToggle zone={zone} onChange={setZone} />}>
+    <Page wide crumbs={[{ label: "Overview", to: "/" }, { label: clusterId }]} title={`Overview · ${clusterId}`}
+      actions={<>
+        <Link className="btn btn-sm" to={`/logs/${enc(clusterId)}?${(() => { const p = new URLSearchParams(params); p.delete("off"); p.delete("size"); return p.toString(); })()}`}><Icon name="terminal" size={15} /> Open in Logs</Link>
+        <ZoneToggle zone={zone} onChange={setZone} />
+      </>}>
       <section className="card">
         <form className="data-bar" onSubmit={submit}>
           <div className="field grow" style={{ minWidth: 280 }}>
@@ -353,7 +356,7 @@ export function Logs() {
   );
 }
 
-function Cell({ col, hit, zone }: { col: string; hit: LogHit; zone: Zone }) {
+export function Cell({ col, hit, zone }: { col: string; hit: LogHit; zone: Zone }) {
   if (col === "log_time") return <td className="cell-mono nowrap">{fmtTime(hit.log_time_ms as number, zone)}</td>;
   if (col === "level") return <td className="nowrap"><LevelBadge level={hit.level} /></td>;
   const t = col === MESSAGE ? messageOf(hit) : cellText(hit[col]);
@@ -362,7 +365,7 @@ function Cell({ col, hit, zone }: { col: string; hit: LogHit; zone: Zone }) {
 
 // ------------------------------------------------------------------ time
 
-function ZoneToggle({ zone, onChange }: { zone: Zone; onChange: (z: Zone) => void }) {
+export function ZoneToggle({ zone, onChange }: { zone: Zone; onChange: (z: Zone) => void }) {
   return (
     <div className="tabs" role="group" aria-label="Time zone" style={{ marginLeft: "auto" }}>
       <button type="button" className="tab" aria-pressed={zone === "local"} aria-selected={zone === "local"} onClick={() => onChange("local")} title="Your browser's time zone">{localZoneName()}</button>
@@ -371,8 +374,8 @@ function ZoneToggle({ zone, onChange }: { zone: Zone; onChange: (z: Zone) => voi
   );
 }
 
-function TimePicker({ start, end, zone, maxHours, onChange }: {
-  start: string; end: string; zone: Zone; maxHours: number; onChange: (s: string, e: string) => void;
+export function TimePicker({ start, end, zone, maxHours, onChange, compact }: {
+  start: string; end: string; zone: Zone; maxHours: number; onChange: (s: string, e: string) => void; compact?: boolean;
 }) {
   const preset = end === "now" && PRESETS.some(([v]) => v === start) ? start : "custom";
   const [custom, setCustom] = useState(preset === "custom");
@@ -391,8 +394,8 @@ function TimePicker({ start, end, zone, maxHours, onChange }: {
   const err = a === null || b === null ? "Pick both times" : b <= a ? "“To” must be after “From”"
     : b - a > maxHours * 3600_000 ? `At most ${maxHours / 24} days per search` : a < now - 31 * 86400_000 ? "S3 keeps 30 days of logs" : null;
   return (
-    <div className="field">
-      <label className="label" htmlFor="lg-range">Time range</label>
+    <div className="field" style={compact ? { gap: 2 } : undefined}>
+      <label className={compact ? "sr-only" : "label"} htmlFor="lg-range">Time range</label>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
         <select id="lg-range" className="select" style={{ width: "auto" }} value={custom ? "custom" : preset}
           onChange={(e) => {
@@ -426,7 +429,7 @@ function relMs(v: string): number {
 
 // ------------------------------------------------------------------ facets
 
-function FacetList({ field, items, total, filters, onFilter }: {
+export function FacetList({ field, items, total, filters, onFilter }: {
   field: string; items: Facet[]; total: number; filters: LogFilter[]; onFilter: (f: LogFilter) => void;
 }) {
   if (!items.length) return null;
@@ -457,7 +460,7 @@ function FacetList({ field, items, total, filters, onFilter }: {
 
 // ------------------------------------------------------------------ saved searches
 
-function SavedMenu({ open, setOpen, clusterId }: { open: boolean; setOpen: (o: boolean) => void; clusterId: string }) {
+export function SavedMenu({ open, setOpen, clusterId }: { open: boolean; setOpen: (o: boolean) => void; clusterId: string }) {
   const saved = useQuery({ queryKey: ["saved"], queryFn: () => get<{ items: SavedSearch[] }>("/saved-searches").then((r) => r.items), staleTime: 60_000 });
   const items = saved.data ?? [];
   return (
@@ -481,7 +484,7 @@ function SavedMenu({ open, setOpen, clusterId }: { open: boolean; setOpen: (o: b
   );
 }
 
-function SaveDialog({ clusterId, params, describe, onClose }: { clusterId: string; params: string; describe: string; onClose: () => void }) {
+export function SaveDialog({ clusterId, params, describe, onClose }: { clusterId: string; params: string; describe: string; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [name, setName] = useState("");
@@ -515,7 +518,7 @@ function SaveDialog({ clusterId, params, describe, onClose }: { clusterId: strin
 
 // ------------------------------------------------------------------ filter dialog
 
-function FilterDialog({ columns, facets, initial, editing, onSave, onClose }: {
+export function FilterDialog({ columns, facets, initial, editing, onSave, onClose }: {
   columns: Column[];
   facets: Record<string, Facet[]>;
   initial: LogFilter;
@@ -599,7 +602,7 @@ function FilterDialog({ columns, facets, initial, editing, onSave, onClose }: {
 
 // ------------------------------------------------------------------ columns dialog
 
-function ColumnsDialog({ columns, selected, onSave, onClose }: {
+export function ColumnsDialog({ columns, selected, onSave, onClose }: {
   columns: Column[]; selected: string[]; onSave: (c: string[]) => void; onClose: () => void;
 }) {
   const [sel, setSel] = useState<string[]>(selected);
@@ -656,7 +659,7 @@ function ColumnsDialog({ columns, selected, onSave, onClose }: {
 
 // ------------------------------------------------------------------ export dialog
 
-function ExportDialog({ total, shownColumns, max, describe, run, onClose }: {
+export function ExportDialog({ total, shownColumns, max, describe, run, onClose }: {
   total: number;
   shownColumns: string[];
   max: number;
@@ -713,12 +716,12 @@ function ExportDialog({ total, shownColumns, max, describe, run, onClose }: {
 // ------------------------------------------------------------------ detail dialog
 
 const SKIP_EMPTY = true;
-const DETAIL_ORDER = ["log_time", "level", "service", "msg", "exception", "body", "error_code", "error_message", "error_identifier",
+export const DETAIL_ORDER = ["log_time", "level", "service", "msg", "exception", "body", "error_code", "error_message", "error_identifier",
   "error_module", "status_code", "class", "method", "line", "logger", "parent_log", "child_log", "tenant_id", "request_uuid",
   "web_id", "carrier", "page_type", "response_time_ms", "buyer_zip", "shipper_zip", "kv_json", "raw", "host", "instance_id",
   "container_id", "app", "cluster", "source_file", "format", "parse_ok", "log_time_ms", "ingest_time_ms"];
 
-function DetailDialog({ base, hit, zone, position, onPrev, onNext, onClose, onFilter }: {
+export function DetailDialog({ base, hit, zone, position, onPrev, onNext, onClose, onFilter }: {
   base: string;
   hit: LogHit;
   zone: Zone;

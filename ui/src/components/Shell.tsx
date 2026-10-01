@@ -26,7 +26,8 @@ function ClusterSwitch({ current }: { current: string | undefined }) {
   const value = current && clusters.some((c) => c.id === current) ? current : clusters[0].id;
   const onChange = (next: string) => {
     // Keep the search (time range, query, filters) when switching clusters.
-    navigate(`/logs/${encodeURIComponent(next)}${location.pathname.startsWith("/logs/") ? location.search : ""}`);
+    const section = location.pathname.startsWith("/overview/") ? "overview" : "logs";
+    navigate(`/${section}/${encodeURIComponent(next)}${/^\/(logs|overview)\//.test(location.pathname) ? location.search : ""}`);
   };
   return (
     <div className="cluster-switch">
@@ -77,7 +78,10 @@ export function Shell() {
         <ClusterSwitch current={clusterId} />
         <div className="nav-group">
           <span className="nav-label">Logs</span>
-          {clusterId && clusters?.some((c) => c.id === clusterId) && <NavItem to={`/logs/${encodeURIComponent(clusterId)}`} icon="terminal" label="Search" />}
+          {clusterId && clusters?.some((c) => c.id === clusterId) && <>
+            <NavItem to={`/logs/${encodeURIComponent(clusterId)}${location.pathname.startsWith("/overview/") ? location.search : ""}`} icon="terminal" label="Logs" />
+            <NavItem to={`/overview/${encodeURIComponent(clusterId)}${location.pathname.startsWith("/logs/") ? location.search : ""}`} icon="overview" label="Overview" />
+          </>}
           <NavItem to="/saved" icon="bookmark" label="Saved searches" />
         </div>
         {me.admin && (
@@ -115,12 +119,14 @@ export interface Crumb {
   to?: string;
 }
 
-export function Page({ crumbs, title, actions, children, wide }: {
+export function Page({ crumbs, title, actions, children, wide, fill }: {
   crumbs: Crumb[];
   title: string;
   actions?: ReactNode;
   children: ReactNode;
   wide?: boolean;
+  /** The page fills the window (no page scroll); the content scrolls inside. */
+  fill?: boolean;
 }) {
   usePageTitle(title);
   const toggleNav = useContext(NavCtx);
@@ -140,8 +146,8 @@ export function Page({ crumbs, title, actions, children, wide }: {
         </nav>
         {actions}
       </header>
-      <main className="page" id="main">
-        <div className={`page-inner ${wide ? "wide" : ""}`}>{children}</div>
+      <main className={`page ${fill ? "fill" : ""}`} id="main">
+        <div className={`page-inner ${wide || fill ? "wide" : ""}`}>{children}</div>
       </main>
     </>
   );

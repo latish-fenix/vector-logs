@@ -11,6 +11,8 @@ A web console for the application logs that Vector ships from the Fenix app serv
 
 ## What people can do
 
+- **Logs** (the main page): the log lines fill the window and keep loading as you scroll; click a line to open it in place (every column, full stack trace, filter-for / filter-out buttons); a **Fields** panel with top values, **Wrap**, and **Full screen**.
+- **Overview**: the same search as a chart and top values, for spotting when something started.
 - **Search** one cluster over any window of up to 7 days within the last 30: free text (`"exact phrase"`, `-exclude`, `column:value`) plus filters on any column.
 - **See when it happened**: a histogram of log lines over time, stacked by level; click a bar to zoom into it.
 - **Narrow down fast**: top values for level, service, host and exception; click to filter, `−` to exclude.

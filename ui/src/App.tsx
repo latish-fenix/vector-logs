@@ -5,7 +5,8 @@ import { Clusters } from "./pages/admin/Clusters";
 import { Users } from "./pages/admin/Users";
 import { ChangePassword } from "./pages/ChangePassword";
 import { Login } from "./pages/Login";
-import { Logs } from "./pages/Logs";
+import { LogView } from "./pages/LogView";
+import { Overview } from "./pages/Overview";
 import { Saved } from "./pages/Saved";
 import { lastCluster, RequireAdmin, RequireAuth, useClusters, useMe } from "./session";
 
@@ -44,7 +45,8 @@ export function App() {
       <Route path="/login" element={<Login />} />
       <Route element={<RequireAuth><Shell /></RequireAuth>}>
         <Route index element={<Home />} />
-        <Route path="logs/:clusterId" element={<Logs />} />
+        <Route path="logs/:clusterId" element={<LogView />} />
+        <Route path="overview/:clusterId" element={<Overview />} />
         <Route path="saved" element={<Saved />} />
         <Route path="account/password" element={<ChangePassword />} />
         <Route path="admin/clusters" element={<RequireAdmin><Clusters /></RequireAdmin>} />

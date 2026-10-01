@@ -10,7 +10,8 @@ npm run build      # type-check and build into ../app/static/ui
 
 | File | What |
 | --- | --- |
-| `src/pages/Logs.tsx` | The search page: query, time range, filters, histogram, top values, results, detail, export, save, copy link |
+| `src/pages/LogView.tsx` | **Logs** (the default page): search bar and filters on top, log lines fill the window, load more on scroll, rows expand in place, Fields panel, wrap, full screen |
+| `src/pages/Overview.tsx` | **Overview**: histogram, top values and a paged table for the same search; also holds the shared pieces (time picker, filter / columns / export / save dialogs) |
 | `src/components/Histogram.tsx` | Stacked bars by level (SVG), hover tooltip, click to zoom |
 | `src/pages/Saved.tsx` | Your saved searches |
 | `src/pages/admin/Users.tsx`, `Clusters.tsx` | Admin pages |
