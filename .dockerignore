@@ -1,0 +1,13 @@
+.git
+.env
+.local-store
+.local-secrets
+tests
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+ui/node_modules
+app/static/ui
+local-test
+docs

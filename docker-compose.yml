@@ -1,0 +1,18 @@
+services:
+  vector-logs:
+    build: .
+    image: vector-logs:latest
+    container_name: vector-logs
+    restart: unless-stopped
+    ports:
+      # Host port from API_PORT in .env (443 on EC2; plain HTTP for now). Restrict it with the
+      # security group. ES-API keeps its own port (80) on the same host.
+      - "${API_PORT:-443}:8080"
+    env_file: .env           # logs bucket, state bucket, bootstrap admin, limits
+    volumes:
+      # Parquet files already downloaded from S3 (they never change). Safe to delete any time.
+      - log-cache:/app/cache
+    # On EC2 the instance IAM role provides AWS credentials; no keys needed here.
+
+volumes:
+  log-cache:

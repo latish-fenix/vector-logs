@@ -1,0 +1,54 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListLogFolders",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::fenix-ecr-logs",
+      "Condition": { "StringLike": { "s3:prefix": ["vector/", "vector/*"] } }
+    },
+    {
+      "Sid": "ReadLogFiles",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::fenix-ecr-logs/vector/*"
+    },
+    {
+      "Sid": "ListStatePrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::fenix-es-config-api",
+      "Condition": { "StringLike": { "s3:prefix": ["vector-logs/*"] } }
+    },
+    {
+      "Sid": "ReadWriteState",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::fenix-es-config-api/vector-logs/*"
+    },
+    {
+      "Sid": "DeleteLocksAndSavedSearchesOnly",
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": [
+        "arn:aws:s3:::fenix-es-config-api/vector-logs/locks/*",
+        "arn:aws:s3:::fenix-es-config-api/vector-logs/saved/*"
+      ]
+    },
+    {
+      "Sid": "SecretsManagerOwnPrefixOnly",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:RestoreSecret",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:vector-logs/*"
+    }
+  ]
+}

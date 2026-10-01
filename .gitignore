@@ -1,0 +1,13 @@
+.env
+.local-store/
+.local-secrets/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+ui/node_modules/
+*.tsbuildinfo
+local-test/.secrets/
+local-test/.store/
+local-test/.cache/
+local-test/logs/
