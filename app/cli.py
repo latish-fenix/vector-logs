@@ -1,8 +1,9 @@
 """Admin command line, run inside the container:
 
     docker compose exec vector-logs python -m app.cli check
-        Checks the setup: state bucket, Secrets Manager, and read access to the logs bucket
-        (lists the cluster folders and the newest hour of one cluster).
+        Checks the setup: state bucket, Secrets Manager, read access to the logs bucket
+        (lists the cluster folders and the newest hour of one cluster) and to the load balancer
+        logs (lists today's files and reads one).
 
     docker compose exec vector-logs python -m app.cli reset-password someone@fenixcommerce.com
         Prints a new generated password (ends the user's sessions). Use it if the only admin
@@ -86,10 +87,45 @@ def main(argv: list[str]) -> int:
         except Exception as e:  # noqa: BLE001
             ok = False
             print(f"FAIL  logs: {getattr(e, 'message', e)}")
+        if settings.lb_enabled:
+            ok = _check_lb(settings) and ok
         return 0 if ok else 1
 
     print(__doc__)
     return 2
+
+
+def _check_lb(settings: Settings) -> bool:
+    import tempfile
+    from collections import Counter
+    from pathlib import Path
+
+    from .lb_logs import LbStore, build_lb_source, parse_key
+    try:
+        src = build_lb_source(settings)
+        bases = src.bases()
+        if not bases:
+            print(f"WARN  load balancer logs: nothing under {src.describe()}AWSLogs/ yet "
+                  "(turn on access logs for a load balancer)")
+            return True
+        today = datetime.now(timezone.utc).date()
+        keys = [k for b in bases for k in src.list_day(b, today)]
+        lbs = Counter(f.lb for f in map(parse_key, keys) if f)
+        print(f"OK    load balancer logs: {src.describe()} · today {len(keys)} file(s) from "
+              f"{', '.join(f'{n} ({c})' for n, c in sorted(lbs.items())) or '(none yet)'}")
+        if keys:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = src.fetch(keys[-1], Path(tmp))
+                print(f"OK    read {keys[-1].rsplit('/', 1)[-1]} ({path.stat().st_size:,} bytes)")
+        status = LbStore(Path(settings.cache_dir) / "lb").read_status()
+        if status:
+            err = status.get("lastError")
+            print(f"{'WARN' if err else 'OK  '}  converter: last run {status.get('updatedAt')}"
+                  f"{' · ' + err['message'] if err else ''}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"FAIL  load balancer logs: {getattr(e, 'message', e)}")
+        return False
 
 
 if __name__ == "__main__":

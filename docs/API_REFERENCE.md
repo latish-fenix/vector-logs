@@ -107,6 +107,46 @@ curl -s -H "$AUTH" $API/health/ecs | jq '.summary, [.clusters[] | {name, status,
 
 A cluster is linked to a target group when one of its services registers there, one of its EC2 instances is a target there, or the target group is named `tg-<cluster>`. `status` is `down` (a target group with no healthy target, or a service running 0 tasks), `degraded` (some unhealthy targets, fewer tasks than desired, a failed rollout or a disconnected agent), `healthy`, or `none` (no target group). `unlinkedTargetGroups` (admins only) lists target groups no ECS cluster uses.
 
+## Load balancers
+
+From the Application Load Balancer access logs (`LB_LOGS_BUCKET` / `LB_LOGS_PREFIX`), converted on the server. About 5–10 minutes behind; one view covers at most 7 days within the last 30. Members see only the target groups of clusters they may read (`tg-<cluster>` belongs to `<cluster>`); admins see everything, including requests with no target group.
+
+| Method and path | Returns |
+| --- | --- |
+| `GET /lb` | Load balancers and their target groups seen in the last 24 hours, and the converter's state |
+| `POST /lb/_summary` | Totals by status class, requests over time, the target group table (requests, 4xx, 5xx, p95, top failing path) |
+| `POST /lb/_paths` | Requests grouped by method and path; `sort`: `errors` (default), `requests`, `slow`; `limit` up to 200 |
+| `POST /lb/_requests` | Single requests, newest first; `offset`, `size` (up to 500), `order` |
+| `POST /lb/_export` | The same as a file; `format` `csv` / `json` / `ndjson`, `limit` up to 10,000 |
+
+```bash
+curl -s -H "$AUTH" -H 'Content-Type: application/json' $API/lb/_summary \
+  -d '{"start": "now-24h", "end": "now", "lbs": ["elb-alpha-prepurchase"], "statusClasses": ["5xx"]}' \
+  | jq '.totals, [.targetGroups[] | {tg, requests, s5xx, topError}]'
+```
+
+Every body takes these fields (all optional):
+
+| Field | Meaning |
+| --- | --- |
+| `start`, `end` | Same formats as log search |
+| `lbs` | Load balancer names |
+| `targetGroups` | Target group names; `"-"` = requests the load balancer answered without a target group (redirects, fixed responses, malformed requests) |
+| `domains` | Host names (`alpha-edds-gateway.delest.fenixcommerce.com`) |
+| `statusClasses` | `2xx`, `3xx`, `4xx`, `5xx`, `other` (no status, e.g. the client closed the connection) |
+| `statusCodes` | Exact codes, e.g. `[502, 504]` |
+| `source` | `app` = a target answered; `lb` = the load balancer answered itself (5xx here usually means no healthy target, or a target timeout) |
+| `methods`, `path`, `pathGroup` | HTTP methods; path contains (`*` = anything); exact grouped path as `/_paths` returns it |
+| `client`, `target` | IP (or `ip:port`) starts with |
+| `minTargetSeconds` | Only requests whose target took at least this long |
+| `q` | Words in the URL, user agent, trace id, error reason, client or target IP |
+
+Grouped paths replace Shopify store names with `<store>`, UUIDs with `<uuid>`, long hex ids with `<id>` and numbers with `<n>`: `/fenixdelest/api/v1/<store>/storeinfo`. Percentiles (`p50`, `p95`, `p99`) come from latency bins (5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500 ms …) and are approximate; `avg` is exact.
+
+The summary's `pending` says how many delivered files of the range are not converted yet (`files` of `of`); `requested: true` means the range is older than `LB_WARM_DAYS` and is being converted now. Ask again in a few seconds.
+
+Each request has these fields (empty ones are left out): `time`, `ts_ms`, `lb`, `tg`, `cluster`, `domain`, `method`, `path`, `path_group`, `query`, `url`, `protocol`, `elb_code`, `tgt_code`, `client_ip`, `client_port`, `target`, `req_t`, `tgt_t`, `resp_t` (seconds), `rx`, `tx` (bytes), `user_agent`, `error_reason`, `classification`, `classification_reason`, `actions`, `elb_error_code`, `target_error_code`, `trace_id`, `type`, `ssl_protocol`, `rule_priority`, `request_created`, `target_list`, `target_code_list`.
+
 ## Saved searches (your own)
 
 | Method and path | Does |
@@ -151,3 +191,5 @@ Every error is `{"error": {"code", "message", "details"}}`. The common codes:
 | `SEARCH_TOO_BIG` | 507 | The search needed more than `DUCKDB_MEMORY_MB` |
 | `LOGS_ACCESS_DENIED` | 500 | The EC2 role can't read the logs bucket (see INSTALL.md, Step 1) |
 | `AWS_ACCESS_DENIED` | 500 | The EC2 role lacks the `EcsAndLoadBalancerHealthReadOnly` statement (ECS health page) |
+| `LB_LOGS_ACCESS_DENIED` | 500 | The EC2 role lacks the `ListLoadBalancerLogs` / `ReadLoadBalancerLogs` statements (shown on the Load balancers page and by `app.cli check`) |
+| `LB_DISABLED` | 404 | `LB_ENABLED=false` |

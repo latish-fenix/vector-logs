@@ -291,3 +291,98 @@ export interface HealthSnapshot {
   clusters: HealthCluster[];
   unlinkedTargetGroups: HealthTargetGroup[];
 }
+
+// ---- load balancer access logs (/api/v1/lb)
+export type StatusClass = "2xx" | "3xx" | "4xx" | "5xx" | "other";
+
+export interface LbBody {
+  start: string;
+  end: string;
+  lbs?: string[];
+  targetGroups?: string[];
+  domains?: string[];
+  statusClasses?: StatusClass[];
+  statusCodes?: number[];
+  source?: "app" | "lb" | null;
+  methods?: string[];
+  path?: string;
+  pathGroup?: string;
+  client?: string;
+  target?: string;
+  minTargetSeconds?: number | null;
+  q?: string;
+}
+
+export interface LbPending {
+  files: number;
+  of: number;
+  requested?: boolean;
+  starting?: boolean;
+  converterUpdatedAt: string | null;
+  lastError: { code: string; message: string; at: string } | null;
+}
+
+export interface LbCounts { "2xx": number; "3xx": number; "4xx": number; "5xx": number; other: number }
+
+export interface LbTotals extends LbCounts {
+  requests: number;
+  s5xxApp: number;
+  s5xxLb: number;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  avg: number | null;
+}
+
+export interface LbTargetGroupRow {
+  tg: string | null;
+  cluster: string | null;
+  lbs: string[];
+  requests: number;
+  s4xx: number;
+  s5xx: number;
+  s5xxApp: number;
+  s5xxLb: number;
+  avg: number | null;
+  p95: number | null;
+  topError: { method: string | null; pathGroup: string | null; code: number | null; count: number } | null;
+}
+
+export interface LbSummary {
+  start: number;
+  end: number;
+  interval: number;
+  files: number;
+  source: "rollup" | "raw" | "none";
+  pending: LbPending;
+  totals: LbTotals;
+  buckets: (LbCounts & { t: number })[];
+  targetGroups: LbTargetGroupRow[];
+  tookMs: number;
+}
+
+export interface LbPathRow extends LbCounts {
+  method: string | null;
+  pathGroup: string | null;
+  example: string | null;
+  requests: number;
+  p95: number | null;
+  avg: number | null;
+  topCode: number | null;
+  targetGroups: (string | null)[];
+}
+
+export type LbRequest = Record<string, string | number | null> & { ts_ms: number };
+
+export interface LbOverview {
+  items: { name: string; targetGroups: { name: string | null; cluster: string | null; requests24h: number }[] }[];
+  converter: {
+    updatedAt: string | null;
+    lastError: { code: string; message: string; at: string } | null;
+    warmDays: number;
+    pollSeconds: number;
+    filesListed: number;
+    filesConverted: number;
+    cycleMs: number | null;
+  };
+}

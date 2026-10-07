@@ -37,7 +37,7 @@ class Settings:
     cache_dir: str = "/app/cache"             # downloaded Parquet files (immutable, so safe to keep)
     cache_max_mb: int = 4096
     duckdb_threads: int = 4
-    duckdb_memory_mb: int = 1536
+    duckdb_memory_mb: int = 768
     listing_cache_seconds: int = 30           # recent hours; older hours are cached longer
     clusters_cache_seconds: int = 300
 
@@ -45,6 +45,20 @@ class Settings:
     health_enabled: bool = True
     ecs_region: str = "us-west-2"
     health_cache_seconds: int = 60
+
+    # ---- load balancer access logs (ALB, gzip text in S3, converted to Parquet on this server)
+    lb_enabled: bool = True
+    lb_logs_backend: str = "s3"               # "s3" or "local" (a folder laid out like the bucket)
+    lb_logs_bucket: str = "fenix-vector-ecs-logs"
+    lb_logs_prefix: str = "loadbalancer-logs/"  # AWSLogs/<account>/elasticloadbalancing/... below this
+    lb_logs_region: str | None = "us-west-2"
+    lb_logs_endpoint_url: str | None = None
+    lb_logs_local_dir: str = "./local-test/logs/alb-bucket"
+    lb_warm_days: int = 7                     # days kept converted all the time
+    lb_retention_days: int = 30               # older data is never kept or converted
+    lb_poll_seconds: int = 300                # how often the converter looks for new files
+    lb_converter_memory_mb: int = 256
+    lb_background: bool = True                # run the converter thread (off in tests)
 
     # ---- app state (users, saved searches): S3 or a local folder
     storage_backend: str = "s3"               # "s3" or "local" (local = dev only)
@@ -91,12 +105,24 @@ class Settings:
             cache_dir=env("CACHE_DIR", "/app/cache"),
             cache_max_mb=int(env("CACHE_MAX_MB", "4096")),
             duckdb_threads=int(env("DUCKDB_THREADS", "4")),
-            duckdb_memory_mb=int(env("DUCKDB_MEMORY_MB", "1536")),
+            duckdb_memory_mb=int(env("DUCKDB_MEMORY_MB", "768")),
             listing_cache_seconds=int(env("LISTING_CACHE_SECONDS", "30")),
             clusters_cache_seconds=int(env("CLUSTERS_CACHE_SECONDS", "300")),
             health_enabled=_bool(env("HEALTH_ENABLED"), True),
             ecs_region=env("ECS_REGION", "us-west-2"),
             health_cache_seconds=int(env("HEALTH_CACHE_SECONDS", "60")),
+            lb_enabled=_bool(env("LB_ENABLED"), True),
+            lb_logs_backend=env("LB_LOGS_BACKEND", "s3").lower(),
+            lb_logs_bucket=env("LB_LOGS_BUCKET", "fenix-vector-ecs-logs"),
+            lb_logs_prefix=_slash(env("LB_LOGS_PREFIX", "loadbalancer-logs/").lstrip("/")),
+            lb_logs_region=env("LB_LOGS_REGION", "us-west-2") or None,
+            lb_logs_endpoint_url=env("LB_LOGS_ENDPOINT_URL") or None,
+            lb_logs_local_dir=env("LB_LOGS_LOCAL_DIR", "./local-test/logs/alb-bucket"),
+            lb_warm_days=int(env("LB_WARM_DAYS", "7")),
+            lb_retention_days=int(env("LB_RETENTION_DAYS", "30")),
+            lb_poll_seconds=int(env("LB_POLL_SECONDS", "300")),
+            lb_converter_memory_mb=int(env("LB_CONVERTER_MEMORY_MB", "256")),
+            lb_background=_bool(env("LB_BACKGROUND"), True),
             storage_backend=storage,
             s3_bucket=env("S3_BUCKET", ""),
             s3_prefix=_slash(env("S3_PREFIX", "vector-logs/")),
@@ -133,5 +159,9 @@ class Settings:
             raise ValueError("AUTH_MODE must be 'password' or 'header'")
         if self.secrets_backend not in ("aws", "local"):
             raise ValueError("SECRETS_BACKEND must be 'aws' (AWS Secrets Manager) or 'local' (dev only)")
+        if self.lb_logs_backend not in ("s3", "local"):
+            raise ValueError("LB_LOGS_BACKEND must be 's3' or 'local'")
+        if not 1 <= self.lb_warm_days <= self.lb_retention_days <= 31:
+            raise ValueError("LB_WARM_DAYS must be between 1 and LB_RETENTION_DAYS (at most 31)")
         if not 1 <= self.max_search_hours <= 24 * 31:
             raise ValueError("MAX_SEARCH_HOURS must be between 1 and 744")

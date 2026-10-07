@@ -569,3 +569,30 @@ button.htile:hover { border-color: var(--border-strong); }
 .danger-text { color: var(--danger-text); font-weight: 600; }
 .hunlinked summary { padding: 14px 18px; cursor: pointer; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .hunlinked[open] summary { border-bottom: 1px solid var(--row-border); }
+
+/* ---- load balancers page */
+:root {
+  /* status classes in the request chart: 2xx recedes so errors stand out; 4xx/5xx use the status steps */
+  --st-2xx: #5b97e6;
+  --st-3xx: #4a3aa7;
+  --st-4xx: #fab219;
+  --st-5xx: #d03b3b;
+  --st-other: #a3a29c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --st-2xx: #3a6db0; --st-3xx: #9085e9; --st-other: #6b6a64; }
+}
+:root[data-theme="dark"] { --st-2xx: #3a6db0; --st-3xx: #9085e9; --st-other: #6b6a64; }
+.lbtiles { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+@media (max-width: 1280px) { .lbtiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .lbtiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.lbtiles .stat-value { font-size: 20px; }
+.card-title { font-size: 15px; font-weight: 650; margin: 0; }
+.lbpath { max-width: 520px; white-space: normal; overflow-wrap: break-word; font-size: 13px; }
+@media (max-width: 640px) { .lb-updated { display: none; } }
+.lbreq { max-width: 0; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.linkish { border: 0; background: none; padding: 0; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; display: inline; line-height: 1.7; }
+.linkish .hpill { vertical-align: 1px; margin-right: 4px; }
+.linkish:hover { color: var(--accent-text); text-decoration: underline; }
+.lbprogress { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; max-width: 420px; }
+.lbprogress span { display: block; height: 100%; background: var(--accent); transition: width 0.4s; }

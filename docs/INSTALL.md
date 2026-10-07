@@ -37,6 +37,7 @@ The server reads the logs with the EC2 instance role; no keys are stored anywher
    | `ListStatePrefix`, `ReadWriteState`, `DeleteLocksAndSavedSearchesOnly` | users and saved searches under `s3://fenix-es-config-api/vector-logs/` |
    | `SecretsManagerOwnPrefixOnly` | its own secrets `vector-logs/*` (session key, password hashes) |
    | `EcsAndLoadBalancerHealthReadOnly` | **read-only** List/Describe of ECS clusters, services, container instances, load balancers, target groups, target health and EC2 instances, for the ECS health page |
+   | `ListLoadBalancerLogs`, `ReadLoadBalancerLogs` | **read-only**: list and read the ALB access logs in `s3://fenix-vector-ecs-logs/loadbalancer-logs/` |
 
 3. If the logs bucket is encrypted with a customer-managed KMS key (S3 console → `fenix-ecr-logs` → *Properties* → *Default encryption*), also allow `kms:Decrypt` on that key. With the default *SSE-S3* nothing more is needed.
 4. If the instance has no internet access, it reaches S3 through a VPC endpoint. A *gateway* endpoint only serves buckets in the instance's own region; the check in Step 4 tells you if the logs bucket (us-west-2) or the state bucket can't be reached.
@@ -66,7 +67,9 @@ In `.env` check these lines (the defaults match our setup):
 | `S3_BUCKET` / `AWS_REGION` | the ES-API state bucket and its region (see the note in Step 1) |
 | `S3_PREFIX` / `SECRETS_PREFIX` | `vector-logs/` (separate from ES-API) |
 | `BOOTSTRAP_ADMINS` | `latish.madapada@fenixcommerce.com` |
-| `WORKERS` × `DUCKDB_MEMORY_MB` | keep well under the free RAM (`free -m`); 2 × 1024 MB is fine on a 4 GB+ instance |
+| `WORKERS` × `DUCKDB_MEMORY_MB` | `2` × `768`: with the converter's 256 MB this fits the container's 2 GB cap (`docker-compose.yml`), leaving room for ES-API on the 4 GB instance |
+| `CACHE_MAX_MB` | `8192` (the disk has 26 GB free) |
+| `LB_LOGS_BUCKET` / `LB_LOGS_PREFIX` / `LB_LOGS_REGION` | `fenix-vector-ecs-logs` / `loadbalancer-logs/` / `us-west-2` (the defaults) |
 
 Nothing secret goes in `.env`.
 
@@ -107,6 +110,30 @@ docker compose up -d --build
 
 Users, saved searches and secrets are in S3 and Secrets Manager, so they survive rebuilds. The cache volume (`log-cache`) only holds copies of log files; delete it any time with `docker compose down -v`.
 
+## Adding the Load balancers page (October 2026)
+
+For an install from before the page existed:
+
+1. **Access logs** are already on for `elb-alpha-prepurchase` and `elb-alpha-postpurchase` (bucket `fenix-vector-ecs-logs`, prefix `loadbalancer-logs`, lifecycle rule deleting them after 30 days). Another load balancer appears on the page by itself once its access logs go to the same bucket and prefix.
+2. **IAM**: add the `ListLoadBalancerLogs` and `ReadLoadBalancerLogs` statements from [`iam-policy.json`](iam-policy.json) to the `vector-logs` inline policy.
+3. **Swap** (once, on the EC2; a safety net for a 4 GB host with no swap):
+
+   ```bash
+   sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 && sudo chmod 600 /swapfile
+   sudo mkswap /swapfile && sudo swapon /swapfile
+   echo '/swapfile swap swap defaults 0 0' | sudo tee -a /etc/fstab
+   ```
+
+4. **`.env`**: set `DUCKDB_THREADS=2`, `DUCKDB_MEMORY_MB=768` and `CACHE_MAX_MB=8192`. The `LB_*` settings can stay out; their defaults match.
+5. `git pull && docker compose up -d --build`, then `docker compose exec vector-logs python -m app.cli check`. The last lines read:
+
+   ```
+   OK    load balancer logs: s3://fenix-vector-ecs-logs/loadbalancer-logs/ · today 1234 file(s) from elb-alpha-postpurchase (…), elb-alpha-prepurchase (…)
+   OK    read 823002541310_elasticloadbalancing_us-west-2_app.elb-alpha-…log.gz (94,141 bytes)
+   ```
+
+6. Open **Infrastructure → Load balancers**. Right after the start the page says it is converting; the days since logging began take a minute or two.
+
 ## Day-to-day operations
 
 | Task | Command (in `~/vector-logs`) |
@@ -114,7 +141,8 @@ Users, saved searches and secrets are in S3 and Secrets Manager, so they survive
 | Logs of the app (sign-ins, searches, exports) | `docker compose logs -f --tail 100` |
 | Someone (or the only admin) is locked out | `docker compose exec vector-logs python -m app.cli reset-password <email>` |
 | Which secrets exist | `docker compose exec vector-logs python -m app.cli secrets-status` |
-| Cache size | Administration → Clusters (top right), limit `CACHE_MAX_MB` |
+| Cache size | Administration → Clusters (top right), limit `CACHE_MAX_MB`; load balancer files: `docker compose exec vector-logs du -sh /app/cache/lb` |
+| Load balancer converter state | `docker compose exec vector-logs cat /app/cache/lb/status.json` (also shown on the page) |
 | Restart | `docker compose restart` |
 
 ## How searches perform
@@ -126,3 +154,5 @@ Vector writes one file per server about every 5 minutes, in hourly folders. A se
 - Plain HTTP: passwords and log contents (tracking numbers, zip codes) cross the network unencrypted, as with ES-API today. When HTTPS comes, set `COOKIE_SECURE=true`.
 - One search covers at most 7 days (`MAX_SEARCH_HOURS`); it can start anywhere in the 30 days the bucket keeps.
 - An export holds at most 10,000 lines (`MAX_EXPORT_ROWS`).
+- Load balancer numbers run 5–10 minutes behind (AWS delivers a file every 5 minutes) and AWS delivers access logs on a best-effort basis, so they are for investigating, not billing. Percentiles are approximate (from latency bins).
+- Only Application Load Balancers: the NLB `elb-prod-sftp` writes a different log format.

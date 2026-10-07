@@ -1,8 +1,12 @@
 # Run the log viewer on this PC: http://localhost:8081/ui/
 #
 #   start-local.cmd                     synthetic sample logs (generated on the first run, no AWS needed)
-#   start-local.cmd -RealLogs           the real logs in s3://fenix-ecr-logs/vector/ (needs AWS credentials
-#                                       that may read that bucket: -AwsProfile <profile> or your default ones)
+#   start-local.cmd -RealLogs           the real logs in s3://fenix-ecr-logs/vector/ and the load balancer logs
+#                                       in s3://fenix-vector-ecs-logs/loadbalancer-logs/ (needs AWS credentials
+#                                       that may read both: -AwsProfile <profile> or your default ones)
+#
+# Load balancers page without -RealLogs: invented requests for the last 6 hours, plus any .log.gz
+# files you downloaded into local-test\logs\alb\ (git-ignored).
 #
 # Users, saved searches and secrets stay in local-test\.store and local-test\.secrets (never committed).
 param(
@@ -53,6 +57,7 @@ if ($RealLogs) {
     $env:LOGS_BACKEND = "s3"; $env:LOGS_BUCKET = $Bucket; $env:LOGS_PREFIX = $Prefix; $env:LOGS_REGION = $Region
     if ($AwsProfile) { $env:AWS_PROFILE = $AwsProfile }
     $env:CACHE_DIR = Join-Path $PSScriptRoot ".cache"
+    $env:LB_LOGS_BACKEND = "s3"; $env:LB_WARM_DAYS = "1"   # keep the first download small on a PC
     $where = "s3://$Bucket/$Prefix" + $(if ($AwsProfile) { " (profile $AwsProfile)" } else { "" })
 } else {
     $logs = Join-Path $PSScriptRoot "logs"
@@ -61,6 +66,13 @@ if ($RealLogs) {
         & $py (Join-Path $PSScriptRoot "make_sample_logs.py") $logs
         if ($LASTEXITCODE -ne 0) { throw "Could not generate the sample logs" }
     }
+    $alb = Join-Path $logs "alb-bucket"
+    if (-not (Test-Path $alb)) {
+        Write-Step "Generating sample load balancer logs in $alb (once)"
+        & $py (Join-Path $PSScriptRoot "make_alb_logs.py") --out $alb
+        if ($LASTEXITCODE -ne 0) { throw "Could not generate the sample load balancer logs" }
+    }
+    $env:LB_LOGS_BACKEND = "local"; $env:LB_LOGS_LOCAL_DIR = $alb; $env:LB_POLL_SECONDS = "60"
     $env:LOGS_BACKEND = "local"; $env:LOGS_LOCAL_DIR = $logs; $env:LOGS_PREFIX = "vector/"
     $env:CACHE_DIR = Join-Path $PSScriptRoot ".cache"
     $where = "$logs\vector (synthetic; delete the folder to generate fresh ones)"

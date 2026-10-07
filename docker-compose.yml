@@ -9,8 +9,12 @@ services:
       # security group. ES-API keeps its own port (80) on the same host.
       - "${API_PORT:-443}:8080"
     env_file: .env           # logs bucket, state bucket, bootstrap admin, limits
+    # Hard cap so a big search can never take memory from ES-API on the same host:
+    # 2 workers x DUCKDB_MEMORY_MB (768) + the converter (256) + Python fit inside it.
+    mem_limit: 2g
     volumes:
-      # Parquet files already downloaded from S3 (they never change). Safe to delete any time.
+      # Parquet files already downloaded from S3 and the converted load balancer logs. Safe to
+      # delete any time (they are rebuilt from S3).
       - log-cache:/app/cache
     # On EC2 the instance IAM role provides AWS credentials; no keys needed here.
 

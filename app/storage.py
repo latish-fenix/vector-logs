@@ -133,7 +133,7 @@ class LocalStore:
             if if_match and (not exists or self._etag(path.read_bytes()) != if_match):
                 raise PreconditionFailed(key)
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")  # several dev workers
             tmp.write_bytes(raw)
             os.replace(tmp, path)
         return self._etag(raw)
