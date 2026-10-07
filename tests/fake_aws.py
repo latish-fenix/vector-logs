@@ -6,7 +6,7 @@ service below its desired count, a cluster without a load balancer and target gr
 belong to no ECS cluster."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 ACCT = "823002541310"
 REGION = "us-west-2"
@@ -148,6 +148,38 @@ class FakeEC2:
              "Tags": [{"Key": "Name", "Value": INSTANCES[i][1]}]} for i in InstanceIds if i in INSTANCES]}]}
 
 
+# CPU / memory level per cluster (%); fenix-batch-1 publishes nothing
+LEVEL = {"alpha-edds-1": 35.0, "alpha-edds-2": 92.0, "post-btp-01": 12.0, "post-eibp-01": 50.0, "alpha-oms-routing": 5.0}
+
+
+class FakeCloudWatch:
+    def __init__(self):
+        self.calls = 0
+
+    def get_metric_data(self, MetricDataQueries, StartTime, EndTime, ScanBy=None, NextToken=None):
+        assert len(MetricDataQueries) <= 500
+        self.calls += 1
+        out = []
+        for q in MetricDataQueries:
+            st = q["MetricStat"]
+            dims = {d["Name"]: d["Value"] for d in st["Metric"]["Dimensions"]}
+            level = LEVEL.get(dims["ClusterName"])
+            name = st["Metric"]["MetricName"]
+            stamps, values = [], []
+            if level is not None:
+                bump = {"CPUUtilization": 0, "MemoryUtilization": 10, "CPUReservation": 20, "MemoryReservation": 30}[name]
+                if "ServiceName" in dims:
+                    bump += 1
+                t = StartTime
+                while t < EndTime:
+                    stamps.append(t)
+                    values.append(min(100.0, level + bump))
+                    t += timedelta(seconds=st["Period"])
+            out.append({"Id": q["Id"], "Timestamps": stamps, "Values": values, "StatusCode": "Complete"})
+        return {"MetricDataResults": out}
+
+
 class FakeAws:
     def __init__(self):
         self.ecs, self.elbv2, self.ec2 = FakeECS(), FakeELB(), FakeEC2()
+        self.cloudwatch = FakeCloudWatch()

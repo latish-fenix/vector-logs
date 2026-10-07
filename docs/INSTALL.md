@@ -37,7 +37,9 @@ The server reads the logs with the EC2 instance role; no keys are stored anywher
    | `ListStatePrefix`, `ReadWriteState`, `DeleteLocksAndSavedSearchesOnly` | users and saved searches under `s3://fenix-es-config-api/vector-logs/` |
    | `SecretsManagerOwnPrefixOnly` | its own secrets `vector-logs/*` (session key, password hashes) |
    | `EcsAndLoadBalancerHealthReadOnly` | **read-only** List/Describe of ECS clusters, services, container instances, load balancers, target groups, target health and EC2 instances, for the ECS health page |
+   | `EcsMetricsReadOnly` | **read-only** `cloudwatch:GetMetricData`, for CPU and memory on the ECS health page |
    | `ListLoadBalancerLogs`, `ReadLoadBalancerLogs` | **read-only**: list and read the ALB access logs in `s3://fenix-vector-ecs-logs/loadbalancer-logs/` |
+   | `ReadWriteConvertedLoadBalancerLogs` | read and write the converted files in `s3://fenix-vector-ecs-logs/loadbalancer-parquet/` (nothing else) |
 
 3. If the logs bucket is encrypted with a customer-managed KMS key (S3 console → `fenix-ecr-logs` → *Properties* → *Default encryption*), also allow `kms:Decrypt` on that key. With the default *SSE-S3* nothing more is needed.
 4. If the instance has no internet access, it reaches S3 through a VPC endpoint. A *gateway* endpoint only serves buckets in the instance's own region; the check in Step 4 tells you if the logs bucket (us-west-2) or the state bucket can't be reached.
@@ -70,6 +72,7 @@ In `.env` check these lines (the defaults match our setup):
 | `WORKERS` × `DUCKDB_MEMORY_MB` | `2` × `768`: with the converter's 256 MB this fits the container's 2 GB cap (`docker-compose.yml`), leaving room for ES-API on the 4 GB instance |
 | `CACHE_MAX_MB` | `8192` (the disk has 26 GB free) |
 | `LB_LOGS_BUCKET` / `LB_LOGS_PREFIX` / `LB_LOGS_REGION` | `fenix-vector-ecs-logs` / `loadbalancer-logs/` / `us-west-2` (the defaults) |
+| `LB_PARQUET_PREFIX` / `LB_CACHE_MAX_MB` | `loadbalancer-parquet/` / `4096` (the defaults) |
 
 Nothing secret goes in `.env`.
 
@@ -132,7 +135,30 @@ For an install from before the page existed:
    OK    read 823002541310_elasticloadbalancing_us-west-2_app.elb-alpha-…log.gz (94,141 bytes)
    ```
 
-6. Open **Infrastructure → Load balancers** (counts and charts) or **Load balancer logs** (the original lines). Right after the start the page says it is converting; the days since logging began take a minute or two.
+6. Open **Infrastructure → Load balancer dashboard** (counts and charts) or **Load balancer logs** (the original lines). Right after the start the page says it is converting; the days since logging began take a minute or two.
+
+## Storing converted load balancer logs in S3 (October 2026)
+
+The converted files moved from the server's disk to `s3://fenix-vector-ecs-logs/loadbalancer-parquet/`; the disk keeps a 4 GB cache. To switch an existing install:
+
+1. **IAM**: replace the `vector-logs` inline policy with [`iam-policy.json`](iam-policy.json) (ACCOUNT_ID filled in). New: `ReadWriteConvertedLoadBalancerLogs`, and `ListLoadBalancerLogs` also lists `loadbalancer-parquet/`.
+2. **Lifecycle**: the bucket gets a second 30-day rule. This command replaces the bucket's lifecycle configuration with both rules (Git Bash, profile `fenix-prod`):
+
+   ```bash
+   cat > lifecycle.json <<'JSON'
+   {"Rules": [
+     {"ID": "loadbalancer-logs-30d", "Status": "Enabled", "Filter": {"Prefix": "loadbalancer-logs/"},
+      "Expiration": {"Days": 30}, "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}},
+     {"ID": "loadbalancer-parquet-31d", "Status": "Enabled", "Filter": {"Prefix": "loadbalancer-parquet/"},
+      "Expiration": {"Days": 31}, "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}}
+   ]}
+   JSON
+   aws s3api put-bucket-lifecycle-configuration --bucket fenix-vector-ecs-logs --lifecycle-configuration file://lifecycle.json
+   aws s3api get-bucket-lifecycle-configuration --bucket fenix-vector-ecs-logs --query 'Rules[].ID'
+   ```
+
+3. `git pull && docker compose up -d --build`, then `docker compose exec vector-logs python -m app.cli check`. It now also prints `OK    converted files: s3://fenix-vector-ecs-logs/loadbalancer-parquet/v3/ · … write and read work`.
+4. The server removes its old local copies and converts the logs again into S3 (the days since logging began; a few minutes per day of traffic). The pages show the progress.
 
 ## Day-to-day operations
 
@@ -154,6 +180,6 @@ Vector writes one file per server about every 5 minutes, in hourly folders. A se
 - Plain HTTP: passwords and log contents (tracking numbers, zip codes) cross the network unencrypted, as with ES-API today. When HTTPS comes, set `COOKIE_SECURE=true`.
 - One search covers at most 7 days (`MAX_SEARCH_HOURS`); it can start anywhere in the 30 days the bucket keeps.
 - An export holds at most 10,000 lines (`MAX_EXPORT_ROWS`).
-- The converted load balancer logs take about 400 MB a day for the two ALBs (about 3 GB for the 7 days kept ready). After an update that changes their format, the server deletes and converts them again by itself.
+- The converted load balancer logs are stored in `s3://fenix-vector-ecs-logs/loadbalancer-parquet/` (about 2 GB a day for all 18 ALBs, deleted after 30 days by a lifecycle rule); the server keeps at most `LB_CACHE_MAX_MB` (4 GB) of copies. After an update that changes their format, the server converts them again into a new `v<n>/` folder by itself.
 - Load balancer numbers run 5–10 minutes behind (AWS delivers a file every 5 minutes) and AWS delivers access logs on a best-effort basis, so they are for investigating, not billing. Percentiles are approximate (from latency bins).
 - Only Application Load Balancers: the NLB `elb-prod-sftp` writes a different log format.

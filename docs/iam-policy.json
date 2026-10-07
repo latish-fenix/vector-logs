@@ -84,6 +84,12 @@
       "Resource": "*"
     },
     {
+      "Sid": "EcsMetricsReadOnly",
+      "Effect": "Allow",
+      "Action": "cloudwatch:GetMetricData",
+      "Resource": "*"
+    },
+    {
       "Sid": "ListLoadBalancerLogs",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
@@ -92,7 +98,9 @@
         "StringLike": {
           "s3:prefix": [
             "loadbalancer-logs/",
-            "loadbalancer-logs/*"
+            "loadbalancer-logs/*",
+            "loadbalancer-parquet/",
+            "loadbalancer-parquet/*"
           ]
         }
       }
@@ -102,6 +110,15 @@
       "Effect": "Allow",
       "Action": "s3:GetObject",
       "Resource": "arn:aws:s3:::fenix-vector-ecs-logs/loadbalancer-logs/*"
+    },
+    {
+      "Sid": "ReadWriteConvertedLoadBalancerLogs",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::fenix-vector-ecs-logs/loadbalancer-parquet/*"
     }
   ]
 }

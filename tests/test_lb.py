@@ -1,8 +1,10 @@
 """Load balancer access logs: parsing, the converter, and the /api/v1/lb endpoints."""
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import json
+import shutil
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -14,8 +16,8 @@ from fastapi.testclient import TestClient
 
 from make_alb_logs import generate
 
-from app.lb_logs import (ALB_FIELDS, Converter, LbStore, LAT_EDGES, convert_sql, file_hour, parse_key,
-                         percentile, _sql_list)
+from app.lb_logs import (ALB_FIELDS, Converter, LbStore, LAT_EDGES, convert_sql, evict_cache, file_hour,
+                         parse_key, percentile, _sql_list)
 from app.main import create_app
 from conftest import ROOT_H, add_user, as_user, make_settings
 
@@ -103,8 +105,12 @@ def test_converter_merges_finished_hours(lb_env):
         assert store.hour_file(lb, hk).exists() and store.minute_file(lb, hk).exists()
         assert not store.raw_files(lb, hk)
     merged = set()
-    for f in (Path(settings.cache_dir) / "lb" / "hour").rglob("*.keys.json"):
+    for f in (Path(settings.cache_dir) / "lb" / "keys").rglob("*.json"):
         merged |= set(json.loads(f.read_text()))
+    # every merged hour is stored for good outside the server (S3; a folder in tests)
+    remote = Path(settings.lb_parquet_local_dir) / "v3"
+    for kind in ("hour", "minute", "paths", "keys"):
+        assert len(list((remote / kind).rglob("*.*"))) == len(list((Path(settings.cache_dir) / "lb" / "keys").rglob("*.json")))
     # an hour still within its settle time stays as 5-minute files
     assert merged <= finished and len(merged) >= len(finished) - 2 * 5 * 12
     status = json.loads(store.status_file.read_text())
@@ -144,7 +150,7 @@ def test_summary_counts_match(lb_env):
     assert by_tg["tg-demo-edds-1"]["requests"] == sum(1 for w in written if w.tg == "tg-demo-edds-1")
     assert by_tg["tg-demo-edds-1"]["cluster"] == "demo-edds-1"
     assert None in by_tg                         # redirects have no target group
-    assert d["source"] == "rollup" and t["p95"] and 0 < t["p95"] < 1
+    assert d["source"] == "minute" and t["p95"] and 0 < t["p95"] < 1
     top = by_tg["tg-demo-edds-1"]["topError"]
     assert top and top["pathGroup"].startswith("/fenixdelest/")
     # rows with 5xx sort first
@@ -158,7 +164,7 @@ def test_filters(lb_env):
     r = client.post("/api/v1/lb/_summary", json=body(lbs=["elb-demo-postpurchase"]), headers=ROOT_H).json()
     assert r["totals"]["requests"] == sum(1 for w in written if w.lb == "elb-demo-postpurchase")
     r = client.post("/api/v1/lb/_summary", json=body(path="storeinfo"), headers=ROOT_H).json()
-    assert r["source"] == "raw"
+    assert r["source"] == "rows"
     assert r["totals"]["requests"] == sum(1 for w in written if "storeinfo" in w.path)
     r = client.post("/api/v1/lb/_summary", json=body(targetGroups=["-"]), headers=ROOT_H).json()
     assert r["totals"]["requests"] == sum(1 for w in written if w.tg is None)
@@ -252,7 +258,7 @@ def test_prune_removes_hours_past_retention(lb_env):
     store = LbStore(Path(settings.cache_dir) / "lb")
     hk = START.strftime("%Y-%m-%dT%H")
     conv.now = lambda: NOW + timedelta(days=settings.lb_retention_days + 1)
-    conv._prune(conv.now(), conv.now() - timedelta(days=settings.lb_warm_days))
+    conv._prune(conv.now())
     assert not store.hour_file("elb-demo-prepurchase", hk).exists()
     assert not store.minute_file("elb-demo-prepurchase", hk).exists()
 
@@ -281,6 +287,9 @@ def test_s3_source_and_access_denied(tmp_path, logs_dir):
         r = client.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()
         assert r["totals"]["requests"] == len(written)
         assert not list((Path(settings.cache_dir) / "lb" / ".tmp").rglob("*.log.gz"))   # downloads removed
+        stored = [o["Key"] for o in s3.list_objects_v2(Bucket="fenix-vector-ecs-logs",
+                                                       Prefix="loadbalancer-parquet/v3/keys/").get("Contents", [])]
+        assert stored and all(k.endswith(".json") for k in stored)
 
         class Denied:
             def get_paginator(self, op):
@@ -320,6 +329,59 @@ def test_old_converted_files_are_rebuilt(lb_env):
     (root / "FORMAT").write_text("1")
     conv2 = Converter(settings)
     conv2.run_once()
-    assert (root / "FORMAT").read_text() == "2"
+    assert (root / "FORMAT").read_text() == "3"
+    # merged hours come back from S3; only the 5-minute files of unfinished hours are converted again
+    merged = sum(len(json.loads(f.read_text())) for f in (Path(settings.lb_parquet_local_dir) / "v3" / "keys").rglob("*.json"))
+    assert merged and conv2.converted_files == len({w.key for w in written}) - merged
     after = client.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()["totals"]["requests"]
     assert before == after == len(written)
+
+
+
+def test_a_new_server_refills_from_s3_and_fetches_only_what_it_reads(lb_env, tmp_path, logs_dir):
+    client, written, settings, _ = lb_env
+    before = client.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()
+    shutil.rmtree(Path(settings.cache_dir) / "lb")              # a new instance, or `docker compose down -v`
+    conv = Converter(settings)
+    conv.run_once()
+    store = LbStore(Path(settings.cache_dir) / "lb")
+    assert not list((store.root / "hour").rglob("*.parquet"))   # only the small index came back
+    after = client.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()
+    strip = lambda d: {k: v for k, v in d.items() if k != "avg"}                   # noqa: E731 (float sums)
+    assert strip(after["totals"]) == strip(before["totals"])
+    assert after["totals"]["avg"] == pytest.approx(before["totals"]["avg"])
+    assert [strip(g) for g in after["targetGroups"]] == [strip(g) for g in before["targetGroups"]]
+    page = client.post("/api/v1/lb/_requests", json=body(size=10, order="asc"), headers=ROOT_H).json()
+    assert page["total"] == len(written) and len(page["hits"]) == 10
+    assert page["hits"][0]["ts_ms"] == int(min(w.ts for w in written).timestamp() * 1000)
+    fetched = list((store.root / "hour").rglob("*.parquet"))
+    assert 0 < len(fetched) <= 2                                # just the oldest hour (per load balancer)
+
+
+def test_paths_level_filters_and_paging(lb_env):
+    client, written, _, _ = lb_env
+    pg = "/fenixdelest/api/v1/<store>/storeinfo"
+    want = sum(1 for w in written if w.path.endswith("/storeinfo"))
+    r = client.post("/api/v1/lb/_summary", json=body(pathGroup=pg, methods=["GET"]), headers=ROOT_H).json()
+    assert r["source"] == "paths" and r["totals"]["requests"] == want
+    seen = []
+    for page in range(0, want, 50):
+        res = client.post("/api/v1/lb/_requests", json=body(pathGroup=pg, methods=["GET"], offset=page, size=50),
+                          headers=ROOT_H).json()
+        assert res["total"] == want
+        seen += [h["trace_id"] for h in res["hits"]]
+    assert len(seen) == len(set(seen)) == want
+
+
+def test_cache_limits(lb_env):
+    client, written, settings, _ = lb_env
+    store = LbStore(Path(settings.cache_dir) / "lb")
+    assert list((store.root / "hour").rglob("*.parquet"))
+    assert evict_cache(store, 0, keep_seconds=0, force=True) > 0
+    assert not list((store.root / "hour").rglob("*.parquet")) and list((store.root / "minute").rglob("*.parquet"))
+    # a search that would need too many hours of single requests at once is refused, not attempted
+    small = TestClient(create_app(dataclasses.replace(settings, lb_max_fetch_files=1)))
+    r = small.post("/api/v1/lb/_requests", json=body(q="storeinfo"), headers=ROOT_H)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "TOO_MUCH_DATA"
+    # counts still work without any hour file on the server
+    assert small.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()["totals"]["requests"] == len(written)

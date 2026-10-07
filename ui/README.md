@@ -14,9 +14,9 @@ npm run build      # type-check and build into ../app/static/ui
 | `src/pages/Overview.tsx` | **Overview**: histogram, top values and a paged table for the same search; also holds the shared pieces (time picker, filter / columns / export / save dialogs) |
 | `src/components/Histogram.tsx` | Stacked bars by level (SVG), hover tooltip, click to zoom |
 | `src/pages/Saved.tsx` | Your saved searches |
-| `src/pages/Health.tsx` | **ECS health**: summary tiles, filters, cluster table with status, expandable target groups / services / instances, target groups not linked to a cluster |
+| `src/pages/Health.tsx` | **ECS health**: summary tiles, filters, cluster table with status, CPU / memory (trend lines; charts and per-service values when a cluster is opened; 3 h / 24 h), expandable target groups / services / instances, target groups not linked to a cluster |
 | `src/pages/LbLogs.tsx` | **Load balancer logs**: the original ALB log lines, full screen, load balancer / target group / status / search, infinite scroll, line details, export |
-| `src/pages/LoadBalancers.tsx` | **Load balancers**: time / load balancer / status / path filters, tiles, requests-over-time chart stacked by status (or errors only), target group table, paths, single requests with export |
+| `src/pages/LoadBalancers.tsx` | **Load balancer dashboard**: time / load balancer / status / path filters, tiles, requests-over-time chart stacked by status (or errors only), target group table, paths, single requests with export |
 | `src/pages/admin/Users.tsx`, `Clusters.tsx` | Admin pages |
 | `src/pages/Login.tsx`, `ChangePassword.tsx`, `components/ui.tsx`, `styles.css` | Shared with ES-API |
 | `src/api.ts`, `session.tsx`, `format.ts` | API client, session gate, number and time formatting |

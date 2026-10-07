@@ -5,18 +5,21 @@ AWS writes one gzip text file per load balancer node every 5 minutes:
     s3://<LB_LOGS_BUCKET>/<LB_LOGS_PREFIX>AWSLogs/<account>/elasticloadbalancing/<region>/yyyy/mm/dd/
         <account>_elasticloadbalancing_<region>_app.<lb-name>.<lb-id>_<end yyyymmddThhmmZ>_<node-ip>_<rand>.log.gz
 
-A background converter (one per container, chosen by a file lock) keeps the last LB_WARM_DAYS
-converted under CACHE_DIR/lb/:
+A background converter (one per container, chosen by a file lock) converts each file once and
+writes the result back to S3 (LB_PARQUET_BUCKET / LB_PARQUET_PREFIX, v<format>/):
 
-    raw/<lb>/<yyyy-mm-dd>/<HH>/<file>.parquet   one per 5-minute file, while its hour is recent
-    hour/<lb>/<yyyy-mm-dd>/<HH>.parquet         one per load balancer and hour, once the hour is over
-    hour/<lb>/<yyyy-mm-dd>/<HH>.keys.json       the S3 files merged into it
-    minute/<lb>/<yyyy-mm-dd>/<HH>.parquet       requests per minute, target group, domain and status
-    status.json                                 what the converter has listed and converted
-    wanted/<id>.json                            older ranges a search asked for (converted on demand)
+    hour/<lb>/<yyyy-mm-dd>/<HH>.parquet     every request of one load balancer and hour
+    minute/<lb>/<yyyy-mm-dd>/<HH>.parquet   requests per minute, target group, domain, status, latency bin
+    paths/<lb>/<yyyy-mm-dd>/<HH>.parquet    the same per method and grouped path (no domain)
+    keys/<lb>/<yyyy-mm-dd>/<HH>.json        the AWS log files merged into that hour (written last)
 
-The page's counts and chart read the per-minute files; percentiles, paths and single requests
-read the hour files. Only the slice a person asks for is scanned.
+CACHE_DIR/lb/ on the server holds the same layout as a cache: every minute and keys file (small),
+the hour and paths files that were used recently (LB_CACHE_MAX_MB, oldest removed first), the
+5-minute files of hours not finished yet (raw/), status.json and wanted/. Losing it loses nothing:
+it is refilled from S3.
+
+Counts, the chart, the target group table read the minute files; paths and the top failing path
+the paths files; single requests read only the hour files that hold the page.
 """
 from __future__ import annotations
 
@@ -46,7 +49,7 @@ from .settings import Settings
 log = logging.getLogger("vector_logs.lb")
 
 MINUTE = 60_000
-FORMAT_VERSION = "2"   # 2: the original line is kept (raw). A change rebuilds CACHE_DIR/lb from S3.
+FORMAT_VERSION = "3"   # 3: converted files in S3, paths roll-up. A change converts everything again.
 LB_NAME_RE = re.compile(r"^[A-Za-z0-9-]{1,32}$")
 FILE_RE = re.compile(
     r"^(?P<acct>\d{12})_elasticloadbalancing_(?P<region>[a-z0-9-]+)_app\.(?P<lb>[A-Za-z0-9-]{1,32})\."
@@ -72,6 +75,8 @@ REQUEST_COLUMNS = [
     "request_created", "target_list", "target_code_list", "raw"]
 ROLLUP_COLUMNS = ["minute_ms", "lb", "tg", "cluster", "domain", "elb_code", "tgt_code", "lat_bin", "n", "tgt_t_sum",
                   "tgt_t_n"]
+PATHS_COLUMNS = ["minute_ms", "lb", "tg", "cluster", "method", "path_group", "elb_code", "tgt_code", "lat_bin", "n",
+                 "tgt_t_sum", "tgt_t_n"]
 # Target response time bins (milliseconds) kept in the per-minute files, so percentiles over days
 # come from counts instead of millions of single values. Bin i holds LAT_EDGES[i] <= t < LAT_EDGES[i+1].
 LAT_EDGES = [0, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500,
@@ -156,12 +161,22 @@ def convert_sql(files_sql: str) -> str:
       FROM (SELECT b.*, {path.replace('url', 'b.url')} AS path FROM ({base}) b) p"""
 
 
-def rollup_sql(source_sql: str) -> str:
+def _rollup(source_sql: str, dims: list[str]) -> str:
     lat_bin = f"CASE WHEN tgt_t IS NOT NULL THEN (len(list_filter({_LAT_LIST}, e -> e <= tgt_t * 1000)) - 1)::TINYINT END"
-    return f"""SELECT (ts_ms // {MINUTE}) * {MINUTE} AS minute_ms, lb, tg, cluster, domain, elb_code, tgt_code,
+    return f"""SELECT (ts_ms // {MINUTE}) * {MINUTE} AS minute_ms, {', '.join(dims)},
                       {lat_bin} AS lat_bin, count(*)::BIGINT AS n, sum(tgt_t) AS tgt_t_sum,
                       count(tgt_t)::BIGINT AS tgt_t_n
                FROM {source_sql} GROUP BY ALL"""
+
+
+def rollup_sql(source_sql: str) -> str:
+    """Per minute, target group, domain, status and latency bin (ROLLUP_COLUMNS)."""
+    return _rollup(source_sql, ["lb", "tg", "cluster", "domain", "elb_code", "tgt_code"])
+
+
+def paths_rollup_sql(source_sql: str) -> str:
+    """Per minute, target group, method, grouped path, status and latency bin (PATHS_COLUMNS)."""
+    return _rollup(source_sql, ["lb", "tg", "cluster", "method", "path_group", "elb_code", "tgt_code"])
 
 
 def percentile(bins: dict[int, int], p: float) -> float | None:
@@ -211,11 +226,16 @@ def hours_in(start_ms: int, end_ms: int) -> list[str]:
 
 
 def _hour_of_path(path: str) -> str:
-    """Hour key of a converted file: .../hour/<lb>/<day>/<HH>.parquet or .../raw/<lb>/<day>/<HH>/<file>."""
+    """Hour key of a converted file: .../<hour|minute|paths>/<lb>/<day>/<HH>.parquet or .../raw/<lb>/<day>/<HH>/<file>."""
     parts = Path(path).parts
-    if parts[-4] == "hour":
+    if parts[-4] in ("hour", "minute", "paths"):
         return f"{parts[-2]}T{parts[-1][:2]}"
     return f"{parts[-3]}T{parts[-2]}"
+
+
+def _lb_of_path(path: str) -> str:
+    parts = Path(path).parts
+    return parts[-3] if parts[-4] in ("hour", "minute", "paths") else parts[-4]
 
 
 def _now() -> datetime:
@@ -348,22 +368,142 @@ def build_lb_source(settings: Settings):
     return LocalLbSource(settings) if settings.lb_logs_backend == "local" else S3LbSource(settings)
 
 
-# ------------------------------------------------------------------ files on disk
+# ------------------------------------------------------------------ converted files: S3 and the local cache
+def parquet_error(e: Exception, what: str) -> ApiError:
+    if isinstance(e, EndpointConnectionError):
+        return ApiError(502, "LB_PARQUET_UNREACHABLE", f"Can't reach S3 to {what}: {e}")
+    code = e.response["Error"]["Code"] if isinstance(e, ClientError) else type(e).__name__
+    if code in ("AccessDenied", "AccessDeniedException", "403", "InvalidAccessKeyId", "ExpiredToken"):
+        return ApiError(500, "LB_PARQUET_ACCESS_DENIED",
+                        f"The server may not {what} under the converted load balancer logs prefix: add the "
+                        "ListLoadBalancerLogs and ReadWriteConvertedLoadBalancerLogs statements from "
+                        "docs/iam-policy.json to the EC2 role", {"awsError": code})
+    return ApiError(502, "LB_PARQUET_UNAVAILABLE", f"S3 error while trying to {what}: {e}", {"awsError": code})
+
+
+class S3Converted:
+    """Where converted files live for good: s3://<LB_PARQUET_BUCKET>/<LB_PARQUET_PREFIX>v<format>/."""
+
+    def __init__(self, settings: Settings, client=None):
+        self.bucket = settings.lb_parquet_bucket or settings.lb_logs_bucket
+        self.prefix = f"{settings.lb_parquet_prefix}v{FORMAT_VERSION}/"
+        self.s3 = client or boto3.client(
+            "s3", region_name=settings.lb_logs_region, endpoint_url=settings.lb_logs_endpoint_url,
+            config=Config(retries={"max_attempts": 5, "mode": "standard"}, max_pool_connections=32))
+
+    def describe(self) -> str:
+        return f"s3://{self.bucket}/{self.prefix}"
+
+    def put(self, local: Path, rel: str) -> None:
+        try:
+            self.s3.upload_file(str(local), self.bucket, self.prefix + rel)
+        except (ClientError, EndpointConnectionError) as e:
+            raise parquet_error(e, f"write {rel}") from e
+
+    def get(self, rel: str, dest: Path) -> bool:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f".{dest.name}.{os.getpid()}.{threading.get_ident()}.dl")
+        try:
+            self.s3.download_file(self.bucket, self.prefix + rel, str(tmp))
+            os.replace(tmp, dest)
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise parquet_error(e, f"read {rel}") from e
+        except EndpointConnectionError as e:
+            raise parquet_error(e, f"read {rel}") from e
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def list(self, rel_prefix: str) -> list[str]:
+        out = []
+        try:
+            for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket,
+                                                                          Prefix=self.prefix + rel_prefix):
+                out += [o["Key"][len(self.prefix):] for o in page.get("Contents", [])]
+        except (ClientError, EndpointConnectionError) as e:
+            raise parquet_error(e, "list converted files") from e
+        return out
+
+
+class LocalConverted:
+    """A folder standing in for the S3 prefix (development and tests)."""
+
+    def __init__(self, settings: Settings):
+        self.root = Path(settings.lb_parquet_local_dir) / f"v{FORMAT_VERSION}"
+
+    def describe(self) -> str:
+        return str(self.root)
+
+    def put(self, local: Path, rel: str) -> None:
+        dest = self.root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f".{dest.name}.{os.getpid()}.up")
+        shutil.copyfile(local, tmp)
+        os.replace(tmp, dest)
+
+    def get(self, rel: str, dest: Path) -> bool:
+        src = self.root / rel
+        if not src.exists():
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f".{dest.name}.{os.getpid()}.{threading.get_ident()}.dl")
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+        return True
+
+    def list(self, rel_prefix: str) -> list[str]:
+        base = self.root / rel_prefix
+        if not base.exists():
+            return []
+        return sorted(p.relative_to(self.root).as_posix() for p in base.rglob("*") if p.is_file()
+                      and not p.name.startswith("."))
+
+
+def build_converted(settings: Settings):
+    backend = settings.lb_parquet_backend or settings.lb_logs_backend
+    return LocalConverted(settings) if backend == "local" else S3Converted(settings)
+
+
+def rel(kind: str, lb: str, hk: str) -> str:
+    """Path of a converted file, the same in S3 and in the cache."""
+    return f"{kind}/{lb}/{hk[:10]}/{hk[11:13]}{'.json' if kind == 'keys' else '.parquet'}"
+
+
+def parse_rel(r: str) -> tuple[str, str, str] | None:
+    """(kind, lb, hour key) of a converted file path."""
+    parts = r.split("/")
+    if len(parts) != 4 or not LB_NAME_RE.match(parts[1]):
+        return None
+    try:
+        hk = f"{parts[2]}T{parts[3][:2]}"
+        hour_of_key(hk)
+    except ValueError:
+        return None
+    return parts[0], parts[1], hk
+
+
 class LbStore:
+    """CACHE_DIR/lb: the local copies (same layout as S3) and the converter's working files."""
+
     def __init__(self, root: Path):
         self.root = root
 
-    def _hp(self, kind: str, lb: str, hk: str, suffix: str) -> Path:
-        return self.root / kind / lb / hk[:10] / f"{hk[11:13]}{suffix}"
+    def file(self, kind: str, lb: str, hk: str) -> Path:
+        return self.root / rel(kind, lb, hk)
 
     def hour_file(self, lb: str, hk: str) -> Path:
-        return self._hp("hour", lb, hk, ".parquet")
+        return self.file("hour", lb, hk)
 
     def keys_file(self, lb: str, hk: str) -> Path:
-        return self._hp("hour", lb, hk, ".keys.json")
+        return self.file("keys", lb, hk)
 
     def minute_file(self, lb: str, hk: str) -> Path:
-        return self._hp("minute", lb, hk, ".parquet")
+        return self.file("minute", lb, hk)
+
+    def paths_file(self, lb: str, hk: str) -> Path:
+        return self.file("paths", lb, hk)
 
     def raw_dir(self, lb: str, hk: str) -> Path:
         return self.root / "raw" / lb / hk[:10] / hk[11:13]
@@ -386,7 +526,7 @@ class LbStore:
 
     def lbs(self) -> list[str]:
         names = set()
-        for kind in ("hour", "raw"):
+        for kind in ("minute", "raw"):
             d = self.root / kind
             if d.is_dir():
                 names |= {p.name for p in d.iterdir() if p.is_dir() and LB_NAME_RE.match(p.name)}
@@ -407,6 +547,53 @@ class LbStore:
             return json.loads(self.status_file.read_text())
         except (OSError, ValueError):
             return {}
+
+
+_evict_lock = threading.Lock()
+_last_evict = [0.0]
+
+
+def evict_cache(store: LbStore, max_mb: int, keep_seconds: int = 600, force: bool = False) -> int:
+    """Keep the cached hour and paths files under max_mb (oldest use first; never ones used in the
+    last keep_seconds). Minute and keys files are small and always kept. Returns files removed."""
+    if not force and time.monotonic() - _last_evict[0] < 30:
+        return 0
+    if not _evict_lock.acquire(blocking=False):
+        return 0
+    try:
+        _last_evict[0] = time.monotonic()
+        entries, total = [], 0
+        for kind in ("hour", "paths"):
+            for dirpath, _, names in os.walk(store.root / kind):
+                for n in names:
+                    if n.startswith("."):
+                        continue
+                    p = os.path.join(dirpath, n)
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    entries.append((st.st_mtime, st.st_size, p))
+                    total += st.st_size
+        limit = max_mb * 1024 * 1024
+        if total <= limit:
+            return 0
+        entries.sort()
+        target, keep_after, removed = int(limit * 0.8), time.time() - keep_seconds, 0
+        for mtime, size, p in entries:
+            if total <= target or mtime > keep_after:
+                break
+            try:
+                os.unlink(p)
+                total -= size
+                removed += 1
+            except OSError:
+                pass
+        if removed:
+            log.info("load balancer cache: removed %d files, %d MB left", removed, total // (1024 * 1024))
+        return removed
+    finally:
+        _evict_lock.release()
 
 
 def _write_json(path: Path, data: Any) -> None:
@@ -443,16 +630,18 @@ class _FileLock:
 
 
 class Converter:
-    """Lists the bucket, converts new files and merges finished hours. Call run_once() (tests,
-    CLI) or start() for the background thread."""
+    """Lists the bucket, converts new files, merges finished hours and stores them in S3. Call
+    run_once() (tests, CLI) or start() for the background thread."""
 
     SETTLE = timedelta(minutes=15)       # an hour is merged this long after it ends
     PAST_LISTING_TTL = 3600              # days before yesterday are listed again at most hourly
     BASES_TTL = 3600
+    INDEX_TTL = 3600                     # how often the cache's index is compared with S3
 
-    def __init__(self, settings: Settings, source=None, now=_now):
+    def __init__(self, settings: Settings, source=None, now=_now, converted=None):
         self.settings = settings
         self.source = source or build_lb_source(settings)
+        self.converted = converted or build_converted(settings)
         self.store = LbStore(Path(settings.cache_dir) / "lb")
         self.now = now
         self._listings: dict[tuple[str, str], tuple[float, list[str]]] = {}
@@ -460,9 +649,11 @@ class Converter:
         self._done: dict[tuple[str, str], set[str]] = {}
         self._known: dict[tuple[str, str], set[str]] = {}
         self._last_cycle = 0.0
+        self._last_index = 0.0
         self._last_error: dict | None = None
         self._cycle_ms = 0
-        self._pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="lb-fetch")
+        self.converted_files = 0         # 5-minute AWS files converted by this process (tests, logs)
+        self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="lb-fetch")
         self._stop = threading.Event()
         self._lock = _FileLock(self.store.root / ".converter.lock")
         self.thread: threading.Thread | None = None
@@ -496,7 +687,7 @@ class Converter:
 
     # -- one cycle
     def _check_format(self) -> None:
-        """Converted files from an older version of this code are removed and converted again."""
+        """Local copies from an older version of this code are removed (S3 has a folder per version)."""
         mark = self.store.root / "FORMAT"
         try:
             current = mark.read_text().strip()
@@ -504,22 +695,54 @@ class Converter:
             current = None
         if current == FORMAT_VERSION:
             return
-        for kind in ("hour", "minute", "raw"):
+        for kind in ("hour", "minute", "paths", "keys", "raw"):
             d = self.store.root / kind
             if d.exists():
                 self.store.trash_dir.mkdir(parents=True, exist_ok=True)
                 os.replace(d, self.store.trash_dir / f"{kind}-v{current}-{time.time_ns()}")
         self._done.clear()
+        self._last_index = 0.0
         mark.parent.mkdir(parents=True, exist_ok=True)
         mark.write_text(FORMAT_VERSION)
         if current is not None:
-            log.warning("load balancer logs: converted files are from format %s; converting again", current)
+            log.warning("load balancer logs: local files are from format %s; refilling from S3", current)
+
+    def sync_index(self) -> int:
+        """Copy every keys and minute file S3 has (within the retention) that the cache lacks, so a
+        new or wiped server knows what is converted without converting it again."""
+        oldest = self.now() - timedelta(days=self.settings.lb_retention_days)
+        have = set()
+        missing = []
+        for r in self.converted.list("keys/"):
+            parsed = parse_rel(r)
+            if not parsed:
+                continue
+            _, lb, hk = parsed
+            if hour_of_key(hk) + timedelta(hours=1) < oldest:
+                continue
+            have.add((lb, hk))
+            if not self.store.keys_file(lb, hk).exists() or not self.store.minute_file(lb, hk).exists():
+                missing.append((lb, hk))
+
+        def pull(item):
+            lb, hk = item
+            if self.converted.get(rel("minute", lb, hk), self.store.minute_file(lb, hk)):
+                self.converted.get(rel("keys", lb, hk), self.store.keys_file(lb, hk))
+                self._done.pop((lb, hk), None)
+        list(self._pool.map(pull, missing))
+        self._last_index = time.monotonic()
+        if missing:
+            log.info("load balancer logs: copied the index of %d converted hours from %s", len(missing),
+                     self.converted.describe())
+        return len(missing)
 
     def run_once(self) -> None:
         t0 = time.monotonic()
         self._last_cycle = t0
         try:
             self._check_format()
+            if not self._last_index or time.monotonic() - self._last_index > self.INDEX_TTL:
+                self.sync_index()
             self._empty_trash()
             now = self.now()
             warm_from = now - timedelta(days=self.settings.lb_warm_days)
@@ -537,7 +760,7 @@ class Converter:
                 if self._stop.is_set():
                     break
             self.process_wanted()
-            self._prune(now, warm_from)
+            self._prune(now)
             self._last_error = None
         except ApiError as e:
             self._last_error = {"code": e.code, "message": e.message, "at": _iso()}
@@ -587,9 +810,9 @@ class Converter:
         done = self.done_keys(lb, hk)
         missing = sorted(keys - done)
         finished = now >= hour_of_key(hk) + timedelta(hours=1) + self.SETTLE
-        hour_exists = self.store.hour_file(lb, hk).exists()
+        merged = self.store.keys_file(lb, hk).exists()
         raw = self.store.raw_files(lb, hk)
-        if finished and not hour_exists and not raw and missing:
+        if finished and not merged and not raw and missing:
             self._convert_hour(lb, hk, missing)                 # whole hour in one go
         elif missing:
             for key in missing:                                 # recent data: file by file
@@ -626,6 +849,7 @@ class Converter:
                         "(FORMAT parquet, COMPRESSION zstd)")
             os.replace(part, dest)
             self.done_keys(lb, hk).add(key)
+            self.converted_files += 1
         finally:
             con.close()
             self.source.cleanup(local)
@@ -636,6 +860,7 @@ class Converter:
         locals_ = self._fetch_all(keys, tmp)
         try:
             self._write_hour(lb, hk, convert_sql(_sql_list(locals_)), set(keys))
+            self.converted_files += len(keys)
         finally:
             for p in locals_:
                 self.source.cleanup(p)
@@ -646,6 +871,8 @@ class Converter:
         if not raw:
             return
         hour = self.store.hour_file(lb, hk)
+        if self.store.keys_file(lb, hk).exists() and not hour.exists():
+            self.converted.get(rel("hour", lb, hk), hour)       # merged before; the cache let it go
         parts = raw + ([hour] if hour.exists() else [])
         keys = self.store.merged_keys(lb, hk) | {k for k in self._known.get((lb, hk), set())
                                                   if parse_key(k).parquet_name in {p.name for p in raw}}
@@ -653,30 +880,35 @@ class Converter:
                                  "union_by_name = true)", keys, retire=self.store.raw_dir(lb, hk))
 
     def _write_hour(self, lb: str, hk: str, select_sql: str, keys: set[str], retire: Path | None = None) -> None:
-        hour, minute, keys_file = (self.store.hour_file(lb, hk), self.store.minute_file(lb, hk),
-                                   self.store.keys_file(lb, hk))
-        hour.parent.mkdir(parents=True, exist_ok=True)
-        minute.parent.mkdir(parents=True, exist_ok=True)
+        """Hour, minute and paths files: written here, stored in S3 (keys last: that marks the hour
+        done), then put in the cache. Nothing changes locally if S3 refuses."""
         tag = f"{os.getpid()}.{threading.get_ident()}"
-        hour_part = hour.with_name(f".{hour.name}.{tag}.part")
-        minute_part = minute.with_name(f".{minute.name}.{tag}.part")
+        finals = {k: self.store.file(k, lb, hk) for k in ("hour", "minute", "paths", "keys")}
+        for p in finals.values():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        parts = {k: p.with_name(f".{p.name}.{tag}.part") for k, p in finals.items()}
         con = self._db()
         try:
-            con.execute(f"COPY ({select_sql}) TO '{hour_part.as_posix()}' (FORMAT parquet, COMPRESSION zstd, "
+            con.execute(f"COPY ({select_sql}) TO '{parts['hour'].as_posix()}' (FORMAT parquet, COMPRESSION zstd, "
                         "ROW_GROUP_SIZE 100000)")
-            con.execute(f"COPY ({rollup_sql(f'read_parquet({_sql_list([hour_part])})')}) "
-                        f"TO '{minute_part.as_posix()}' (FORMAT parquet, COMPRESSION zstd)")
-            _write_json(keys_file, sorted(keys))
+            src = f"read_parquet({_sql_list([parts['hour']])})"
+            con.execute(f"COPY ({rollup_sql(src)}) TO '{parts['minute'].as_posix()}' (FORMAT parquet, COMPRESSION zstd)")
+            con.execute(f"COPY ({paths_rollup_sql(src)}) TO '{parts['paths'].as_posix()}' "
+                        "(FORMAT parquet, COMPRESSION zstd)")
+            parts["keys"].write_text(json.dumps(sorted(keys), separators=(",", ":")))
+            for kind in ("hour", "paths", "minute", "keys"):
+                self.converted.put(parts[kind], rel(kind, lb, hk))
             if retire is not None and retire.exists():   # a search reads either these or the hour file
                 self.store.trash_dir.mkdir(parents=True, exist_ok=True)
                 os.replace(retire, self.store.trash_dir / f"{lb}-{hk}-{time.time_ns()}")
-            os.replace(minute_part, minute)
-            os.replace(hour_part, hour)
+            for kind in ("minute", "paths", "hour", "keys"):
+                os.replace(parts[kind], finals[kind])
             self._done[(lb, hk)] = set(keys)
         finally:
             con.close()
-            hour_part.unlink(missing_ok=True)
-            minute_part.unlink(missing_ok=True)
+            for p in parts.values():
+                p.unlink(missing_ok=True)
+        evict_cache(self.store, self.settings.lb_cache_max_mb)
 
     # -- older ranges asked for by searches
     def process_wanted(self) -> bool:
@@ -726,43 +958,34 @@ class Converter:
                 except OSError:
                     pass
 
-    def _prune(self, now: datetime, warm_from: datetime) -> None:
-        """Remove hours past the retention, and on-demand hours nobody read for a day."""
+    def _prune(self, now: datetime) -> None:
+        """Local copies past the retention go (S3 removes its own with a lifecycle rule); the cache of
+        hour and paths files is kept under LB_CACHE_MAX_MB."""
         keep_until = now - timedelta(days=self.settings.lb_retention_days)
-        for kind in ("hour", "minute", "raw"):
+        for kind in ("hour", "minute", "paths", "keys", "raw"):
             root = self.store.root / kind
             if not root.is_dir():
                 continue
             for lb_dir in root.iterdir():
                 for day_dir in (lb_dir.iterdir() if lb_dir.is_dir() else []):
-                    for p in list(day_dir.iterdir()):
-                        try:
-                            hk = f"{day_dir.name}T{p.name[:2]}"
-                            hour = hour_of_key(hk)
-                        except ValueError:
-                            continue
-                        try:
-                            age = time.time() - p.stat().st_mtime
-                        except OSError:
-                            continue          # removed with its hour a moment ago
-                        old = hour + timedelta(hours=1) < keep_until
-                        cold = hour + timedelta(hours=1) < warm_from and age > 86400
-                        if old or (cold and kind == "hour" and p.suffix == ".parquet"):
-                            for q in (self.store.hour_file(lb_dir.name, hk), self.store.minute_file(lb_dir.name, hk),
-                                      self.store.keys_file(lb_dir.name, hk)):
-                                q.unlink(missing_ok=True)
-                            shutil.rmtree(self.store.raw_dir(lb_dir.name, hk), ignore_errors=True)
-                            self._done.pop((lb_dir.name, hk), None)
-                    if day_dir.is_dir() and not any(day_dir.iterdir()):
-                        day_dir.rmdir()
+                    try:
+                        old = datetime.strptime(day_dir.name, "%Y-%m-%d").replace(tzinfo=timezone.utc) \
+                            + timedelta(days=1) < keep_until
+                    except ValueError:
+                        continue
+                    if old:
+                        shutil.rmtree(day_dir, ignore_errors=True)
         for k in [k for k in self._known if hour_of_key(k[1]) + timedelta(hours=1) < keep_until]:
             self._known.pop(k, None)
+            self._done.pop(k, None)
+        evict_cache(self.store, self.settings.lb_cache_max_mb, force=True)
 
     def write_status(self) -> None:
         hours = {f"{lb}|{hk}": [len(keys), len(keys & self.done_keys(lb, hk))]
                  for (lb, hk), keys in self._known.items()}
         _write_json(self.store.status_file, {
             "updatedAt": _iso(), "pid": os.getpid(), "source": self.source.describe(),
+            "converted": self.converted.describe(),
             "warmDays": self.settings.lb_warm_days, "pollSeconds": self.settings.lb_poll_seconds,
             "cycleMs": self._cycle_ms, "lastError": self._last_error,
             "lbs": sorted({lb for lb, _ in self._known}), "hours": hours,
@@ -791,9 +1014,14 @@ class LbQuery:
     min_target_seconds: float | None = None
     q: str = ""
 
-    def raw_only(self) -> bool:
-        return bool(self.methods or self.path or self.path_group or self.client or self.target
-                    or self.min_target_seconds is not None or self.q)
+    def level(self) -> str:
+        """The smallest files that can answer: "minute" (counts per minute), "paths" (also per method
+        and grouped path) or "rows" (single requests)."""
+        if self.path or self.client or self.target or self.min_target_seconds is not None or self.q:
+            return "rows"
+        if self.methods or self.path_group:
+            return "rows" if self.domains else "paths"
+        return "minute"
 
 
 @dataclass
@@ -829,7 +1057,9 @@ class _Where:
         return " AND ".join(f"({s})" for s in self.sql) or "TRUE"
 
 
-def build_where(q: LbQuery, start_ms: int, end_ms: int, access: Access | None, rollup: bool) -> _Where:
+def build_where(q: LbQuery, start_ms: int, end_ms: int, access: Access | None, source: str) -> _Where:
+    """WHERE for "minute" / "paths" roll-ups (filters they hold) or "rows" (every filter)."""
+    rollup = source != "rows"
     w = _Where("minute_ms" if rollup else "ts_ms")
     if rollup:
         w.add("minute_ms BETWEEN ? AND ?", (start_ms // MINUTE) * MINUTE, end_ms)
@@ -846,7 +1076,7 @@ def build_where(q: LbQuery, start_ms: int, end_ms: int, access: Access | None, r
         named = [t for t in q.target_groups if t != "-"]
         cond = "list_contains(?::VARCHAR[], tg)" + (" OR tg IS NULL" if "-" in q.target_groups else "")
         w.add(cond, named)
-    if q.domains:
+    if q.domains and source != "paths":
         w.add("list_contains(?::VARCHAR[], domain)", q.domains)
     if q.status_classes:
         parts = []
@@ -865,15 +1095,17 @@ def build_where(q: LbQuery, start_ms: int, end_ms: int, access: Access | None, r
         w.add("tgt_code IS NOT NULL")
     elif q.source == "lb":
         w.add("tgt_code IS NULL")
-    if rollup:
+    if source == "minute":
         return w
     if q.methods:
         w.add("list_contains(?::VARCHAR[], method)", [m.upper() for m in q.methods])
+    if q.path_group:
+        w.add("path_group = ?", q.path_group)
+    if source == "paths":
+        return w
     if q.path:
         pat = _like(q.path)
         w.add("path ILIKE ? ESCAPE '\\'", pat if "*" in q.path else f"%{pat}%")
-    if q.path_group:
-        w.add("path_group = ?", q.path_group)
     if q.client:
         w.add("client_ip LIKE ? ESCAPE '\\'", _like(q.client) + "%")
     if q.target:
@@ -891,24 +1123,28 @@ def build_where(q: LbQuery, start_ms: int, end_ms: int, access: Access | None, r
 
 @dataclass
 class Sources:
-    hours: list[Path]          # merged hour files
-    raws: list[Path]           # 5-minute files not yet merged (or late)
-    minutes: list[Path]        # per-minute files for the merged hours
-    unrolled: list[Path]       # hour files without a minute file (rolled up on the fly)
-
-    @property
-    def requests(self) -> list[Path]:
-        return self.hours + self.raws
+    hours: list[tuple[str, str]]   # (lb, hour) converted and in S3; minute files are always local
+    minutes: list[Path]
+    raws: list[Path]               # 5-minute files of hours not merged yet (or late), local
 
     @property
     def count(self) -> int:
         return len(self.hours) + len(self.raws)
 
 
+_EMPTY_ROLLUP = ("SELECT NULL::BIGINT AS minute_ms, NULL::VARCHAR AS lb, NULL::VARCHAR AS tg, NULL::VARCHAR AS cluster, "
+                 "NULL::VARCHAR AS domain, NULL::SMALLINT AS elb_code, NULL::SMALLINT AS tgt_code, NULL::TINYINT AS lat_bin, "
+                 "0::BIGINT AS n, 0::DOUBLE AS tgt_t_sum, 0::BIGINT AS tgt_t_n WHERE FALSE")
+
+
 class LbService:
-    def __init__(self, settings: Settings):
+    KEEP_RECENT_SECONDS = 600          # cached files used this recently are never removed
+
+    def __init__(self, settings: Settings, converted=None):
         self.settings = settings
         self.store = LbStore(Path(settings.cache_dir) / "lb")
+        self.converted = converted or build_converted(settings)
+        self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="lb-get")
 
     # -- ranges and files
     def resolve_range(self, start, end) -> tuple[int, int]:
@@ -924,23 +1160,38 @@ class LbService:
 
     def sources(self, start_ms: int, end_ms: int, lbs: list[str]) -> Sources:
         names = [n for n in (lbs or self.store.lbs()) if LB_NAME_RE.match(n)]
-        hks = hours_in(start_ms - 10 * MINUTE, end_ms)
-        src = Sources([], [], [], [])
-        warm_from = time.time() - self.settings.lb_warm_days * 86400
+        src = Sources([], [], [])
         for lb in names:
-            for hk in hks:
-                hour, minute = self.store.hour_file(lb, hk), self.store.minute_file(lb, hk)
-                if hour.exists():
-                    src.hours.append(hour)
-                    (src.minutes if minute.exists() else src.unrolled).append(
-                        minute if minute.exists() else hour)
-                    if hour_of_key(hk).timestamp() + 3600 < warm_from:
-                        try:  # read on demand: keep it a while (see Converter._prune)
-                            os.utime(hour)
-                        except OSError:
-                            pass
+            for hk in hours_in(start_ms - 10 * MINUTE, end_ms):
+                minute = self.store.minute_file(lb, hk)
+                if minute.exists():
+                    src.hours.append((lb, hk))
+                    src.minutes.append(minute)
                 src.raws += self.store.raw_files(lb, hk)
         return src
+
+    def local(self, kind: str, items: list[tuple[str, str]]) -> list[Path]:
+        """Cached copies of these hour or paths files, fetched from S3 when missing."""
+        paths = {item: self.store.file(kind, *item) for item in items}
+        need = [item for item, p in paths.items() if not p.exists()]
+        if kind == "hour" and len(need) > self.settings.lb_max_fetch_files:
+            raise bad_request("TOO_MUCH_DATA",
+                              f"This needs {len(need):,} hours of single requests that are not on the server yet "
+                              f"(at most {self.settings.lb_max_fetch_files:,} at a time). Pick a load balancer or "
+                              "target group, or a shorter range.",
+                              {"hours": len(need), "max": self.settings.lb_max_fetch_files})
+        list(self._pool.map(lambda item: self.converted.get(rel(kind, *item), paths[item]), need))
+        now = time.time()
+        out = []
+        for p in paths.values():
+            try:
+                os.utime(p, (now, now))      # recently used: the cache keeps it
+                out.append(p)
+            except OSError:
+                pass                         # not in S3 (yet): nothing to read
+        if need:
+            evict_cache(self.store, self.settings.lb_cache_max_mb, self.KEEP_RECENT_SECONDS)
+        return out
 
     def pending(self, start_ms: int, end_ms: int, lbs: list[str]) -> dict:
         """Files AWS has delivered for this range that are not converted yet."""
@@ -996,11 +1247,11 @@ class LbService:
         return con
 
     @staticmethod
-    def _requests_sql(paths: list[Path]) -> str:
-        return f"read_parquet({_sql_list(paths)}, union_by_name = true)"
+    def _rows_sql(paths: list[Path], filename: bool = False) -> str:
+        return f"read_parquet({_sql_list(paths)}, union_by_name = true{', filename = true' if filename else ''})"
 
     def _run(self, fn):
-        """DuckDB errors as API errors; one retry if a file was merged away mid-query."""
+        """DuckDB errors as API errors; one retry if a file was merged or evicted mid-query."""
         for attempt in (1, 2):
             try:
                 return fn()
@@ -1016,28 +1267,55 @@ class LbService:
                 raise ApiError(500, "LB_QUERY_FAILED", f"The query failed: {msg}") from e
 
     def _rollup_table(self, con, q: LbQuery, src: Sources, s: int, e: int, access: Access | None) -> str:
-        """Creates temp table m (per-minute counts) for the query; returns 'rollup' or 'raw'."""
-        cols = ", ".join(ROLLUP_COLUMNS)
-        if not q.raw_only():
-            wm = build_where(q, s, e, access, rollup=True)
-            wr = build_where(q, s, e, access, rollup=False)
-            parts, params = [], []
-            if src.minutes:
-                parts.append(f"SELECT {cols} FROM read_parquet({_sql_list(src.minutes)}) WHERE {wm.text()}")
-                params += wm.params
-            fly = src.raws + src.unrolled
-            if fly:
-                parts.append(rollup_sql(f"(SELECT * FROM {self._requests_sql(fly)} WHERE {wr.text()})"))
+        """Temp table m (ROLLUP_COLUMNS) for the query, from the smallest files that hold its filters."""
+        level = q.level()
+        wr = build_where(q, s, e, access, "rows")
+        parts, params = [], []
+        if level == "minute" and src.minutes:
+            w = build_where(q, s, e, access, "minute")
+            parts.append(f"SELECT {', '.join(ROLLUP_COLUMNS)} FROM read_parquet({_sql_list(src.minutes)}) "
+                         f"WHERE {w.text()}")
+            params += w.params
+        elif level == "paths" and src.hours:
+            files = self.local("paths", src.hours)
+            if files:
+                w = build_where(q, s, e, access, "paths")
+                cols = ", ".join("NULL::VARCHAR AS domain" if c == "domain" else c for c in ROLLUP_COLUMNS)
+                parts.append(f"SELECT {cols} FROM read_parquet({_sql_list(files)}) WHERE {w.text()}")
+                params += w.params
+        elif level == "rows" and src.hours:
+            files = self.local("hour", src.hours)
+            if files:
+                parts.append(rollup_sql(f"(SELECT * FROM {self._rows_sql(files)} WHERE {wr.text()})"))
                 params += wr.params
-            sql = " UNION ALL ".join(parts) if parts else f"SELECT {cols} FROM (SELECT NULL::BIGINT AS minute_ms, " \
-                "NULL AS lb, NULL AS tg, NULL AS cluster, NULL AS domain, NULL::SMALLINT AS elb_code, " \
-                "NULL::SMALLINT AS tgt_code, NULL::TINYINT AS lat_bin, 0::BIGINT AS n, 0::DOUBLE AS tgt_t_sum, 0::BIGINT AS tgt_t_n) WHERE FALSE"
-            con.execute(f"CREATE TEMP TABLE m AS {sql}", params)
-            return "rollup"
-        w = build_where(q, s, e, access, rollup=False)
-        con.execute(f"CREATE TEMP TABLE m AS "
-                    f"{rollup_sql(f'(SELECT * FROM {self._requests_sql(src.requests)} WHERE {w.text()})')}", w.params)
-        return "raw"
+        if src.raws:
+            parts.append(rollup_sql(f"(SELECT * FROM {self._rows_sql(src.raws)} WHERE {wr.text()})"))
+            params += wr.params
+        con.execute(f"CREATE TEMP TABLE m AS {' UNION ALL '.join(parts) if parts else _EMPTY_ROLLUP}", params)
+        return level
+
+    def _paths_table(self, con, q: LbQuery, src: Sources, s: int, e: int, access: Access | None) -> None:
+        """Temp table pt (PATHS_COLUMNS) for the query."""
+        wr = build_where(q, s, e, access, "rows")
+        parts, params = [], []
+        if q.level() == "rows" or q.domains:
+            files = self.local("hour", src.hours) if src.hours else []
+            if files:
+                parts.append(paths_rollup_sql(f"(SELECT * FROM {self._rows_sql(files)} WHERE {wr.text()})"))
+                params += wr.params
+        elif src.hours:
+            files = self.local("paths", src.hours)
+            if files:
+                w = build_where(q, s, e, access, "paths")
+                parts.append(f"SELECT {', '.join(PATHS_COLUMNS)} FROM read_parquet({_sql_list(files)}) WHERE {w.text()}")
+                params += w.params
+        if src.raws:
+            parts.append(paths_rollup_sql(f"(SELECT * FROM {self._rows_sql(src.raws)} WHERE {wr.text()})"))
+            params += wr.params
+        empty = ("SELECT " + ", ".join(f"NULL::{t} AS {c}" for c, t in zip(
+            PATHS_COLUMNS, ["BIGINT", "VARCHAR", "VARCHAR", "VARCHAR", "VARCHAR", "VARCHAR", "SMALLINT", "SMALLINT",
+                            "TINYINT", "BIGINT", "DOUBLE", "BIGINT"])) + " WHERE FALSE")
+        con.execute(f"CREATE TEMP TABLE pt AS {' UNION ALL '.join(parts) if parts else empty}", params)
 
     # -- the page
     def summary(self, q: LbQuery, access: Access | None) -> dict:
@@ -1069,7 +1347,7 @@ class LbService:
                            for r in con.execute(f"SELECT (minute_ms // ?) * ? AS t, {cls}, {other} FROM m "
                                                 "WHERE minute_ms IS NOT NULL GROUP BY 1 ORDER BY 1",
                                                 [step, step]).fetchall()]
-                tgs = con.execute(f"""SELECT tg, any_value(cluster), list(DISTINCT lb ORDER BY lb), sum(n),
+                tgs = con.execute("""SELECT tg, any_value(cluster), list(DISTINCT lb ORDER BY lb), sum(n),
                         coalesce(sum(n) FILTER (WHERE elb_code BETWEEN 400 AND 499), 0),
                         coalesce(sum(n) FILTER (WHERE elb_code >= 500 AND tgt_code IS NOT NULL), 0),
                         coalesce(sum(n) FILTER (WHERE elb_code >= 500 AND tgt_code IS NULL), 0),
@@ -1078,7 +1356,6 @@ class LbService:
                 rows = {r[0]: {"tg": r[0], "cluster": r[1], "lbs": r[2], "requests": r[3], "s4xx": r[4],
                                "s5xxApp": r[5], "s5xxLb": r[6], "s5xx": r[5] + r[6], "avg": r[7], "p95": None,
                                "topError": None} for r in tgs}
-                # percentiles from the latency bins
                 overall: dict[int, int] = {}
                 per_tg: dict[Any, dict[int, int]] = {}
                 for tg, b, n in con.execute("SELECT tg, lat_bin, sum(n) FROM m WHERE lat_bin IS NOT NULL "
@@ -1090,16 +1367,18 @@ class LbService:
                 for tg, bins in per_tg.items():
                     if tg in rows:
                         rows[tg]["p95"] = percentile(bins, 0.95)
-                # the top failing path needs single requests (only the failed ones are read)
-                w = build_where(q, s, e, access, rollup=False)
-                reqs = f"(SELECT * FROM {self._requests_sql(src.requests)} WHERE {w.text()})"
-                for tg, method, pg, code, n in con.execute(
-                        f"SELECT tg, method, path_group, elb_code, n FROM (SELECT tg, method, path_group, "
-                        f"mode(elb_code) AS elb_code, count(*) AS n, row_number() OVER (PARTITION BY tg ORDER BY "
-                        f"count(*) DESC, path_group) AS rn FROM {reqs} WHERE elb_code >= 400 GROUP BY tg, method, "
-                        f"path_group) WHERE rn = 1", w.params).fetchall():
-                    if tg in rows:
-                        rows[tg]["topError"] = {"method": method, "pathGroup": pg, "code": code, "count": n}
+                # the top failing path per target group, from the paths roll-up
+                if not (q.domains and q.level() == "minute"):
+                    self._paths_table(con, q, src, s, e, access)
+                    for tg, method, pg, code, n in con.execute("""
+                            SELECT tg, method, path_group, code, total FROM (
+                              SELECT tg, method, path_group, arg_max(elb_code, cn) AS code, sum(cn) AS total,
+                                     row_number() OVER (PARTITION BY tg ORDER BY sum(cn) DESC, path_group) AS rn
+                              FROM (SELECT tg, method, path_group, elb_code, sum(n) AS cn FROM pt
+                                    WHERE elb_code >= 400 GROUP BY ALL)
+                              GROUP BY tg, method, path_group) WHERE rn = 1""").fetchall():
+                        if tg in rows:
+                            rows[tg]["topError"] = {"method": method, "pathGroup": pg, "code": code, "count": n}
                 out["totals"] = totals
                 out["buckets"] = buckets
                 out["targetGroups"] = sorted(rows.values(), key=lambda r: (-(r["s5xx"]), -(r["s4xx"]),
@@ -1118,69 +1397,119 @@ class LbService:
             return {"items": [], "groups": 0, "tookMs": 0}
         order = {"errors": "s5xx DESC, s4xx DESC, requests DESC", "requests": "requests DESC",
                  "slow": "p95 DESC NULLS LAST, requests DESC"}.get(sort, "requests DESC")
-        w = build_where(q, s, e, access, rollup=False)
-        cls = ", ".join(f"count(*) FILTER (WHERE elb_code BETWEEN {c[0]}00 AND {c[0]}99) AS \"{c}\"" for c in CLASSES)
+        cls = ", ".join(f"coalesce(sum(n) FILTER (WHERE elb_code BETWEEN {c[0]}00 AND {c[0]}99), 0) AS \"{c}\""
+                        for c in CLASSES)
 
         def go():
             con = self._db()
             try:
+                self._paths_table(con, q, src, s, e, access)
+                # p95 per path from its latency bins, interpolated like the totals
+                con.execute(f"""CREATE TEMP TABLE pb AS SELECT method, path_group, lat_bin, sum(n) AS n FROM pt
+                                WHERE lat_bin IS NOT NULL GROUP BY ALL""")
+                bins: dict[tuple, dict[int, int]] = {}
+                for m, pg, b, n in con.execute("SELECT * FROM pb").fetchall():
+                    bins.setdefault((m, pg), {})[b] = n
+                con.execute("CREATE TEMP TABLE p95 (method VARCHAR, path_group VARCHAR, p95 DOUBLE)")
+                if bins:
+                    con.executemany("INSERT INTO p95 VALUES (?, ?, ?)",
+                                    [[m, pg, percentile(b, 0.95)] for (m, pg), b in bins.items()])
                 cur = con.execute(f"""
-                    SELECT method, path_group, any_value(path) AS example, count(*) AS requests, {cls},
-                           count(*) FILTER (WHERE elb_code >= 500) AS s5xx, count(*) FILTER (WHERE elb_code BETWEEN 400 AND 499) AS s4xx,
-                           approx_quantile(tgt_t, 0.95) AS p95, avg(tgt_t) AS avg, mode(elb_code) AS top_code,
-                           list(DISTINCT tg ORDER BY tg)[1:3] AS tgs, count(*) OVER () AS groups
-                    FROM {self._requests_sql(src.requests)} WHERE {w.text()}
-                    GROUP BY method, path_group ORDER BY {order}, path_group LIMIT ?""", [*w.params, int(limit)])
+                    SELECT g.*, p.p95 FROM (
+                      SELECT method, path_group, sum(n) AS requests, {cls},
+                             coalesce(sum(n) FILTER (WHERE elb_code >= 500), 0) AS s5xx,
+                             coalesce(sum(n) FILTER (WHERE elb_code BETWEEN 400 AND 499), 0) AS s4xx,
+                             sum(tgt_t_sum) / nullif(sum(tgt_t_n), 0) AS avg,
+                             list(DISTINCT tg ORDER BY tg)[1:3] AS tgs, count(*) OVER () AS groups
+                      FROM pt GROUP BY method, path_group) g
+                    LEFT JOIN p95 p ON p.method IS NOT DISTINCT FROM g.method AND p.path_group IS NOT DISTINCT FROM g.path_group
+                    ORDER BY {order}, g.path_group LIMIT ?""", [int(limit)])
                 names = [d[0] for d in cur.description]
                 rows = [dict(zip(names, r)) for r in cur.fetchall()]
+                codes = {(m, pg): c for m, pg, c in con.execute(
+                    "SELECT method, path_group, arg_max(elb_code, cn) FROM (SELECT method, path_group, elb_code, "
+                    "sum(n) AS cn FROM pt GROUP BY ALL) GROUP BY ALL").fetchall()}
             finally:
                 con.close()
-            return rows
-        rows = self._run(go)
+            return rows, codes
+        rows, codes = self._run(go)
         groups = rows[0]["groups"] if rows else 0
-        items = [{"method": r["method"], "pathGroup": r["path_group"], "example": r["example"],
+        items = [{"method": r["method"], "pathGroup": r["path_group"], "example": None,
                   "requests": r["requests"], **{c: r[c] for c in CLASSES}, "p95": r["p95"], "avg": r["avg"],
-                  "topCode": r["top_code"], "targetGroups": r["tgs"]} for r in rows]
+                  "topCode": codes.get((r["method"], r["path_group"])), "targetGroups": r["tgs"]} for r in rows]
         return {"items": items, "groups": groups, "tookMs": int((time.monotonic() - t0) * 1000)}
 
     def requests(self, q: LbQuery, access: Access | None, offset: int = 0, size: int = 100,
                  order: str = "desc") -> dict:
-        """One page of single requests. Counts per file first (filter columns only), then reads
-        full rows from just the hours that hold the page."""
+        """One page of single requests. Counts per hour come from the roll-ups when the filters allow
+        (no download); then only the hour files holding the page are read."""
         t0 = time.monotonic()
         s, e = self.resolve_range(q.start, q.end)
         src = self.sources(s, e, q.lbs)
         if not src.count:
             return {"start": s, "end": e, "total": 0, "hits": [], "tookMs": 0}
-        w = build_where(q, s, e, access, rollup=False)
+        level = q.level()
+        wr = build_where(q, s, e, access, "rows")
         desc = order != "asc"
 
         def go():
             con = self._db()
             try:
-                per_file = dict(con.execute(
-                    f"SELECT filename, count(*) FROM read_parquet({_sql_list(src.requests)}, union_by_name = true, "
-                    f"filename = true) WHERE {w.text()} GROUP BY 1", w.params).fetchall())
-                total = sum(per_file.values())
-                groups: dict[str, list[str]] = {}
-                for f in per_file:
-                    groups.setdefault(_hour_of_path(f), []).append(f)
+                counts: dict[tuple[str, str], int] = {}       # (lb, hour) -> matching requests
+                files: dict[tuple[str, str], list[Path]] = {}  # (lb, hour) -> files to read rows from
+                if src.hours:
+                    if level in ("minute", "paths"):
+                        kind = "minute" if level == "minute" else "paths"
+                        roll = src.minutes if kind == "minute" else self.local("paths", src.hours)
+                        w = build_where(q, s, e, access, kind)
+                        for f, n in con.execute(f"SELECT filename, sum(n) FROM read_parquet({_sql_list(roll)}, "
+                                                f"filename = true) WHERE {w.text()} GROUP BY 1", w.params).fetchall():
+                            k = (_lb_of_path(f), _hour_of_path(f))
+                            counts[k] = counts.get(k, 0) + int(n)
+                            files.setdefault(k, [])
+                    else:
+                        local = self.local("hour", src.hours)
+                        for f, n in con.execute(f"SELECT filename, count(*) FROM {self._rows_sql(local, True)} "
+                                                f"WHERE {wr.text()} GROUP BY 1", wr.params).fetchall():
+                            k = (_lb_of_path(f), _hour_of_path(f))
+                            counts[k] = counts.get(k, 0) + int(n)
+                            files.setdefault(k, []).append(Path(f))
+                if src.raws:
+                    for f, n in con.execute(f"SELECT filename, count(*) FROM {self._rows_sql(src.raws, True)} "
+                                            f"WHERE {wr.text()} GROUP BY 1", wr.params).fetchall():
+                        k = (_lb_of_path(f), _hour_of_path(f))
+                        counts[k] = counts.get(k, 0) + int(n)
+                        files.setdefault(k, []).append(Path(f))
+                total = sum(counts.values())
+                by_hour: dict[str, list[tuple[str, str]]] = {}
+                for k in counts:
+                    by_hour.setdefault(k[1], []).append(k)
                 chosen, before, seen = [], 0, 0
-                for hk in sorted(groups, reverse=desc):
-                    n = sum(per_file[f] for f in groups[hk])
-                    if seen + n > offset and seen < offset + size:
+                for hk in sorted(by_hour, reverse=desc):
+                    n = sum(counts[k] for k in by_hour[hk])
+                    if n and seen + n > offset and seen < offset + size:
                         if not chosen:
                             before = seen
-                        chosen += groups[hk]
+                        chosen += by_hour[hk]
                     seen += n
                     if seen >= offset + size:
                         break
                 if not chosen:
                     return total, []
+                read: list[Path] = []
+                need_hours = [k for k in chosen if k in set(src.hours) and not any(
+                    p.parts[-4] == "hour" for p in files.get(k, []))]
+                hour_paths = dict(zip(need_hours, [self.store.hour_file(*k) for k in need_hours]))
+                if need_hours:
+                    self.local("hour", need_hours)
+                for k in chosen:
+                    read += files.get(k, [])
+                    if k in hour_paths and hour_paths[k].exists():
+                        read.append(hour_paths[k])
                 d = "DESC" if desc else "ASC"
-                cur = con.execute(f"SELECT {', '.join(REQUEST_COLUMNS)} FROM read_parquet({_sql_list(chosen)}, "
-                                  f"union_by_name = true) WHERE {w.text()} ORDER BY ts_ms {d}, trace_id "
-                                  f"LIMIT ? OFFSET ?", [*w.params, size, offset - before])
+                cur = con.execute(f"SELECT {', '.join(REQUEST_COLUMNS)} FROM {self._rows_sql(read)} "
+                                  f"WHERE {wr.text()} ORDER BY ts_ms {d}, trace_id LIMIT ? OFFSET ?",
+                                  [*wr.params, size, offset - before])
                 names = [x[0] for x in cur.description]
                 return total, [{k: v for k, v in zip(names, r) if v is not None} for r in cur.fetchall()]
             finally:
@@ -1222,4 +1551,4 @@ class LbService:
             "updatedAt": status.get("updatedAt"), "lastError": status.get("lastError"),
             "warmDays": self.settings.lb_warm_days, "pollSeconds": self.settings.lb_poll_seconds,
             "filesListed": sum(v[0] for v in warm), "filesConverted": sum(min(v[1], v[0]) for v in warm),
-            "cycleMs": status.get("cycleMs")}}
+            "cycleMs": status.get("cycleMs"), "converted": status.get("converted")}}

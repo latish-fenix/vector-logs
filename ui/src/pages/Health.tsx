@@ -1,11 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { enc, get, type ClusterStatus, type HealthCluster, type HealthSnapshot, type HealthTargetGroup } from "../api";
+import { enc, get, type ClusterStatus, type EcsClusterMetrics, type EcsServiceMetrics, type HealthCluster, type HealthSnapshot, type HealthTargetGroup, type MetricSeries } from "../api";
 import { Icon, type IconName } from "../components/icons";
 import { Page } from "../components/Shell";
 import { Empty, ErrorCallout, Loading, SearchInput, Spinner } from "../components/ui";
-import { ago, duration, num } from "../format";
+import { ago, duration, fmtTime, num, storedZone } from "../format";
 import { useClusters, useMe } from "../session";
 
 // ECS clusters → the load balancer target groups they sit behind → target health.
@@ -73,6 +73,14 @@ export function Health() {
     staleTime: 30_000,
     retry: false,
   });
+  const hours = Number(params.get("hours") || 3);
+  const metrics = useQuery({
+    queryKey: ["ecs-metrics", hours],
+    queryFn: () => get<EcsClusterMetrics>("/health/ecs/metrics", { hours }),
+    refetchInterval: 300_000,
+    staleTime: 120_000,
+    retry: false,
+  });
   const refresh = async () => {
     setRefreshing(true);
     try {
@@ -130,6 +138,12 @@ export function Health() {
                   ))}
                 </div>
                 <div className="grow" />
+                <div className="tabs" role="group" aria-label="CPU and memory over">
+                  {[3, 24].map((h) => (
+                    <button key={h} type="button" className="tab" aria-pressed={hours === h} aria-selected={hours === h}
+                      onClick={() => setParam("hours", h === 3 ? null : String(h))} title={`CPU and memory charts: the last ${h} hours`}>{h} h</button>
+                  ))}
+                </div>
                 <div style={{ width: 300 }}><SearchInput label="Filter clusters" value={q} onChange={(v) => setParam("q", v || null)} placeholder="Cluster, load balancer or target group" /></div>
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => setOpen(open.size ? new Set() : new Set(rows.map((r) => r.name)))}>{open.size ? "Collapse all" : "Expand all"}</button>
               </div>
@@ -139,7 +153,7 @@ export function Health() {
                     <thead>
                       <tr>
                         <th style={{ width: 28 }}><span className="sr-only">Expand</span></th>
-                        <th>Cluster</th><th>Status</th><th>Load balancer</th><th>Target groups</th><th>Healthy targets</th><th>Tasks</th><th>Instances</th>
+                        <th>Cluster</th><th>Status</th><th>CPU</th><th>Memory</th><th>Target groups · load balancer</th><th>Healthy targets</th><th>Tasks</th><th>Instances</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -151,14 +165,18 @@ export function Health() {
                             <td className="nowrap"><span className="mono" style={{ fontWeight: 600 }}>{c.name}</span>
                               {logClusters.has(c.name) && <Link className="hlink" to={`/logs/${enc(c.name)}`} onClick={(e) => e.stopPropagation()}>logs</Link>}</td>
                             <td><StatusPill status={c.status} /></td>
-                            <td className="mono nowrap" style={{ fontSize: 13 }}>{c.loadBalancers.length ? c.loadBalancers.map((l) => <div key={l}>{l}</div>) : <span className="hint">—</span>}</td>
-                            <td className="mono nowrap" style={{ fontSize: 13 }}>{c.targetGroups.length ? c.targetGroups.map((t) => <div key={t.arn}>{t.name}</div>) : <span className="hint">—</span>}</td>
+                            <td className="nowrap"><Usage s={metrics.data?.clusters[c.name]?.cpu} reserved={metrics.data?.clusters[c.name]?.cpuReserved} what="CPU" loading={metrics.isLoading} /></td>
+                            <td className="nowrap"><Usage s={metrics.data?.clusters[c.name]?.memory} reserved={metrics.data?.clusters[c.name]?.memoryReserved} what="Memory" loading={metrics.isLoading} /></td>
+                            <td className="nowrap" style={{ fontSize: 13 }}>
+                              {c.targetGroups.length ? c.targetGroups.map((t) => <div key={t.arn} className="mono">{t.name}</div>) : <span className="hint">—</span>}
+                              {c.loadBalancers.length > 0 && <div className="hint mono" style={{ fontSize: 12 }}>{c.loadBalancers.join(", ")}</div>}
+                            </td>
                             <td><TargetsBar healthy={c.targets.healthy} total={c.targets.total} bad={c.targets.bad} /></td>
                             <td className="nowrap"><span className={c.servicesRunning < c.servicesDesired ? "warn-text" : ""}>{c.servicesRunning}/{c.servicesDesired}</span> <span className="hint">· {c.services.length} svc</span></td>
                             <td className="nowrap">{c.instances.length}{c.targetGroups.length > 0 && c.instances.some((i) => !i.behindLoadBalancer) && <span className="hint" title="Instances of this cluster that are not a target of its load balancer"> · {c.instances.filter((i) => !i.behindLoadBalancer).length} not in LB</span>}</td>
                           </tr>
                           {open.has(c.name) && (
-                            <tr className="hdetail-row"><td colSpan={8}><ClusterDetail c={c} /></td></tr>
+                            <tr className="hdetail-row"><td colSpan={9}><ClusterDetail c={c} hours={hours} m={metrics.data?.clusters[c.name]} /></td></tr>
                           )}
                         </Fragment>
                       ))}
@@ -166,8 +184,14 @@ export function Health() {
                   </table>
                 </div>
               )}
+              {metrics.error ? (
+                <div className="lv-status" style={{ borderBottom: 0 }}>
+                  <Icon name="info" size={15} />
+                  <span className="hint">CPU and memory are not available: {me.admin ? (metrics.error as Error).message : "the server can't read CloudWatch right now."}</span>
+                </div>
+              ) : null}
               <div className="card-foot" style={{ justifyContent: "flex-start" }}>
-                <span className="hint">Read in {duration(d.tookMs)} · a cluster is linked to a target group when one of its services registers there, one of its instances is a target there, or the target group is named <code>tg-&lt;cluster&gt;</code>.</span>
+                <span className="hint">Read in {duration(d.tookMs)} · CPU and memory: what the tasks use, as a share of what the cluster's instances offer (CloudWatch, averaged over {metrics.data ? Math.round(metrics.data.period / 60) : "a few"} min, the last {hours} h) · a cluster is linked to a target group when one of its services registers there, one of its instances is a target there, or the target group is named <code>tg-&lt;cluster&gt;</code>.</span>
               </div>
             </section>
 
@@ -201,8 +225,15 @@ function Tile({ label, value, note, tone, active, onClick }: { label: string; va
     : <div className="stat htile">{inner}</div>;
 }
 
-function ClusterDetail({ c }: { c: HealthCluster }) {
+function ClusterDetail({ c, hours, m }: { c: HealthCluster; hours: number; m: EcsClusterMetrics["clusters"][string] | undefined }) {
   const outside = c.instances.filter((i) => !i.behindLoadBalancer);
+  const svc = useQuery({
+    queryKey: ["ecs-svc-metrics", c.name, hours],
+    queryFn: () => get<EcsServiceMetrics>(`/health/ecs/clusters/${enc(c.name)}/metrics`, { hours }),
+    enabled: c.services.length > 0,
+    staleTime: 120_000,
+    retry: false,
+  });
   return (
     <div className="hdetail">
       {c.targetGroups.length === 0 && (
@@ -210,11 +241,21 @@ function ClusterDetail({ c }: { c: HealthCluster }) {
       )}
       {c.targetGroups.map((t) => <TargetGroupBlock key={t.arn} tg={t} />)}
 
+      {m && (m.cpu?.points.length || m.memory?.points.length) ? (
+        <div className="stack-sm" style={{ gap: 6 }}>
+          <span className="hsub">CPU and memory · last {hours} h</span>
+          <div className="usage-charts">
+            <UsageChart title="CPU" used={m.cpu} reserved={m.cpuReserved} />
+            <UsageChart title="Memory" used={m.memory} reserved={m.memoryReserved} />
+          </div>
+        </div>
+      ) : null}
+
       <div className="stack-sm" style={{ gap: 6 }}>
         <span className="hsub">ECS services · {c.services.length}</span>
         {c.services.length === 0 ? <span className="hint">No services.</span> : (
           <table className="table compact">
-            <thead><tr><th>Service</th><th>Tasks running / desired</th><th>Rollout</th><th>Target group</th><th>Latest event</th></tr></thead>
+            <thead><tr><th>Service</th><th>Tasks running / desired</th><th>CPU</th><th>Memory</th><th>Rollout</th><th>Target group</th><th>Latest event</th></tr></thead>
             <tbody>
               {c.services.map((s) => (
                 <tr key={s.name}>
@@ -223,6 +264,8 @@ function ClusterDetail({ c }: { c: HealthCluster }) {
                     {s.running < s.desired ? <span className={`hpill ${s.running === 0 && s.desired > 0 ? "down" : "degraded"}`}><Icon name={s.running === 0 ? "alert" : "warn"} size={13} />{s.running}/{s.desired}</span> : <span className="hpill ok"><Icon name="check" size={13} />{s.running}/{s.desired}</span>}
                     {s.pending > 0 && <span className="hint"> · {s.pending} pending</span>}
                   </td>
+                  <td className="nowrap" title="% of the CPU this service's tasks reserve"><Usage s={svc.data?.services[s.name ?? ""]?.cpu} what="CPU" loading={svc.isLoading} /></td>
+                  <td className="nowrap" title="% of the memory this service's tasks reserve"><Usage s={svc.data?.services[s.name ?? ""]?.memory} what="Memory" loading={svc.isLoading} /></td>
                   <td className="nowrap">{s.rollout ? <span className={s.rollout === "FAILED" ? "danger-text" : s.rollout === "IN_PROGRESS" ? "warn-text" : "hint"}>{s.rollout.toLowerCase().replace("_", " ")}</span> : <span className="hint">—</span>}{s.deployments > 1 && <span className="hint"> · {s.deployments} deployments</span>}</td>
                   <td className="mono nowrap" style={{ fontSize: 12.5 }}>{s.targetGroups.join(", ") || <span className="hint">—</span>}</td>
                   <td className="hint" style={{ maxWidth: 520, whiteSpace: "normal" }}>{s.lastEvent ? <>{ago(s.lastEvent.at)}: {s.lastEvent.message}</> : "—"}</td>
@@ -275,6 +318,91 @@ function TargetGroupBlock({ tg }: { tg: HealthTargetGroup }) {
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ CPU / memory
+
+function pctText(v: number | null | undefined): string {
+  return v === null || v === undefined ? "—" : `${v < 10 ? v.toFixed(1) : Math.round(v)}%`;
+}
+
+/** Current % with a small trend line; amber from 75%, red from 90%. */
+function Usage({ s, reserved, what, loading }: { s: MetricSeries | undefined; reserved?: MetricSeries; what: string; loading?: boolean }) {
+  if (!s || s.now === null) return <span className="hint" title={loading ? "Loading" : `No ${what} data in CloudWatch for this period`}>{loading ? "…" : "—"}</span>;
+  const tone = s.now >= 90 ? "danger-text" : s.now >= 75 ? "warn-text" : "";
+  const title = `${what} now ${pctText(s.now)} · average ${pctText(s.avg)} · peak ${pctText(s.max)}${reserved?.now != null ? ` · reserved ${pctText(reserved.now)}` : ""}`;
+  return (
+    <span className="usage" title={title}>
+      <span className={`usage-n ${tone}`}>{s.now >= 75 && <Icon name={s.now >= 90 ? "alert" : "warn"} size={12} strokeWidth={2.4} />}{pctText(s.now)}</span>
+      <Spark points={s.points} />
+    </span>
+  );
+}
+
+function Spark({ points }: { points: [number, number][] }) {
+  if (points.length < 2) return null;
+  const w = 52, h = 18;
+  const t0 = points[0][0], t1 = points[points.length - 1][0];
+  const x = (t: number) => ((t - t0) / Math.max(1, t1 - t0)) * (w - 2) + 1;
+  const y = (v: number) => h - 1 - (Math.min(100, Math.max(0, v)) / 100) * (h - 2);
+  return (
+    <svg width={w} height={h} className="spark" aria-hidden="true">
+      <line x1={0} x2={w} y1={h - 1} y2={h - 1} className="spark-base" />
+      <polyline points={points.map(([t, v]) => `${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(" ")} className="spark-line" />
+    </svg>
+  );
+}
+
+/** One measure over time, 0-100%: what the tasks use (solid) and what they reserve (dashed). */
+function UsageChart({ title, used, reserved }: { title: string; used?: MetricSeries; reserved?: MetricSeries }) {
+  const zone = storedZone();
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 520, H = 150, L = 36, R = 8, T = 8, B = 20;
+  const pts = used?.points ?? [];
+  const rpts = reserved?.points ?? [];
+  const all = [...pts, ...rpts];
+  if (!all.length) return null;
+  const t0 = Math.min(...all.map((p) => p[0])), t1 = Math.max(...all.map((p) => p[0]));
+  const x = (t: number) => L + ((t - t0) / Math.max(1, t1 - t0)) * (W - L - R);
+  const y = (v: number) => T + (1 - Math.min(100, Math.max(0, v)) / 100) * (H - T - B);
+  const path = (ps: [number, number][]) => ps.map(([t, v], i) => `${i ? "L" : "M"}${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const hp = hover !== null ? pts[hover] : null;
+  const hr = hp ? rpts.find((r) => r[0] === hp[0]) : null;
+  return (
+    <div className="usage-chart">
+      <div className="row" style={{ gap: 12, fontSize: 12.5 }}>
+        <strong>{title}</strong>
+        <span className="histo-key"><span className="swatch" style={{ background: "var(--lv-info)" }} />used {pctText(used?.now)}</span>
+        {rpts.length > 0 && <span className="histo-key"><span className="swatch dashed" />reserved {pctText(reserved?.now)}</span>}
+        <span className="hint" style={{ marginLeft: "auto" }}>peak {pctText(used?.max)}</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label={`${title} use over time`} onMouseLeave={() => setHover(null)}
+        onMouseMove={(e) => {
+          const box = e.currentTarget.getBoundingClientRect();
+          const tx = t0 + (((e.clientX - box.left) / box.width) * W - L) / (W - L - R) * (t1 - t0);
+          let best = 0;
+          pts.forEach((p, i) => { if (Math.abs(p[0] - tx) < Math.abs(pts[best][0] - tx)) best = i; });
+          setHover(pts.length ? best : null);
+        }}>
+        {[0, 50, 100].map((v) => (
+          <g key={v}>
+            <line x1={L} x2={W - R} y1={y(v)} y2={y(v)} className="histo-grid" />
+            <text x={L - 6} y={y(v) + 4} textAnchor="end" className="histo-axis">{v}%</text>
+          </g>
+        ))}
+        <line x1={L} x2={W - R} y1={y(90)} y2={y(90)} className="usage-limit" />
+        {rpts.length > 1 && <path d={path(rpts)} className="usage-reserved" />}
+        {pts.length > 1 && <path d={path(pts)} className="usage-used" />}
+        {hp && <>
+          <line x1={x(hp[0])} x2={x(hp[0])} y1={T} y2={H - B} className="histo-base" />
+          <circle cx={x(hp[0])} cy={y(hp[1])} r={4} className="usage-dot" />
+        </>}
+        <text x={L} y={H - 5} className="histo-axis">{fmtTime(t0, zone, false).slice(5, 16)}</text>
+        <text x={W - R} y={H - 5} textAnchor="end" className="histo-axis">{fmtTime(t1, zone, false).slice(5, 16)}</text>
+      </svg>
+      {hp && <div className="hint" style={{ fontSize: 12 }}>{fmtTime(hp[0], zone, false)} · used {pctText(hp[1])}{hr ? ` · reserved ${pctText(hr[1])}` : ""}</div>}
     </div>
   );
 }

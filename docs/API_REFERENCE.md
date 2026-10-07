@@ -141,11 +141,22 @@ Every body takes these fields (all optional):
 | `minTargetSeconds` | Only requests whose target took at least this long |
 | `q` | Words that must all appear anywhere in the original log line (`"exact phrase"`, `-word` excludes) |
 
+Counts, the chart and the target group table come from per-minute roll-ups; `/_paths` and the top failing path from per-minute roll-ups by path (the `example` field is always empty); filters on `path`, `client`, `target`, `minTargetSeconds` or `q` read single requests. The summary's `source` says which: `minute`, `paths` or `rows`.
+
 Grouped paths replace Shopify store names with `<store>`, UUIDs with `<uuid>`, long hex ids with `<id>` and numbers with `<n>`: `/fenixdelest/api/v1/<store>/storeinfo`. Percentiles (`p50`, `p95`, `p99`) come from latency bins (5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500 ms …) and are approximate; `avg` is exact.
 
 The summary's `pending` says how many delivered files of the range are not converted yet (`files` of `of`); `requested: true` means the range is older than `LB_WARM_DAYS` and is being converted now. Ask again in a few seconds.
 
 Each request has these fields (empty ones are left out): `time`, `ts_ms`, `lb`, `tg`, `cluster`, `domain`, `method`, `path`, `path_group`, `query`, `url`, `protocol`, `elb_code`, `tgt_code`, `client_ip`, `client_port`, `target`, `req_t`, `tgt_t`, `resp_t` (seconds), `rx`, `tx` (bytes), `user_agent`, `error_reason`, `classification`, `classification_reason`, `actions`, `elb_error_code`, `target_error_code`, `trace_id`, `type`, `ssl_protocol`, `rule_priority`, `request_created`, `target_list`, `target_code_list`, and `raw`: the line exactly as the load balancer wrote it.
+
+### CPU and memory
+
+| Method and path | Returns |
+| --- | --- |
+| `GET /health/ecs/metrics?hours=3` | Per cluster: `cpu`, `memory` (what the tasks use, % of what the cluster's instances offer) and `cpuReserved`, `memoryReserved`; each `{now, avg, max, points: [[epoch ms, %], …]}` |
+| `GET /health/ecs/clusters/{cluster}/metrics?hours=3` | Per service of one cluster: `cpu`, `memory` (% of what the service's tasks reserve) |
+
+From CloudWatch (`AWS/ECS`, average per point, about 60 points for `hours` 1–72), cached 5 minutes (`METRICS_CACHE_SECONDS`). Needs the `EcsMetricsReadOnly` statement; without it these answer `METRICS_ACCESS_DENIED` and the rest of the page works. A cluster with no data (e.g. no tasks) has `now: null`.
 
 ## Saved searches (your own)
 
@@ -192,4 +203,7 @@ Every error is `{"error": {"code", "message", "details"}}`. The common codes:
 | `LOGS_ACCESS_DENIED` | 500 | The EC2 role can't read the logs bucket (see INSTALL.md, Step 1) |
 | `AWS_ACCESS_DENIED` | 500 | The EC2 role lacks the `EcsAndLoadBalancerHealthReadOnly` statement (ECS health page) |
 | `LB_LOGS_ACCESS_DENIED` | 500 | The EC2 role lacks the `ListLoadBalancerLogs` / `ReadLoadBalancerLogs` statements (shown on the Load balancers page and by `app.cli check`) |
+| `METRICS_ACCESS_DENIED` | 500 | The EC2 role lacks the `EcsMetricsReadOnly` statement (CPU / memory on ECS health) |
+| `TOO_MUCH_DATA` | 400 | A load balancer view would download more than `LB_MAX_FETCH_FILES` hours of single requests; pick a load balancer, target group or shorter range |
+| `LB_PARQUET_ACCESS_DENIED` | 500 | The EC2 role lacks the `ReadWriteConvertedLoadBalancerLogs` statement |
 | `LB_DISABLED` | 404 | `LB_ENABLED=false` |

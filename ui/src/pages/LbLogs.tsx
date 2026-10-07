@@ -208,7 +208,7 @@ export function LbLogs() {
           </button>
           <label className="check lv-toggle" title="Show whole lines on several rows"><input type="checkbox" checked={wrap} onChange={(e) => setWrap(e.target.checked)} /> Wrap</label>
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => setExporting(true)} disabled={!total}><Icon name="download" size={15} /> Export</button>
-          <Link className="btn btn-ghost btn-sm" to={lbLink("/lb", params)} title="Counts, chart, target groups and paths for these filters"><Icon name="overview" size={15} /> Summary</Link>
+          <Link className="btn btn-ghost btn-sm" to={lbLink("/lb", params)} title="Counts, chart, target groups and paths for these filters"><Icon name="overview" size={15} /> Dashboard</Link>
           <button type="button" className="btn btn-ghost btn-sm" onClick={toggleFull} aria-pressed={full}>
             <Icon name={full ? "collapse" : "expand"} size={15} /> {full ? "Exit full screen" : "Full screen"}
           </button>

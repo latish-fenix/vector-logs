@@ -16,6 +16,7 @@ from . import routes_admin, routes_auth, routes_health, routes_lb, routes_logs
 from .auth import generate_password, hash_password, password_problems
 from .errors import ApiError
 from .ecs_health import HealthService
+from .ecs_metrics import MetricsService
 from .lb_logs import Converter, LbService
 from .logs import LogService
 from .repos import EventLog, LockRepo, SavedSearchRepo, UsersRepo
@@ -85,6 +86,7 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
     app.state.events = EventLog()
     app.state.logs = logs or LogService(settings)
     app.state.health = health or HealthService(settings.ecs_region, settings.health_cache_seconds)
+    app.state.metrics = MetricsService(app.state.health, settings.metrics_cache_seconds)
     app.state.lb = LbService(settings)
     if settings.lb_enabled and settings.lb_background:
         # Every API worker starts one; a file lock lets only one of them convert.

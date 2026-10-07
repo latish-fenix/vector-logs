@@ -353,7 +353,7 @@ export interface LbSummary {
   end: number;
   interval: number;
   files: number;
-  source: "rollup" | "raw" | "none";
+  source: "minute" | "paths" | "rows" | "none";
   pending: LbPending;
   totals: LbTotals;
   buckets: (LbCounts & { t: number })[];
@@ -385,4 +385,20 @@ export interface LbOverview {
     filesConverted: number;
     cycleMs: number | null;
   };
+}
+
+// ---- ECS CPU / memory (CloudWatch)
+export interface MetricSeries { now: number | null; avg: number | null; max: number | null; points: [number, number][] }
+export interface EcsClusterMetrics {
+  hours: number;
+  period: number;
+  generatedAt: string;
+  clusters: Record<string, { cpu?: MetricSeries; memory?: MetricSeries; cpuReserved?: MetricSeries; memoryReserved?: MetricSeries }>;
+}
+export interface EcsServiceMetrics {
+  cluster: string;
+  hours: number;
+  period: number;
+  generatedAt: string;
+  services: Record<string, { cpu?: MetricSeries; memory?: MetricSeries }>;
 }

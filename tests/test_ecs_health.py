@@ -91,3 +91,37 @@ def test_access_denied_is_explained(tmp_path, logs_dir):
     r = c.get("/api/v1/health/ecs", headers=ROOT_H)
     assert r.status_code == 500 and r.json()["error"]["code"] == "AWS_ACCESS_DENIED"
     assert "iam-policy.json" in r.json()["error"]["message"]
+
+
+def test_cpu_and_memory_per_cluster_and_service(tmp_path, logs_dir):
+    aws = FakeAws()
+    client = TestClient(create_app(make_settings(tmp_path, logs_dir), health=HealthService("us-west-2", clients=aws)))
+    m = client.get("/api/v1/health/ecs/metrics?hours=3", headers=ROOT_H).json()
+    assert m["period"] == 180 and set(m["clusters"]) == set(by_name(client.get("/api/v1/health/ecs", headers=ROOT_H).json()))
+    edds2 = m["clusters"]["alpha-edds-2"]
+    assert edds2["cpu"]["now"] == 92.0 and edds2["memory"]["now"] == 100.0 and edds2["cpuReserved"]["now"] == 100.0
+    assert len(edds2["cpu"]["points"]) == 60
+    assert m["clusters"]["fenix-batch-1"]["cpu"]["now"] is None          # nothing published
+    calls = aws.cloudwatch.calls
+    client.get("/api/v1/health/ecs/metrics?hours=3", headers=ROOT_H)
+    assert aws.cloudwatch.calls == calls                                   # cached
+    s = client.get("/api/v1/health/ecs/clusters/post-eibp-01/metrics", headers=ROOT_H).json()
+    assert set(s["services"]) == {"eibp", "webhook"} and s["services"]["eibp"]["cpu"]["now"] == 51.0
+    # members: only their clusters
+    add_user(client, "dev@x.com", {"alpha-edds-1": "view"})
+    m = client.get("/api/v1/health/ecs/metrics", headers=as_user("dev@x.com")).json()
+    assert list(m["clusters"]) == ["alpha-edds-1"]
+    r = client.get("/api/v1/health/ecs/clusters/post-eibp-01/metrics", headers=as_user("dev@x.com"))
+    assert r.status_code == 403
+
+
+def test_metrics_access_denied(tmp_path, logs_dir):
+    aws = FakeAws()
+
+    def denied(**kw):
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetMetricData")
+    aws.cloudwatch.get_metric_data = denied
+    client = TestClient(create_app(make_settings(tmp_path, logs_dir), health=HealthService("us-west-2", clients=aws)))
+    r = client.get("/api/v1/health/ecs/metrics", headers=ROOT_H)
+    assert r.status_code == 500 and r.json()["error"]["code"] == "METRICS_ACCESS_DENIED"
+    assert client.get("/api/v1/health/ecs", headers=ROOT_H).status_code == 200   # health still works

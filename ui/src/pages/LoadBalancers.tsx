@@ -159,11 +159,11 @@ export function LoadBalancers() {
   const conv = overview.data?.converter;
 
   return (
-    <Page wide crumbs={[{ label: "Infrastructure" }, { label: "Load balancers" }]} title="Load balancers"
+    <Page wide crumbs={[{ label: "Infrastructure" }, { label: "Load balancer dashboard" }]} title="Load balancer dashboard"
       actions={<span className="row" style={{ gap: 10 }}>{conv?.updatedAt && <span className="hint lb-updated">logs converted {ago(conv.updatedAt)}</span>}<ZoneToggle zone={zone} onChange={setZone} /></span>}>
       <div className="page-head">
         <div className="grow">
-          <h1>Load balancers</h1>
+          <h1>Load balancer dashboard</h1>
           <p className="sub">Every request through the Application Load Balancers, from their access logs in S3: status codes, target groups, paths and single requests. About 5–10 minutes behind.</p>
         </div>
       </div>

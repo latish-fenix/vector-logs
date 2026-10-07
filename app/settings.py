@@ -45,6 +45,7 @@ class Settings:
     health_enabled: bool = True
     ecs_region: str = "us-west-2"
     health_cache_seconds: int = 60
+    metrics_cache_seconds: int = 300          # CPU / memory from CloudWatch
 
     # ---- load balancer access logs (ALB, gzip text in S3, converted to Parquet on this server)
     lb_enabled: bool = True
@@ -54,7 +55,13 @@ class Settings:
     lb_logs_region: str | None = "us-west-2"
     lb_logs_endpoint_url: str | None = None
     lb_logs_local_dir: str = "./local-test/logs/alb-bucket"
-    lb_warm_days: int = 7                     # days kept converted all the time
+    lb_parquet_backend: str = ""              # "s3" / "local"; empty = same as LB_LOGS_BACKEND
+    lb_parquet_bucket: str = ""               # converted files (Parquet); empty = LB_LOGS_BUCKET
+    lb_parquet_prefix: str = "loadbalancer-parquet/"
+    lb_parquet_local_dir: str = "./local-test/logs/alb-parquet"   # stands in for S3 when LB_LOGS_BACKEND=local
+    lb_cache_max_mb: int = 4096               # local copies of hour / paths files (minute files always kept)
+    lb_max_fetch_files: int = 500             # one view may download at most this many hour files
+    lb_warm_days: int = 30                    # days the converter keeps converted (in S3)
     lb_retention_days: int = 30               # older data is never kept or converted
     lb_poll_seconds: int = 300                # how often the converter looks for new files
     lb_converter_memory_mb: int = 256
@@ -111,6 +118,7 @@ class Settings:
             health_enabled=_bool(env("HEALTH_ENABLED"), True),
             ecs_region=env("ECS_REGION", "us-west-2"),
             health_cache_seconds=int(env("HEALTH_CACHE_SECONDS", "60")),
+            metrics_cache_seconds=int(env("METRICS_CACHE_SECONDS", "300")),
             lb_enabled=_bool(env("LB_ENABLED"), True),
             lb_logs_backend=env("LB_LOGS_BACKEND", "s3").lower(),
             lb_logs_bucket=env("LB_LOGS_BUCKET", "fenix-vector-ecs-logs"),
@@ -118,7 +126,13 @@ class Settings:
             lb_logs_region=env("LB_LOGS_REGION", "us-west-2") or None,
             lb_logs_endpoint_url=env("LB_LOGS_ENDPOINT_URL") or None,
             lb_logs_local_dir=env("LB_LOGS_LOCAL_DIR", "./local-test/logs/alb-bucket"),
-            lb_warm_days=int(env("LB_WARM_DAYS", "7")),
+            lb_parquet_backend=env("LB_PARQUET_BACKEND", "").lower(),
+            lb_parquet_bucket=env("LB_PARQUET_BUCKET", ""),
+            lb_parquet_prefix=_slash(env("LB_PARQUET_PREFIX", "loadbalancer-parquet/").lstrip("/")),
+            lb_parquet_local_dir=env("LB_PARQUET_LOCAL_DIR", "./local-test/logs/alb-parquet"),
+            lb_cache_max_mb=int(env("LB_CACHE_MAX_MB", "4096")),
+            lb_max_fetch_files=int(env("LB_MAX_FETCH_FILES", "500")),
+            lb_warm_days=int(env("LB_WARM_DAYS", "30")),
             lb_retention_days=int(env("LB_RETENTION_DAYS", "30")),
             lb_poll_seconds=int(env("LB_POLL_SECONDS", "300")),
             lb_converter_memory_mb=int(env("LB_CONVERTER_MEMORY_MB", "256")),

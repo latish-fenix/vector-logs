@@ -100,7 +100,7 @@ def _check_lb(settings: Settings) -> bool:
     from collections import Counter
     from pathlib import Path
 
-    from .lb_logs import LbStore, build_lb_source, parse_key
+    from .lb_logs import LbStore, build_converted, build_lb_source, parse_key
     try:
         src = build_lb_source(settings)
         bases = src.bases()
@@ -117,6 +117,15 @@ def _check_lb(settings: Settings) -> bool:
             with tempfile.TemporaryDirectory() as tmp:
                 path = src.fetch(keys[-1], Path(tmp))
                 print(f"OK    read {keys[-1].rsplit('/', 1)[-1]} ({path.stat().st_size:,} bytes)")
+        conv = build_converted(settings)
+        hours = len(conv.list("keys/"))
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "probe.txt"
+            probe.write_text("vector-logs check")
+            conv.put(probe, "check/probe.txt")
+            ok_read = conv.get("check/probe.txt", Path(tmp) / "back.txt")
+        print(f"OK    converted files: {conv.describe()} · {hours} hour(s) stored · write and read "
+              f"{'work' if ok_read else 'FAILED (read)'}")
         status = LbStore(Path(settings.cache_dir) / "lb").read_status()
         if status:
             err = status.get("lastError")

@@ -596,3 +596,17 @@ button.htile:hover { border-color: var(--border-strong); }
 .linkish:hover { color: var(--accent-text); text-decoration: underline; }
 .lbprogress { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; max-width: 420px; }
 .lbprogress span { display: block; height: 100%; background: var(--accent); transition: width 0.4s; }
+
+/* ---- ECS CPU / memory */
+.usage { display: inline-flex; align-items: center; gap: 8px; }
+.usage-n { min-width: 40px; font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 3px; }
+.spark-line { fill: none; stroke: var(--lv-info); stroke-width: 1.5; stroke-linejoin: round; }
+.spark-base { stroke: var(--row-border); stroke-width: 1; }
+.usage-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: 1100px; }
+@media (max-width: 900px) { .usage-charts { grid-template-columns: minmax(0, 1fr); } }
+.usage-chart { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px 6px; display: flex; flex-direction: column; gap: 4px; }
+.usage-used { fill: none; stroke: var(--lv-info); stroke-width: 2; stroke-linejoin: round; }
+.usage-reserved { fill: none; stroke: var(--text-2); stroke-width: 1.5; stroke-dasharray: 4 3; opacity: 0.7; }
+.usage-limit { stroke: var(--danger); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.5; }
+.usage-dot { fill: var(--lv-info); stroke: var(--surface); stroke-width: 2; }
+.swatch.dashed { background: none; border-top: 2px dashed var(--text-2); height: 0; width: 12px; border-radius: 0; }

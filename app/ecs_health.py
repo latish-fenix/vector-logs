@@ -64,6 +64,7 @@ class AwsClients:
         self.ecs = boto3.client("ecs", region_name=region, config=cfg)
         self.elbv2 = boto3.client("elbv2", region_name=region, config=cfg)
         self.ec2 = boto3.client("ec2", region_name=region, config=cfg)
+        self.cloudwatch = boto3.client("cloudwatch", region_name=region, config=cfg)
 
 
 class HealthService:
