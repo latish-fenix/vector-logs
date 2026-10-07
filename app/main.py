@@ -12,9 +12,10 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from . import routes_admin, routes_auth, routes_logs
+from . import routes_admin, routes_auth, routes_health, routes_logs
 from .auth import generate_password, hash_password, password_problems
 from .errors import ApiError
+from .ecs_health import HealthService
 from .logs import LogService
 from .repos import EventLog, LockRepo, SavedSearchRepo, UsersRepo
 from .secret_store import SecretStore, build_secret_store, resolve_app_secrets
@@ -29,7 +30,8 @@ STARTUP_LOCK_SECONDS = 120
 
 
 def create_app(settings: Settings | None = None, store: ObjectStore | None = None,
-               secrets: SecretStore | None = None, logs: LogService | None = None) -> FastAPI:
+               secrets: SecretStore | None = None, logs: LogService | None = None,
+               health: HealthService | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     if store is None:
         settings.validate()
@@ -41,7 +43,7 @@ def create_app(settings: Settings | None = None, store: ObjectStore | None = Non
     locks = LockRepo(store, STARTUP_LOCK_SECONDS)
     token = _acquire_startup_lock(locks)
     try:
-        return _create_app(settings, store, secrets, logs)
+        return _create_app(settings, store, secrets, logs, health)
     finally:
         locks.release(*STARTUP_LOCK, token)
 
@@ -58,7 +60,7 @@ def _acquire_startup_lock(locks: LockRepo, wait_seconds: float = 90) -> str:
 
 
 def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
-                logs: LogService | None) -> FastAPI:
+                logs: LogService | None, health: HealthService | None = None) -> FastAPI:
     bootstrap_pw = settings.bootstrap_admin_password
     if settings.auth_mode == "password":
         session_secret, bootstrap_pw = resolve_app_secrets(
@@ -81,6 +83,7 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
     app.state.saved = SavedSearchRepo(store)
     app.state.events = EventLog()
     app.state.logs = logs or LogService(settings)
+    app.state.health = health or HealthService(settings.ecs_region, settings.health_cache_seconds)
     if settings.auth_mode == "password":
         _bootstrap_passwords(settings, app.state.users, bootstrap_pw, secrets)
 
@@ -113,6 +116,7 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
 
     app.include_router(routes_auth.router)
     app.include_router(routes_logs.router)
+    app.include_router(routes_health.router)
     app.include_router(routes_admin.router)
     _mount_ui(app)
     return app

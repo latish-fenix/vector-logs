@@ -84,6 +84,10 @@ export function Shell() {
           </>}
           <NavItem to="/saved" icon="bookmark" label="Saved searches" />
         </div>
+        <div className="nav-group">
+          <span className="nav-label">Infrastructure</span>
+          <NavItem to="/health" icon="activity" label="ECS health" />
+        </div>
         {me.admin && (
           <div className="nav-group">
             <span className="nav-label">Administration</span>

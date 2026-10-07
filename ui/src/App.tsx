@@ -5,6 +5,7 @@ import { Clusters } from "./pages/admin/Clusters";
 import { Users } from "./pages/admin/Users";
 import { ChangePassword } from "./pages/ChangePassword";
 import { Login } from "./pages/Login";
+import { Health } from "./pages/Health";
 import { LogView } from "./pages/LogView";
 import { Overview } from "./pages/Overview";
 import { Saved } from "./pages/Saved";
@@ -48,6 +49,7 @@ export function App() {
         <Route path="logs/:clusterId" element={<LogView />} />
         <Route path="overview/:clusterId" element={<Overview />} />
         <Route path="saved" element={<Saved />} />
+        <Route path="health" element={<Health />} />
         <Route path="account/password" element={<ChangePassword />} />
         <Route path="admin/clusters" element={<RequireAdmin><Clusters /></RequireAdmin>} />
         <Route path="admin/users" element={<RequireAdmin><Users /></RequireAdmin>} />

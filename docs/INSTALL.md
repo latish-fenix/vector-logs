@@ -36,6 +36,7 @@ The server reads the logs with the EC2 instance role; no keys are stored anywher
    | `ListLogFolders`, `ReadLogFiles` | **read-only**: list and read `s3://fenix-ecr-logs/vector/` |
    | `ListStatePrefix`, `ReadWriteState`, `DeleteLocksAndSavedSearchesOnly` | users and saved searches under `s3://fenix-es-config-api/vector-logs/` |
    | `SecretsManagerOwnPrefixOnly` | its own secrets `vector-logs/*` (session key, password hashes) |
+   | `EcsAndLoadBalancerHealthReadOnly` | **read-only** List/Describe of ECS clusters, services, container instances, load balancers, target groups, target health and EC2 instances, for the ECS health page |
 
 3. If the logs bucket is encrypted with a customer-managed KMS key (S3 console → `fenix-ecr-logs` → *Properties* → *Default encryption*), also allow `kms:Decrypt` on that key. With the default *SSE-S3* nothing more is needed.
 4. If the instance has no internet access, it reaches S3 through a VPC endpoint. A *gateway* endpoint only serves buckets in the instance's own region; the check in Step 4 tells you if the logs bucket (us-west-2) or the state bucket can't be reached.

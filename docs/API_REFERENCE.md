@@ -97,6 +97,16 @@ curl -s -H "$AUTH" -H 'Content-Type: application/json' -OJ \
 
 The response header `X-Export-Rows` gives the number of lines.
 
+## ECS health
+
+`GET /health/ecs` returns every ECS cluster you may see (admins: all) with its target groups, their load balancers, each target's state and reason, the cluster's services (running / desired tasks, rollout, latest event) and container instances. AWS is read at most once a minute; admins can add `?refresh=true` to read it now.
+
+```bash
+curl -s -H "$AUTH" $API/health/ecs | jq '.summary, [.clusters[] | {name, status, targets}]'
+```
+
+A cluster is linked to a target group when one of its services registers there, one of its EC2 instances is a target there, or the target group is named `tg-<cluster>`. `status` is `down` (a target group with no healthy target, or a service running 0 tasks), `degraded` (some unhealthy targets, fewer tasks than desired, a failed rollout or a disconnected agent), `healthy`, or `none` (no target group). `unlinkedTargetGroups` (admins only) lists target groups no ECS cluster uses.
+
 ## Saved searches (your own)
 
 | Method and path | Does |
@@ -140,3 +150,4 @@ Every error is `{"error": {"code", "message", "details"}}`. The common codes:
 | `TOO_MANY_FILES` | 400 | The range has more files than `MAX_FILES_PER_SEARCH`; pick a shorter one |
 | `SEARCH_TOO_BIG` | 507 | The search needed more than `DUCKDB_MEMORY_MB` |
 | `LOGS_ACCESS_DENIED` | 500 | The EC2 role can't read the logs bucket (see INSTALL.md, Step 1) |
+| `AWS_ACCESS_DENIED` | 500 | The EC2 role lacks the `EcsAndLoadBalancerHealthReadOnly` statement (ECS health page) |

@@ -13,6 +13,7 @@ A web console for the application logs that Vector ships from the Fenix app serv
 
 - **Logs** (the main page): the log lines fill the window and keep loading as you scroll; click a line to open it in place (every column, full stack trace, filter-for / filter-out buttons); a **Fields** panel with top values, **Wrap**, and **Full screen**.
 - **Overview**: the same search as a chart and top values, for spotting when something started.
+- **ECS health**: every ECS cluster, the load balancer target groups it sits behind and whether each target is healthy; services running fewer tasks than desired; clusters without a load balancer. Read live from AWS (read-only), refreshed every minute.
 - **Search** one cluster over any window of up to 7 days within the last 30: free text (`"exact phrase"`, `-exclude`, `column:value`) plus filters on any column.
 - **See when it happened**: a histogram of log lines over time, stacked by level; click a bar to zoom into it.
 - **Narrow down fast**: top values for level, service, host and exception; click to filter, `−` to exclude.
@@ -51,6 +52,7 @@ Code map:
 | --- | --- |
 | `app/logs.py` | S3 listing, the file cache, query building (free text, filters) and DuckDB search / export |
 | `app/routes_logs.py` | `/me`, `/clusters`, search, record, export, saved searches |
+| `app/ecs_health.py`, `app/routes_health.py` | ECS clusters → services / container instances → target groups → target health (`/health/ecs`) |
 | `app/routes_admin.py` | Users and cluster access, the admin cluster list |
 | `app/routes_auth.py`, `auth.py`, `identity.py` | Sign-in, sessions, lockout, cluster access check (from ES-API) |
 | `app/repos.py`, `storage.py`, `secret_store.py` | Users and saved searches in S3, secrets in Secrets Manager (from ES-API) |
@@ -95,6 +97,7 @@ All settings are environment variables in `.env` (see [.env.example](.env.exampl
 | `MAX_EXPORT_ROWS` | `10000` | Export cap |
 | `CACHE_MAX_MB` | `4096` | Size of the local file cache |
 | `WORKERS`, `DUCKDB_THREADS`, `DUCKDB_MEMORY_MB`, `DOWNLOAD_THREADS` | `2`, `4`, `1024`, `32` | Capacity |
+| `HEALTH_ENABLED`, `ECS_REGION`, `HEALTH_CACHE_SECONDS` | `true`, `us-west-2`, `60` | ECS health page |
 | `S3_BUCKET` / `S3_PREFIX` / `AWS_REGION` | `fenix-es-config-api` / `vector-logs/` / `us-east-1` | App state |
 | `SECRETS_PREFIX` | `vector-logs/` | Secrets Manager names |
 | `BOOTSTRAP_ADMINS` | your email | Always admins |

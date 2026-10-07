@@ -14,6 +14,7 @@ npm run build      # type-check and build into ../app/static/ui
 | `src/pages/Overview.tsx` | **Overview**: histogram, top values and a paged table for the same search; also holds the shared pieces (time picker, filter / columns / export / save dialogs) |
 | `src/components/Histogram.tsx` | Stacked bars by level (SVG), hover tooltip, click to zoom |
 | `src/pages/Saved.tsx` | Your saved searches |
+| `src/pages/Health.tsx` | **ECS health**: summary tiles, filters, cluster table with status, expandable target groups / services / instances, target groups not linked to a cluster |
 | `src/pages/admin/Users.tsx`, `Clusters.tsx` | Admin pages |
 | `src/pages/Login.tsx`, `ChangePassword.tsx`, `components/ui.tsx`, `styles.css` | Shared with ES-API |
 | `src/api.ts`, `session.tsx`, `format.ts` | API client, session gate, number and time formatting |

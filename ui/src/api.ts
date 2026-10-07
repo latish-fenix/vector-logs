@@ -208,3 +208,86 @@ export interface Credential {
   username: string;
   password: string;
 }
+
+// ------------------------------------------------------------ ECS health
+
+export type ClusterStatus = "healthy" | "degraded" | "down" | "none";
+
+export interface HealthTarget {
+  id: string;
+  port: number | null;
+  state: string;
+  reason: string | null;
+  description: string | null;
+  ip: string | null;
+  name: string | null;
+  inCluster?: boolean;
+}
+
+export interface HealthTargetGroup {
+  arn: string;
+  name: string;
+  port: number | null;
+  protocol: string | null;
+  targetType: string | null;
+  healthCheckPath: string | null;
+  loadBalancers: { name: string; type: string | null; scheme: string | null; dns: string | null; state: string | null }[];
+  targets: HealthTarget[];
+  total: number;
+  counts: { healthy: number; bad: number; other: number };
+  error: string | null;
+  linkedBy?: string[];
+}
+
+export interface HealthService {
+  name: string;
+  status: string;
+  launchType: string | null;
+  desired: number;
+  running: number;
+  pending: number;
+  rollout: string | null;
+  deployments: number;
+  targetGroups: string[];
+  lastEvent: { at: string; message: string } | null;
+}
+
+export interface HealthInstance {
+  id: string;
+  ip: string | null;
+  name: string | null;
+  status: string;
+  agentConnected: boolean | null;
+  runningTasks: number | null;
+  behindLoadBalancer: boolean;
+}
+
+export interface HealthCluster {
+  name: string;
+  arn: string;
+  clusterStatus: string;
+  status: ClusterStatus;
+  instancesRegistered: number;
+  runningTasks: number;
+  pendingTasks: number;
+  activeServices: number;
+  targetGroups: HealthTargetGroup[];
+  services: HealthService[];
+  instances: HealthInstance[];
+  targets: { healthy: number; total: number; bad: number };
+  servicesRunning: number;
+  servicesDesired: number;
+  loadBalancers: string[];
+}
+
+export interface HealthSnapshot {
+  region: string;
+  generatedAt: string;
+  tookMs: number;
+  summary: {
+    clusters: number; withLoadBalancer: number; withoutLoadBalancer: number; down: number; degraded: number;
+    healthy: number; unhealthyTargets: number; servicesBelowDesired: number;
+  };
+  clusters: HealthCluster[];
+  unlinkedTargetGroups: HealthTargetGroup[];
+}

@@ -6,7 +6,14 @@
       "Effect": "Allow",
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::fenix-ecr-logs",
-      "Condition": { "StringLike": { "s3:prefix": ["vector/", "vector/*"] } }
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "vector/",
+            "vector/*"
+          ]
+        }
+      }
     },
     {
       "Sid": "ReadLogFiles",
@@ -19,12 +26,21 @@
       "Effect": "Allow",
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::fenix-es-config-api",
-      "Condition": { "StringLike": { "s3:prefix": ["vector-logs/*"] } }
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "vector-logs/*"
+          ]
+        }
+      }
     },
     {
       "Sid": "ReadWriteState",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
       "Resource": "arn:aws:s3:::fenix-es-config-api/vector-logs/*"
     },
     {
@@ -49,6 +65,23 @@
         "secretsmanager:TagResource"
       ],
       "Resource": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:vector-logs/*"
+    },
+    {
+      "Sid": "EcsAndLoadBalancerHealthReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:ListClusters",
+        "ecs:DescribeClusters",
+        "ecs:ListServices",
+        "ecs:DescribeServices",
+        "ecs:ListContainerInstances",
+        "ecs:DescribeContainerInstances",
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTargetHealth",
+        "ec2:DescribeInstances"
+      ],
+      "Resource": "*"
     }
   ]
 }

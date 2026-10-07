@@ -41,6 +41,11 @@ class Settings:
     listing_cache_seconds: int = 30           # recent hours; older hours are cached longer
     clusters_cache_seconds: int = 300
 
+    # ---- ECS / load balancer health page (read-only AWS calls)
+    health_enabled: bool = True
+    ecs_region: str = "us-west-2"
+    health_cache_seconds: int = 60
+
     # ---- app state (users, saved searches): S3 or a local folder
     storage_backend: str = "s3"               # "s3" or "local" (local = dev only)
     s3_bucket: str = ""
@@ -89,6 +94,9 @@ class Settings:
             duckdb_memory_mb=int(env("DUCKDB_MEMORY_MB", "1536")),
             listing_cache_seconds=int(env("LISTING_CACHE_SECONDS", "30")),
             clusters_cache_seconds=int(env("CLUSTERS_CACHE_SECONDS", "300")),
+            health_enabled=_bool(env("HEALTH_ENABLED"), True),
+            ecs_region=env("ECS_REGION", "us-west-2"),
+            health_cache_seconds=int(env("HEALTH_CACHE_SECONDS", "60")),
             storage_backend=storage,
             s3_bucket=env("S3_BUCKET", ""),
             s3_prefix=_slash(env("S3_PREFIX", "vector-logs/")),
