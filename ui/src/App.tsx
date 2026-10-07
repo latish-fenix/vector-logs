@@ -6,6 +6,7 @@ import { Users } from "./pages/admin/Users";
 import { ChangePassword } from "./pages/ChangePassword";
 import { Login } from "./pages/Login";
 import { Health } from "./pages/Health";
+import { LbLogs } from "./pages/LbLogs";
 import { LoadBalancers } from "./pages/LoadBalancers";
 import { LogView } from "./pages/LogView";
 import { Overview } from "./pages/Overview";
@@ -52,6 +53,7 @@ export function App() {
         <Route path="saved" element={<Saved />} />
         <Route path="health" element={<Health />} />
         <Route path="lb" element={<LoadBalancers />} />
+        <Route path="lb-logs" element={<LbLogs />} />
         <Route path="account/password" element={<ChangePassword />} />
         <Route path="admin/clusters" element={<RequireAdmin><Clusters /></RequireAdmin>} />
         <Route path="admin/users" element={<RequireAdmin><Users /></RequireAdmin>} />

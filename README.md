@@ -16,6 +16,7 @@ A web console for the application logs that Vector ships from the Fenix app serv
 - **Overview**: the same search as a chart and top values, for spotting when something started.
 - **ECS health**: every ECS cluster, the load balancer target groups it sits behind and whether each target is healthy; services running fewer tasks than desired; clusters without a load balancer. Read live from AWS (read-only), refreshed every minute.
 - **Load balancers**: every request through the Application Load Balancers, from their access logs: 2xx / 3xx / 4xx / 5xx over time (5xx split into "from the app" and "from the load balancer"), a table per target group with the top failing path, paths grouped across stores and ids, and single requests with every field. Up to 7 days per view within the last 30; 5–10 minutes behind.
+- **Load balancer logs**: the same requests as the original log lines AWS wrote, full screen like the Logs page: pick a load balancer and target group, search for words anywhere in the line, scroll, open a line for its fields, export.
 - **Search** one cluster over any window of up to 7 days within the last 30: free text (`"exact phrase"`, `-exclude`, `column:value`) plus filters on any column.
 - **See when it happened**: a histogram of log lines over time, stacked by level; click a bar to zoom into it.
 - **Narrow down fast**: top values for level, service, host and exception; click to filter, `−` to exclude.
@@ -58,7 +59,7 @@ page ──► counts, chart, percentiles from the minute files; paths and singl
 ```
 
 - The last `LB_WARM_DAYS` (7) are kept converted; an older range (up to 30 days) is converted when someone opens it, with a progress bar on the page.
-- Measured on our two ALBs' volume (about 3 million requests a day): converting an hour takes about 2 s on one low-priority thread; a 7-day summary about 0.4 s; a page of requests about 0.1 s. Disk: about 130 MB a day.
+- Measured on our two ALBs' volume (about 3 million requests a day): converting an hour takes about 2 s on one low-priority thread; a 7-day summary about 0.4 s; a page of requests about 0.1 s. Disk: about 400 MB a day (the original line is kept next to the parsed fields).
 - Members see only the target groups of clusters they may read (`tg-<cluster>` → `<cluster>`); admins see everything, including requests with no target group.
 
 Code map:

@@ -116,7 +116,7 @@ From the Application Load Balancer access logs (`LB_LOGS_BUCKET` / `LB_LOGS_PREF
 | `GET /lb` | Load balancers and their target groups seen in the last 24 hours, and the converter's state |
 | `POST /lb/_summary` | Totals by status class, requests over time, the target group table (requests, 4xx, 5xx, p95, top failing path) |
 | `POST /lb/_paths` | Requests grouped by method and path; `sort`: `errors` (default), `requests`, `slow`; `limit` up to 200 |
-| `POST /lb/_requests` | Single requests, newest first; `offset`, `size` (up to 500), `order` |
+| `POST /lb/_requests` | Single requests (with the original line in `raw`), newest first; `offset`, `size` (up to 500), `order`; also returns the resolved `start` / `end` to reuse when paging |
 | `POST /lb/_export` | The same as a file; `format` `csv` / `json` / `ndjson`, `limit` up to 10,000 |
 
 ```bash
@@ -139,13 +139,13 @@ Every body takes these fields (all optional):
 | `methods`, `path`, `pathGroup` | HTTP methods; path contains (`*` = anything); exact grouped path as `/_paths` returns it |
 | `client`, `target` | IP (or `ip:port`) starts with |
 | `minTargetSeconds` | Only requests whose target took at least this long |
-| `q` | Words in the URL, user agent, trace id, error reason, client or target IP |
+| `q` | Words that must all appear anywhere in the original log line (`"exact phrase"`, `-word` excludes) |
 
 Grouped paths replace Shopify store names with `<store>`, UUIDs with `<uuid>`, long hex ids with `<id>` and numbers with `<n>`: `/fenixdelest/api/v1/<store>/storeinfo`. Percentiles (`p50`, `p95`, `p99`) come from latency bins (5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 500 ms …) and are approximate; `avg` is exact.
 
 The summary's `pending` says how many delivered files of the range are not converted yet (`files` of `of`); `requested: true` means the range is older than `LB_WARM_DAYS` and is being converted now. Ask again in a few seconds.
 
-Each request has these fields (empty ones are left out): `time`, `ts_ms`, `lb`, `tg`, `cluster`, `domain`, `method`, `path`, `path_group`, `query`, `url`, `protocol`, `elb_code`, `tgt_code`, `client_ip`, `client_port`, `target`, `req_t`, `tgt_t`, `resp_t` (seconds), `rx`, `tx` (bytes), `user_agent`, `error_reason`, `classification`, `classification_reason`, `actions`, `elb_error_code`, `target_error_code`, `trace_id`, `type`, `ssl_protocol`, `rule_priority`, `request_created`, `target_list`, `target_code_list`.
+Each request has these fields (empty ones are left out): `time`, `ts_ms`, `lb`, `tg`, `cluster`, `domain`, `method`, `path`, `path_group`, `query`, `url`, `protocol`, `elb_code`, `tgt_code`, `client_ip`, `client_port`, `target`, `req_t`, `tgt_t`, `resp_t` (seconds), `rx`, `tx` (bytes), `user_agent`, `error_reason`, `classification`, `classification_reason`, `actions`, `elb_error_code`, `target_error_code`, `trace_id`, `type`, `ssl_protocol`, `rule_priority`, `request_created`, `target_list`, `target_code_list`, and `raw`: the line exactly as the load balancer wrote it.
 
 ## Saved searches (your own)
 

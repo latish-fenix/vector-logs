@@ -20,11 +20,11 @@ type Tab = "groups" | "paths" | "requests";
 const PAGE = 100;
 
 // Status filter choices (URL parameter st).
-const STATUS_CHOICES: [string, string][] = [
+export const STATUS_CHOICES: [string, string][] = [
   ["", "All statuses"], ["err", "Errors (4xx + 5xx)"], ["2xx", "2xx"], ["3xx", "3xx"], ["4xx", "4xx"], ["5xx", "5xx (all)"],
   ["5xx-app", "5xx from the app"], ["5xx-lb", "5xx from the load balancer"],
 ];
-function statusBody(st: string): Pick<LbBody, "statusClasses" | "source"> {
+export function statusBody(st: string): Pick<LbBody, "statusClasses" | "source"> {
   if (st === "err") return { statusClasses: ["4xx", "5xx"] };
   if (st === "5xx-app") return { statusClasses: ["5xx"], source: "app" };
   if (st === "5xx-lb") return { statusClasses: ["5xx"], source: "lb" };
@@ -38,6 +38,34 @@ const SERIES_VAR: Record<string, string> = {
   "2xx": "var(--st-2xx)", "3xx": "var(--st-3xx)", "4xx": "var(--st-4xx)", "5xx": "var(--st-5xx)", other: "var(--st-other)",
 };
 const SERIES_LABEL: Record<string, string> = { "2xx": "2xx", "3xx": "3xx", "4xx": "4xx", "5xx": "5xx", other: "No status" };
+
+/** The URL parameters both load balancer pages share, as an API body. */
+export function lbBodyFromParams(params: URLSearchParams): LbBody {
+  const p = (k: string) => params.get(k) ?? "";
+  return {
+    start: p("start") || "now-1h", end: p("end") || "now",
+    lbs: p("lb") ? [p("lb")] : [],
+    targetGroups: p("tg") ? [p("tg")] : [],
+    domains: p("domain") ? [p("domain")] : [],
+    statusCodes: p("code") ? [Number(p("code"))] : [],
+    ...statusBody(p("st")),
+    methods: p("method") ? [p("method")] : [],
+    path: p("path"),
+    pathGroup: p("pg"),
+    client: p("client"),
+    target: p("target"),
+    minTargetSeconds: p("slow") ? Number(p("slow")) : null,
+    q: p("q"),
+  };
+}
+
+/** The same filters on the other page (page-only parameters dropped). */
+export function lbLink(to: "/lb" | "/lb-logs", params: URLSearchParams): string {
+  const n = new URLSearchParams(params);
+  for (const k of ["tab", "show", "sort", "order", "wrap"]) n.delete(k);
+  const qs = n.toString();
+  return qs ? `${to}?${qs}` : to;
+}
 
 export function secs(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "—";
@@ -88,22 +116,13 @@ export function LoadBalancers() {
     setParams(next, { replace: false });
   };
 
-  const body: LbBody = useMemo(() => ({
-    start, end,
-    lbs: p("lb") ? [p("lb")] : [],
-    targetGroups: p("tg") ? [p("tg")] : [],
-    domains: p("domain") ? [p("domain")] : [],
-    statusCodes: p("code") ? [Number(p("code"))] : [],
-    ...statusBody(p("st")),
-    methods: p("method") ? [p("method")] : [],
-    path: p("path"),
-    pathGroup: p("pg"),
-    client: p("client"),
-    target: p("target"),
-    minTargetSeconds: p("slow") ? Number(p("slow")) : null,
-    q: p("q"),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [params]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const body: LbBody = useMemo(() => lbBodyFromParams(params), [params]);
+  const lineLink = (extra: Record<string, string>) => {
+    const n = new URLSearchParams(params);
+    for (const [k, v] of Object.entries(extra)) n.set(k, v);
+    return lbLink("/lb-logs", n);
+  };
 
   const overview = useQuery({ queryKey: ["lb-overview"], queryFn: () => get<LbOverview>("/lb"), staleTime: 60_000, retry: false });
   const summary = useQuery({
@@ -232,11 +251,11 @@ export function LoadBalancers() {
                 <div className="grow" />
                 <span className="hint">{num(d.totals.requests)} requests · {num(d.files)} files · {duration(d.tookMs)}</span>
               </div>
-              {tab === "groups" && <GroupsTable rows={d.targetGroups} logClusters={logClusters}
+              {tab === "groups" && <GroupsTable rows={d.targetGroups} logClusters={logClusters} lineLink={lineLink}
                 onPick={(tg) => set({ tg: tg ?? "-", tab: "paths" })} onPath={(tg, m, pg) => set({ tg: tg ?? "-", method: m, pg, tab: "requests" })} />}
               {tab === "paths" && <PathsTab body={body} sort={p("sort") || "errors"} setSort={(s) => set({ sort: s === "errors" ? null : s })}
                 onPick={(m, pg) => set({ method: m, pg, tab: "requests" })} />}
-              {tab === "requests" && <RequestsTab body={body} zone={zone} total={d.totals.requests} maxExport={me.limits.maxExportRows}
+              {tab === "requests" && <RequestsTab body={body} linesTo={lbLink("/lb-logs", params)} zone={zone} total={d.totals.requests} maxExport={me.limits.maxExportRows}
                 onFilter={(k, v) => set({ [k]: v })} onExported={(rows, name) => toast(`Downloaded ${num(rows)} requests as ${name}`)} />}
             </section>
           </>
@@ -429,8 +448,8 @@ function StatusChart({ buckets, interval, start, end, zone, errorsOnly, onZoom }
 
 // ------------------------------------------------------------------ target groups
 
-function GroupsTable({ rows, logClusters, onPick, onPath }: {
-  rows: LbTargetGroupRow[]; logClusters: Set<string>;
+function GroupsTable({ rows, logClusters, lineLink, onPick, onPath }: {
+  rows: LbTargetGroupRow[]; logClusters: Set<string>; lineLink: (extra: Record<string, string>) => string;
   onPick: (tg: string | null) => void; onPath: (tg: string | null, method: string, pg: string) => void;
 }) {
   if (!rows.length) return <Empty title="No requests match" />;
@@ -450,6 +469,7 @@ function GroupsTable({ rows, logClusters, onPick, onPath }: {
               <td className="nowrap">
                 {r.tg ? <span className="mono" style={{ fontWeight: 600 }}>{r.tg}</span> : <span className="hint" title="Requests the load balancer answered without forwarding (redirects, fixed responses, bad requests)">(no target group)</span>}
                 {r.cluster && logClusters.has(r.cluster) && <Link className="hlink" to={`/logs/${enc(r.cluster)}`} onClick={(e) => e.stopPropagation()}>logs</Link>}
+                <Link className="hlink" to={lineLink({ tg: r.tg ?? "-" })} onClick={(e) => e.stopPropagation()} title="This target group's log lines">lines</Link>
                 {r.tg && <Link className="hlink" to={`/health?q=${enc(r.tg)}`} onClick={(e) => e.stopPropagation()}>health</Link>}
               </td>
               <td className="mono nowrap" style={{ fontSize: 13 }}>{r.lbs.map((l) => <div key={l}>{l}</div>)}</td>
@@ -529,7 +549,7 @@ function PathsTab({ body, sort, setSort, onPick }: { body: LbBody; sort: string;
 
 // ------------------------------------------------------------------ single requests
 
-const DETAIL: [string, string][] = [
+export const DETAIL: [string, string][] = [
   ["time", "Time (UTC)"], ["elb_code", "Status (load balancer)"], ["tgt_code", "Status (target)"], ["method", "Method"], ["url", "URL"],
   ["path_group", "Path group"], ["domain", "Domain"], ["lb", "Load balancer"], ["tg", "Target group"], ["cluster", "Cluster"], ["target", "Target"],
   ["client_ip", "Client IP"], ["client_port", "Client port"], ["req_t", "Request time (s)"], ["tgt_t", "Target time (s)"], ["resp_t", "Response time (s)"],
@@ -539,8 +559,8 @@ const DETAIL: [string, string][] = [
   ["request_created", "Request created"], ["target_list", "Targets tried"], ["target_code_list", "Target statuses"],
 ];
 
-function RequestsTab({ body, zone, total, maxExport, onFilter, onExported }: {
-  body: LbBody; zone: Zone; total: number; maxExport: number; onFilter: (k: string, v: string) => void; onExported: (rows: number, name: string) => void;
+function RequestsTab({ body, linesTo, zone, total, maxExport, onFilter, onExported }: {
+  body: LbBody; linesTo: string; zone: Zone; total: number; maxExport: number; onFilter: (k: string, v: string) => void; onExported: (rows: number, name: string) => void;
 }) {
   const [open, setOpen] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -562,6 +582,7 @@ function RequestsTab({ body, zone, total, maxExport, onFilter, onExported }: {
       <div className="lv-status" style={{ borderTop: 0 }}>
         <span><strong>{num(matched)}</strong> requests, newest first</span>
         <div className="grow" />
+        <Link className="btn btn-sm" to={linesTo} title="The same requests as the original log lines, full screen"><Icon name="terminal" size={15} /> Open as log lines</Link>
         <button type="button" className="btn btn-sm" onClick={() => setExporting(true)} disabled={!matched}><Icon name="download" size={15} /> Export</button>
       </div>
       {q.isLoading ? <Loading what="Reading requests…" /> : q.error ? <div className="card-body"><ErrorCallout error={q.error} /></div>
@@ -629,7 +650,7 @@ function RequestsTab({ body, zone, total, maxExport, onFilter, onExported }: {
   );
 }
 
-function LbExportDialog({ body, total, max, onClose, onDone }: { body: LbBody; total: number; max: number; onClose: () => void; onDone: (rows: number, name: string) => void }) {
+export function LbExportDialog({ body, total, max, onClose, onDone }: { body: LbBody; total: number; max: number; onClose: () => void; onDone: (rows: number, name: string) => void }) {
   const [format, setFormat] = useState<"csv" | "json" | "ndjson">("csv");
   const cap = Math.max(1, Math.min(total, max));
   const [limit, setLimit] = useState(cap);

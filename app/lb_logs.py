@@ -46,6 +46,7 @@ from .settings import Settings
 log = logging.getLogger("vector_logs.lb")
 
 MINUTE = 60_000
+FORMAT_VERSION = "2"   # 2: the original line is kept (raw). A change rebuilds CACHE_DIR/lb from S3.
 LB_NAME_RE = re.compile(r"^[A-Za-z0-9-]{1,32}$")
 FILE_RE = re.compile(
     r"^(?P<acct>\d{12})_elasticloadbalancing_(?P<region>[a-z0-9-]+)_app\.(?P<lb>[A-Za-z0-9-]{1,32})\."
@@ -61,7 +62,6 @@ ALB_FIELDS = [
     "error_reason", "target_port_list", "target_status_code_list", "classification", "classification_reason",
     "conn_trace_id", "transformed_host", "transformed_uri", "request_transform_status", "ip_address",
     "target_error_code", "elb_error_code", "spare1", "spare2", "spare3", "spare4"]
-_CSV_COLUMNS = "{" + ", ".join(f"'{c}': 'VARCHAR'" for c in ALB_FIELDS) + "}"
 
 # One row per request in the converted files (ts_ms = epoch milliseconds, UTC).
 REQUEST_COLUMNS = [
@@ -69,7 +69,7 @@ REQUEST_COLUMNS = [
     "protocol", "elb_code", "tgt_code", "client_ip", "client_port", "target", "req_t", "tgt_t", "resp_t",
     "rx", "tx", "user_agent", "error_reason", "classification", "classification_reason", "actions",
     "elb_error_code", "target_error_code", "trace_id", "type", "ssl_protocol", "rule_priority",
-    "request_created", "target_list", "target_code_list"]
+    "request_created", "target_list", "target_code_list", "raw"]
 ROLLUP_COLUMNS = ["minute_ms", "lb", "tg", "cluster", "domain", "elb_code", "tgt_code", "lat_bin", "n", "tgt_t_sum",
                   "tgt_t_n"]
 # Target response time bins (milliseconds) kept in the per-minute files, so percentiles over days
@@ -87,10 +87,25 @@ def _secs(col: str) -> str:  # -1 means "no answer" in ALB logs
     return f"CASE WHEN try_cast({col} AS DOUBLE) >= 0 THEN try_cast({col} AS DOUBLE) END"
 
 
+# One token per field: a "quoted string" (backslash escapes inside) or a run of non-spaces.
+_TOKEN_RE = '"(?:[^"\\\\]|\\\\.)*"|[^ ]+'
+
+
+def _fields_sql(files_sql: str) -> str:
+    """Each line as it is (raw) plus the documented fields, unquoted, by position."""
+    cols = ", ".join(f"CASE WHEN t[{i}] LIKE '\"%\"' THEN t[{i}][2:-2] ELSE t[{i}] END AS \"{name}\""
+                     for i, name in enumerate(ALB_FIELDS, start=1))
+    return f"""SELECT raw, {cols}
+      FROM (SELECT raw, regexp_extract_all(raw, '{_TOKEN_RE}') AS t
+            FROM read_csv({files_sql}, columns = {{'raw': 'VARCHAR'}}, delim = '\\x1f', quote = '', escape = '',
+                          header = false, auto_detect = false, ignore_errors = true)
+            WHERE raw IS NOT NULL AND raw <> '')"""
+
+
 def convert_sql(files_sql: str) -> str:
     """SELECT turning raw ALB log lines (read_csv over files_sql) into REQUEST_COLUMNS."""
     base = f"""
-      SELECT {_dash('"time"')} AS time,
+      SELECT raw, {_dash('"time"')} AS time,
              epoch_ms(try_cast("time" AS TIMESTAMP)) AS ts_ms,
              split_part(elb, '/', 2) AS lb,
              nullif(regexp_extract(target_group_arn, 'targetgroup/([^/]+)/', 1), '') AS tg,
@@ -122,8 +137,7 @@ def convert_sql(files_sql: str) -> str:
              {_dash('request_creation_time')} AS request_created,
              {_dash('target_port_list')} AS target_list,
              {_dash('target_status_code_list')} AS target_code_list
-      FROM read_csv({files_sql}, columns = {_CSV_COLUMNS}, delim = ' ', quote = '"', escape = '\\',
-                    header = false, auto_detect = false, null_padding = true, ignore_errors = true)"""
+      FROM ({_fields_sql(files_sql)}) f"""
     path = "coalesce(nullif(regexp_extract(url, '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*([^?#]*)', 1), ''), " \
            "CASE WHEN url LIKE '/%' THEN split_part(split_part(url, '?', 1), '#', 1) END, '/')"
     group = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(p.path, " \
@@ -131,7 +145,7 @@ def convert_sql(files_sql: str) -> str:
             "'/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}', '/<uuid>', 'g'), " \
             "'/[0-9A-Fa-f]{16,}(/|$)', '/<id>\\1', 'g'), '/[0-9]+(/|$)', '/<n>\\1', 'g'), '/[0-9]+(/|$)', '/<n>\\1', 'g')"
     return f"""
-      SELECT p.time, p.ts_ms, p.lb, p.tg,
+      SELECT p.raw, p.time, p.ts_ms, p.lb, p.tg,
              CASE WHEN p.tg LIKE 'tg-%' THEN substr(p.tg, 4) ELSE p.tg END AS cluster,
              p.domain, p.method, p.path, {group} AS path_group,
              nullif(regexp_extract(p.url, '\\?([^#]*)', 1), '') AS query,
@@ -243,7 +257,8 @@ def lb_error(e: Exception, what: str) -> ApiError:
     if code in ("AccessDenied", "AccessDeniedException", "403", "InvalidAccessKeyId", "ExpiredToken"):
         return ApiError(500, "LB_LOGS_ACCESS_DENIED",
                         f"The server may not {what} in the load balancer logs bucket: add the "
-                        "ReadLoadBalancerLogs statement from docs/iam-policy.json to the EC2 role",
+                        "ListLoadBalancerLogs and ReadLoadBalancerLogs statements from docs/iam-policy.json "
+                        "to the EC2 role",
                         {"awsError": code})
     if code == "NoSuchBucket":
         return ApiError(502, "LB_LOGS_BUCKET_MISSING", "LB_LOGS_BUCKET does not exist", {"awsError": code})
@@ -480,10 +495,31 @@ class Converter:
             self._stop.wait(2)
 
     # -- one cycle
+    def _check_format(self) -> None:
+        """Converted files from an older version of this code are removed and converted again."""
+        mark = self.store.root / "FORMAT"
+        try:
+            current = mark.read_text().strip()
+        except OSError:
+            current = None
+        if current == FORMAT_VERSION:
+            return
+        for kind in ("hour", "minute", "raw"):
+            d = self.store.root / kind
+            if d.exists():
+                self.store.trash_dir.mkdir(parents=True, exist_ok=True)
+                os.replace(d, self.store.trash_dir / f"{kind}-v{current}-{time.time_ns()}")
+        self._done.clear()
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.write_text(FORMAT_VERSION)
+        if current is not None:
+            log.warning("load balancer logs: converted files are from format %s; converting again", current)
+
     def run_once(self) -> None:
         t0 = time.monotonic()
         self._last_cycle = t0
         try:
+            self._check_format()
             self._empty_trash()
             now = self.now()
             warm_from = now - timedelta(days=self.settings.lb_warm_days)
@@ -844,10 +880,12 @@ def build_where(q: LbQuery, start_ms: int, end_ms: int, access: Access | None, r
         w.add("target LIKE ? ESCAPE '\\'", _like(q.target) + "%")
     if q.min_target_seconds is not None:
         w.add("tgt_t >= ?", float(q.min_target_seconds))
-    for word in re.findall(r'"[^"]+"|\S+', q.q or ""):
+    for word in re.findall(r'"[^"]+"|\S+', q.q or ""):      # every word, anywhere in the original line
+        neg = word.startswith("-") and len(word) > 1
+        word = word[1:] if neg else word
         word = word.strip('"')
-        cols = ["url", "user_agent", "trace_id", "error_reason", "client_ip", "target", "domain", "classification_reason"]
-        w.add(" OR ".join(f"coalesce({c} ILIKE ? ESCAPE '\\', false)" for c in cols), *([f"%{_like(word)}%"] * len(cols)))
+        if word:
+            w.add(f"{'NOT ' if neg else ''}coalesce(raw ILIKE ? ESCAPE '\\', false)", f"%{_like(word)}%")
     return w
 
 
@@ -1113,7 +1151,7 @@ class LbService:
         s, e = self.resolve_range(q.start, q.end)
         src = self.sources(s, e, q.lbs)
         if not src.count:
-            return {"total": 0, "hits": [], "tookMs": 0}
+            return {"start": s, "end": e, "total": 0, "hits": [], "tookMs": 0}
         w = build_where(q, s, e, access, rollup=False)
         desc = order != "asc"
 
@@ -1148,7 +1186,7 @@ class LbService:
             finally:
                 con.close()
         total, hits = self._run(go)
-        return {"total": total, "hits": hits, "tookMs": int((time.monotonic() - t0) * 1000)}
+        return {"start": s, "end": e, "total": total, "hits": hits, "tookMs": int((time.monotonic() - t0) * 1000)}
 
     def export(self, q: LbQuery, access: Access | None, fmt: str, limit: int) -> tuple[Iterator[bytes], int]:
         res = self.requests(q, access, 0, max(1, min(int(limit), self.settings.max_export_rows)))

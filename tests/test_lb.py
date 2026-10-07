@@ -294,3 +294,32 @@ def test_s3_source_and_access_denied(tmp_path, logs_dir):
         assert status["lastError"]["code"] == "LB_LOGS_ACCESS_DENIED"
         lbs = client.get("/api/v1/lb", headers=ROOT_H).json()
         assert lbs["converter"]["lastError"]["code"] == "LB_LOGS_ACCESS_DENIED"
+
+
+def test_original_lines_are_kept_and_searchable(lb_env):
+    client, written, settings, _ = lb_env
+    r = client.post("/api/v1/lb/_requests", json=body(size=5), headers=ROOT_H).json()
+    h = r["hits"][0]
+    key = next(w.key for w in written if int(w.ts.timestamp() * 1000) == h["ts_ms"])
+    with gzip.open(Path(settings.lb_logs_local_dir) / key, "rt") as fh:
+        lines = fh.read().splitlines()
+    assert h["raw"] in lines and h["raw"].startswith(("https ", "h2 ")) and h["trace_id"] in h["raw"]
+    # every word must appear somewhere in the line; -word excludes
+    def count(q):
+        return client.post("/api/v1/lb/_requests", json=body(q=q, size=1), headers=ROOT_H).json()["total"]
+    all_store = sum(1 for w in written if w.path.endswith("/storeinfo"))
+    with_shop, without_shop = count("storeinfo alpha-shop.myshopify.com"), count("storeinfo -alpha-shop.myshopify.com")
+    assert count("storeinfo") == all_store and with_shop > 0 and without_shop > 0
+    assert with_shop + without_shop == all_store
+
+
+def test_old_converted_files_are_rebuilt(lb_env):
+    client, written, settings, conv = lb_env
+    root = Path(settings.cache_dir) / "lb"
+    before = client.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()["totals"]["requests"]
+    (root / "FORMAT").write_text("1")
+    conv2 = Converter(settings)
+    conv2.run_once()
+    assert (root / "FORMAT").read_text() == "2"
+    after = client.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()["totals"]["requests"]
+    assert before == after == len(written)

@@ -132,7 +132,7 @@ For an install from before the page existed:
    OK    read 823002541310_elasticloadbalancing_us-west-2_app.elb-alpha-…log.gz (94,141 bytes)
    ```
 
-6. Open **Infrastructure → Load balancers**. Right after the start the page says it is converting; the days since logging began take a minute or two.
+6. Open **Infrastructure → Load balancers** (counts and charts) or **Load balancer logs** (the original lines). Right after the start the page says it is converting; the days since logging began take a minute or two.
 
 ## Day-to-day operations
 
@@ -154,5 +154,6 @@ Vector writes one file per server about every 5 minutes, in hourly folders. A se
 - Plain HTTP: passwords and log contents (tracking numbers, zip codes) cross the network unencrypted, as with ES-API today. When HTTPS comes, set `COOKIE_SECURE=true`.
 - One search covers at most 7 days (`MAX_SEARCH_HOURS`); it can start anywhere in the 30 days the bucket keeps.
 - An export holds at most 10,000 lines (`MAX_EXPORT_ROWS`).
+- The converted load balancer logs take about 400 MB a day for the two ALBs (about 3 GB for the 7 days kept ready). After an update that changes their format, the server deletes and converts them again by itself.
 - Load balancer numbers run 5–10 minutes behind (AWS delivers a file every 5 minutes) and AWS delivers access logs on a best-effort basis, so they are for investigating, not billing. Percentiles are approximate (from latency bins).
 - Only Application Load Balancers: the NLB `elb-prod-sftp` writes a different log format.

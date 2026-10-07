@@ -88,6 +88,7 @@ export function Shell() {
           <span className="nav-label">Infrastructure</span>
           <NavItem to="/health" icon="activity" label="ECS health" />
           <NavItem to="/lb" icon="pipeline" label="Load balancers" />
+          <NavItem to="/lb-logs" icon="terminal" label="Load balancer logs" />
         </div>
         {me.admin && (
           <div className="nav-group">
