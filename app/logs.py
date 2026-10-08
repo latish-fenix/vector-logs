@@ -745,10 +745,10 @@ class LogService:
 
     # -- export
     def export(self, cluster: str, spec: SearchSpec, fmt: str, columns: list[str] | None,
-               limit: int, tz: str | None = None) -> "Export":
+               limit: int, tz: str | None = None, offset_minutes: int | None = None) -> "Export":
         """The first `limit` matching lines in spec.order. With tz (an IANA name such as
         Asia/Kolkata), log_time is written in that zone with its offset, as the viewer shows it."""
-        zone = export_zone(tz)
+        zone = export_zone(tz, offset_minutes)
         start_ms, end_ms, files = self._prepare(cluster, spec)
         limit = max(1, min(int(limit), self.settings.max_export_rows))
         if not files:
@@ -794,13 +794,33 @@ class Export:
     zone: Any = None      # ZoneInfo the times were written in (None: as stored, UTC)
 
 
-def export_zone(tz: str | None):
-    if not tz or tz.upper() == "UTC":
-        return None
+def _zone(tz: str):
+    """ZoneInfo from the system, else from the tzdata package (it also has the old names browsers
+    still send, such as Asia/Calcutta, which newer system zone data leaves out)."""
     try:
         return ZoneInfo(tz)
     except (ZoneInfoNotFoundError, ValueError):
-        raise bad_request("INVALID_TIME_ZONE", f"Unknown time zone '{tz}'") from None
+        pass
+    try:
+        import importlib.resources
+        res = importlib.resources.files("tzdata.zoneinfo").joinpath(*tz.split("/"))
+        with res.open("rb") as f:
+            return ZoneInfo.from_file(f, key=tz)
+    except Exception:  # noqa: BLE001 - no tzdata package or no such zone
+        return None
+
+
+def export_zone(tz: str | None, offset_minutes: int | None = None):
+    """The zone to write times in. An IANA name if the server knows it; otherwise the browser's
+    current UTC offset; None = UTC."""
+    if tz and tz.upper() not in ("UTC", "ETC/UTC", "Z"):
+        zone = _zone(tz)
+        if zone is not None:
+            return zone
+        log.warning("unknown time zone %r; using the browser's offset", tz)
+    if offset_minutes:
+        return timezone(timedelta(minutes=offset_minutes))
+    return None
 
 
 def zone_time(ms: int | None, zone, with_ms: bool = True) -> str | None:

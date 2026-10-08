@@ -182,8 +182,13 @@ def test_export_matches_the_screen_and_time_zone(client):
         utc = datetime.fromtimestamp(data[0]["log_time_ms"] / 1000, timezone.utc)
         assert data[0]["log_time"] == (utc + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S.") + \
             f"{data[0]['log_time_ms'] % 1000:03d} +05:30"
-    r = client.post(f"{URL}/_export", json={"start": "now-1h", "end": "now", "timeZone": "Mars/Base"}, headers=ROOT_H)
-    assert r.status_code == 400 and r.json()["error"]["code"] == "INVALID_TIME_ZONE"
+    # a zone the server doesn't know: the browser's offset is used instead
+    r = client.post(f"{URL}/_export", json={"start": "now-1h", "end": "now", "format": "json", "limit": 1,
+                                            "timeZone": "Mars/Base", "utcOffsetMinutes": 330}, headers=ROOT_H)
+    assert r.status_code == 200 and r.json()[0]["log_time"].endswith(" +05:30")
+    r = client.post(f"{URL}/_export", json={"start": "now-1h", "end": "now", "format": "json", "limit": 1,
+                                            "timeZone": "Asia/Calcutta"}, headers=ROOT_H)
+    assert r.status_code == 200 and r.json()[0]["log_time"].endswith(" +05:30")
 
 
 def test_export_is_capped(tmp_path, logs_dir):

@@ -286,7 +286,7 @@ export function LogView() {
         <ExportDialog total={total} shownColumns={cols.filter((c) => c !== MESSAGE)} max={me.limits.maxExportRows} describe={describe} order={order} zone={zone} onClose={() => setExportOpen(false)}
           run={async (format, columns, limit) => {
             const anchored = first ? { ...body, start: String(first.start), end: String(first.end) } : body;
-            const d = await downloadPost(`${base}/_export`, { ...anchored, format, columns: columns.length ? columns : null, limit, timeZone: exportZone(zone) });
+            const d = await downloadPost(`${base}/_export`, { ...anchored, format, columns: columns.length ? columns : null, limit, timeZone: exportZone(zone), utcOffsetMinutes: zone === "utc" ? 0 : -new Date().getTimezoneOffset() });
             saveDownload(d);
             toast(exportedText(d, zone));
             setExportOpen(false);

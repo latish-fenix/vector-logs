@@ -54,6 +54,8 @@ class ExportBody(SearchBody):
     limit: int = Field(10_000, ge=1)
     timeZone: str | None = Field(None, max_length=64,
                                  description="IANA zone (e.g. Asia/Kolkata) to write log_time in; default UTC")
+    utcOffsetMinutes: int | None = Field(None, ge=-14 * 60, le=14 * 60,
+                                         description="Used when timeZone is unknown to the server (IST = 330)")
 
 
 class SavedBody(BaseModel):
@@ -109,7 +111,7 @@ def record(cluster_id: str, request: Request, key: str = Query(..., max_length=1
 def export(cluster_id: str, body: ExportBody, request: Request, user: User = Depends(current_user)):
     require_cluster(user, cluster_id)
     ex = request.app.state.logs.export(cluster_id, body.spec(), body.format, body.columns, body.limit,
-                                       body.timeZone)
+                                       body.timeZone, body.utcOffsetMinutes)
     _event(request, user, "LOGS_EXPORT", clusterId=cluster_id, **_describe(body), format=ex.fmt, rows=ex.rows,
            order=body.order, firstMs=ex.first_ms, lastMs=ex.last_ms)
     filename = _export_name(cluster_id, ex, body.order)
