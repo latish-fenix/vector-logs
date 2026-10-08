@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useId, useMemo, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
 import { Link, Navigate, useParams, useSearchParams } from "react-router-dom";
 import {
   downloadPost, enc, get, request,
@@ -172,10 +172,12 @@ export function Overview() {
   const total = res?.total ?? 0;
   const describe = [rangeLabel(start, end, zone), q && `“${q}”`, ...filters.map(filterText)].filter(Boolean).join(" · ");
 
+  const draft = useRef<[string, string] | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (qDraft.trim() === q) setNonce((n) => n + 1);
-    else set({ q: qDraft.trim() });
+    const range = draft.current;      // custom times typed but not applied: Search applies them too
+    if (qDraft.trim() === q && !range) setNonce((n) => n + 1);
+    else set({ q: qDraft.trim(), ...(range ? { start: range[0], end: range[1] } : {}) });
   };
   const setFilters = (next: LogFilter[]) => set({ f: next.length ? JSON.stringify(next) : null });
   const addFilter = (f: LogFilter) => {
@@ -203,7 +205,7 @@ export function Overview() {
             <label className="label" htmlFor="lg-q">Search <span className="hint">· all words must appear · <code>"exact phrase"</code> · <code>-word</code> to exclude · <code>column:value</code></span></label>
             <input id="lg-q" className="input mono" value={qDraft} placeholder='e.g. "Tracking Number not found" carrier:UPS -DEBUG' onChange={(e) => setQDraft(e.target.value)} spellCheck={false} autoComplete="off" />
           </div>
-          <TimePicker start={start} end={end} zone={zone} maxHours={maxHours} onChange={setRange} />
+          <TimePicker start={start} end={end} zone={zone} maxHours={maxHours} onChange={setRange} draft={draft} />
           <div className="field" style={{ justifyContent: "flex-end" }}>
             <button type="submit" className="btn btn-primary"><Icon name="search" /> Search</button>
           </div>
@@ -374,8 +376,12 @@ export function ZoneToggle({ zone, onChange }: { zone: Zone; onChange: (z: Zone)
   );
 }
 
-export function TimePicker({ start, end, zone, maxHours, onChange, compact }: {
+/** Times typed in the custom range but not applied yet; the page's Search button applies them too. */
+export type RangeDraft = { current: [string, string] | null };
+
+export function TimePicker({ start, end, zone, maxHours, onChange, compact, draft }: {
   start: string; end: string; zone: Zone; maxHours: number; onChange: (s: string, e: string) => void; compact?: boolean;
+  draft?: RangeDraft;
 }) {
   const preset = end === "now" && PRESETS.some(([v]) => v === start) ? start : "custom";
   const [custom, setCustom] = useState(preset === "custom");
@@ -383,7 +389,9 @@ export function TimePicker({ start, end, zone, maxHours, onChange, compact }: {
   const toMs = (v: string) => (isRelative(v) ? now - relMs(v) : Date.parse(v));
   const [from, setFrom] = useState(toInput(toMs(start), zone));
   const [to, setTo] = useState(toInput(toMs(end), zone));
+  const [edited, setEdited] = useState(false);
   useEffect(() => {
+    setEdited(false);
     setFrom(toInput(toMs(start), zone));
     setTo(toInput(toMs(end), zone));
     setCustom(!(end === "now" && PRESETS.some(([v]) => v === start)));
@@ -393,6 +401,9 @@ export function TimePicker({ start, end, zone, maxHours, onChange, compact }: {
   const b = fromInput(to, zone);
   const err = a === null || b === null ? "Pick both times" : b <= a ? "“To” must be after “From”"
     : b - a > maxHours * 3600_000 ? `At most ${maxHours / 24} days per search` : a < now - 31 * 86400_000 ? "S3 keeps 30 days of logs" : null;
+  const pending = custom && edited && !err;
+  const blocking = !!err && !err.startsWith("S3");
+  if (draft) draft.current = pending ? [new Date(a!).toISOString(), new Date(b!).toISOString()] : null;
   return (
     <div className="field" style={compact ? { gap: 2 } : undefined}>
       <label className={compact ? "sr-only" : "label"} htmlFor="lg-range">Time range</label>
@@ -408,15 +419,16 @@ export function TimePicker({ start, end, zone, maxHours, onChange, compact }: {
         </select>
         {custom && (
           <>
-            <input type="datetime-local" className="input" aria-label="From" style={{ width: "auto" }} value={from} onChange={(e) => setFrom(e.target.value)} />
+            <input type="datetime-local" className="input" aria-label="From" style={{ width: "auto" }} value={from} onChange={(e) => { setFrom(e.target.value); setEdited(true); }} />
             <span className="hint">to</span>
-            <input type="datetime-local" className="input" aria-label="To" style={{ width: "auto" }} value={to} onChange={(e) => setTo(e.target.value)} />
-            <button type="button" className="btn" disabled={!!err} title={err ?? undefined}
+            <input type="datetime-local" className="input" aria-label="To" style={{ width: "auto" }} value={to} onChange={(e) => { setTo(e.target.value); setEdited(true); }} />
+            <button type="button" className={`btn ${pending ? "btn-primary" : ""}`} disabled={blocking} title={err ?? undefined}
               onClick={() => onChange(new Date(a!).toISOString(), new Date(b!).toISOString())}>Apply</button>
           </>
         )}
       </div>
       {custom && err && <span className="hint" style={{ color: err.startsWith("S3") ? undefined : "var(--danger)" }}>{err}</span>}
+      {pending && <span className="hint" style={{ color: "var(--warn-text)" }}>These times are not applied yet: press Apply or Search.</span>}
     </div>
   );
 }

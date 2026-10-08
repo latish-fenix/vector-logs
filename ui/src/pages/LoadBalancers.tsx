@@ -142,7 +142,12 @@ export function LoadBalancers() {
   const [qText, setQText] = useState(p("q"));
   const [pathText, setPathText] = useState(p("path"));
   useEffect(() => { setQText(p("q")); setPathText(p("path")); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [params]);
-  const submit = (e: FormEvent) => { e.preventDefault(); set({ q: qText.trim() || null, path: pathText.trim() || null }); };
+  const draft = useRef<[string, string] | null>(null);
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const range = draft.current;      // custom times typed but not applied: Apply here applies them too
+    set({ q: qText.trim() || null, path: pathText.trim() || null, ...(range ? { start: range[0], end: range[1] } : {}) });
+  };
 
   const lbNames = overview.data?.items.map((i) => i.name) ?? [];
   const chips: [string, ReactNode, string[]][] = [];
@@ -170,7 +175,7 @@ export function LoadBalancers() {
 
       <section className="card">
         <form className="lv-bar" onSubmit={submit} style={{ alignItems: "flex-end" }}>
-          <TimePicker start={start} end={end} zone={zone} maxHours={me.limits.maxSearchHours} compact
+          <TimePicker start={start} end={end} zone={zone} maxHours={me.limits.maxSearchHours} compact draft={draft}
             onChange={(s, e) => set({ start: s, end: e === "now" ? null : e })} />
           <div className="field">
             <label className="sr-only" htmlFor="lb-pick">Load balancer</label>

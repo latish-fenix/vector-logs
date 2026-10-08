@@ -115,10 +115,12 @@ export function LbLogs() {
     }
   };
 
+  const draft = useRef<[string, string] | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (qDraft.trim() === p("q")) setNonce((n) => n + 1);
-    else set({ q: qDraft.trim() || null });
+    const range = draft.current;      // custom times typed but not applied: Search applies them too
+    if (qDraft.trim() === p("q") && !range) setNonce((n) => n + 1);
+    else set({ q: qDraft.trim() || null, ...(range ? { start: range[0], end: range[1] } : {}) });
   };
   const toggleRow = (id: string) => setOpen((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
@@ -157,7 +159,7 @@ export function LbLogs() {
             <input id="lbl-q" className="input mono" value={qDraft} spellCheck={false} autoComplete="off"
               placeholder='Words anywhere in the line: path, IP, trace id, user agent… "exact phrase", -exclude' onChange={(e) => setQDraft(e.target.value)} />
           </div>
-          <TimePicker start={start} end={end} zone={zone} maxHours={me.limits.maxSearchHours} compact
+          <TimePicker start={start} end={end} zone={zone} maxHours={me.limits.maxSearchHours} compact draft={draft}
             onChange={(s, e) => set({ start: s === "now-1h" && e === "now" ? null : s, end: e === "now" ? null : e })} />
           <button type="submit" className="btn btn-primary"><Icon name="search" /> Search</button>
         </form>

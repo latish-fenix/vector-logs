@@ -136,10 +136,12 @@ export function LogView() {
     }
   };
 
+  const draft = useRef<[string, string] | null>(null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (qDraft.trim() === q) setNonce((n) => n + 1);
-    else set({ q: qDraft.trim() });
+    const range = draft.current;      // custom times typed but not applied: Search applies them too
+    if (qDraft.trim() === q && !range) setNonce((n) => n + 1);
+    else set({ q: qDraft.trim(), ...(range ? { start: range[0], end: range[1] } : {}) });
   };
   const setFilters = (next: LogFilter[]) => set({ f: next.length ? JSON.stringify(next) : null });
   const addFilter = (f: LogFilter) => {
@@ -166,7 +168,7 @@ export function LogView() {
             <input id="lv-q" className="input mono" value={qDraft} spellCheck={false} autoComplete="off"
               placeholder='Search: words, "exact phrase", -exclude, column:value' onChange={(e) => setQDraft(e.target.value)} />
           </div>
-          <TimePicker start={start} end={end} zone={zone} maxHours={me.limits.maxSearchHours} onChange={setRange} compact />
+          <TimePicker start={start} end={end} zone={zone} maxHours={me.limits.maxSearchHours} onChange={setRange} compact draft={draft} />
           <button type="submit" className="btn btn-primary"><Icon name="search" /> Search</button>
         </form>
         <div className="lv-bar" style={{ paddingTop: 0 }}>
