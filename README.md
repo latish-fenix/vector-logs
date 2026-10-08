@@ -4,7 +4,7 @@ A web console for the application logs that Vector ships from the Fenix app serv
 
 | | |
 | --- | --- |
-| Logs (read-only) | `s3://fenix-ecr-logs/vector/<cluster>/dt=YYYY-MM-DD/hour=HH/*.parquet` (`LOGS_BUCKET`, `LOGS_PREFIX`) |
+| Logs (read-only) | `s3://fenix-vector-ecs-logs/logs/<cluster>/dt=YYYY-MM-DD/hour=HH/*.parquet` (`LOGS_BUCKET`, `LOGS_PREFIX`) |
 | Load balancer logs (read-only) | ALB access logs in `s3://fenix-vector-ecs-logs/loadbalancer-logs/AWSLogs/...` (`LB_LOGS_BUCKET`, `LB_LOGS_PREFIX`) |
 | App state | users and saved searches in `s3://fenix-es-config-api/vector-logs/` |
 | Secrets | AWS Secrets Manager `vector-logs/*` (session key, password hashes) |
@@ -116,7 +116,7 @@ All settings are environment variables in `.env` (see [.env.example](.env.exampl
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `API_PORT` | `443` | Host port |
-| `LOGS_BUCKET` / `LOGS_PREFIX` / `LOGS_REGION` | `fenix-ecr-logs` / `vector/` / `us-west-2` | Where Vector writes |
+| `LOGS_BUCKET` / `LOGS_PREFIX` / `LOGS_REGION` | `fenix-vector-ecs-logs` / `logs/` / `us-west-2` | Where Vector writes |
 | `MAX_SEARCH_HOURS` | `168` | Longest window per search |
 | `MAX_FILES_PER_SEARCH` | `30000` | Refuse searches that would read more files |
 | `MAX_EXPORT_ROWS` | `10000` | Export cap |

@@ -23,8 +23,8 @@ def _bool(value: str | None, default: bool = False) -> bool:
 class Settings:
     # ---- where the logs are (read-only)
     logs_backend: str = "s3"                  # "s3" or "local" (a folder with the same layout; dev/tests)
-    logs_bucket: str = "fenix-ecr-logs"
-    logs_prefix: str = "vector/"              # one folder per cluster below this
+    logs_bucket: str = "fenix-vector-ecs-logs"
+    logs_prefix: str = "logs/"                # one folder per cluster below this
     logs_region: str | None = "us-west-2"
     logs_endpoint_url: str | None = None      # only for S3-compatible test stores
     logs_local_dir: str = "./local-test/logs"
@@ -100,8 +100,8 @@ class Settings:
         storage = env("STORAGE_BACKEND", "s3").lower()
         return cls(
             logs_backend=env("LOGS_BACKEND", "s3").lower(),
-            logs_bucket=env("LOGS_BUCKET", "fenix-ecr-logs"),
-            logs_prefix=_slash(env("LOGS_PREFIX", "vector/").lstrip("/")),
+            logs_bucket=env("LOGS_BUCKET", "fenix-vector-ecs-logs"),
+            logs_prefix=_slash(env("LOGS_PREFIX", "logs/").lstrip("/")),
             logs_region=env("LOGS_REGION", "us-west-2") or None,
             logs_endpoint_url=env("LOGS_ENDPOINT_URL") or None,
             logs_local_dir=env("LOGS_LOCAL_DIR", "./local-test/logs"),

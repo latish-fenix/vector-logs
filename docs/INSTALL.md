@@ -33,7 +33,7 @@ The server reads the logs with the EC2 instance role; no keys are stored anywher
 
    | Statement | Allows |
    | --- | --- |
-   | `ListLogFolders`, `ReadLogFiles` | **read-only**: list and read `s3://fenix-ecr-logs/vector/` |
+   | `ListLogFolders`, `ReadLogFiles` | **read-only**: list and read `s3://fenix-vector-ecs-logs/logs/` |
    | `ListStatePrefix`, `ReadWriteState`, `DeleteLocksAndSavedSearchesOnly` | users and saved searches under `s3://fenix-es-config-api/vector-logs/` |
    | `SecretsManagerOwnPrefixOnly` | its own secrets `vector-logs/*` (session key, password hashes) |
    | `EcsAndLoadBalancerHealthReadOnly` | **read-only** List/Describe of ECS clusters, services, container instances, load balancers, target groups, target health and EC2 instances, for the ECS health page |
@@ -41,7 +41,7 @@ The server reads the logs with the EC2 instance role; no keys are stored anywher
    | `ListLoadBalancerLogs`, `ReadLoadBalancerLogs` | **read-only**: list and read the ALB access logs in `s3://fenix-vector-ecs-logs/loadbalancer-logs/` |
    | `ReadWriteConvertedLoadBalancerLogs` | read and write the converted files in `s3://fenix-vector-ecs-logs/loadbalancer-parquet/` (nothing else) |
 
-3. If the logs bucket is encrypted with a customer-managed KMS key (S3 console → `fenix-ecr-logs` → *Properties* → *Default encryption*), also allow `kms:Decrypt` on that key. With the default *SSE-S3* nothing more is needed.
+3. If the logs bucket is encrypted with a customer-managed KMS key (S3 console → `fenix-vector-ecs-logs` → *Properties* → *Default encryption*), also allow `kms:Decrypt` on that key. With the default *SSE-S3* nothing more is needed.
 4. If the instance has no internet access, it reaches S3 through a VPC endpoint. A *gateway* endpoint only serves buckets in the instance's own region; the check in Step 4 tells you if the logs bucket (us-west-2) or the state bucket can't be reached.
 
 > The state bucket is the one ES-API already uses. Check its name and region on EC2 with `grep -E '^(S3_BUCKET|AWS_REGION)=' ~/ES-API/es-config-api/.env` and use the same values in Step 3 (and in the policy, if the name differs).
@@ -65,7 +65,7 @@ In `.env` check these lines (the defaults match our setup):
 | Setting | Value |
 | --- | --- |
 | `API_PORT` | `443` |
-| `LOGS_BUCKET` / `LOGS_PREFIX` / `LOGS_REGION` | `fenix-ecr-logs` / `vector/` / `us-west-2` |
+| `LOGS_BUCKET` / `LOGS_PREFIX` / `LOGS_REGION` | `fenix-vector-ecs-logs` / `logs/` / `us-west-2` |
 | `S3_BUCKET` / `AWS_REGION` | the ES-API state bucket and its region (see the note in Step 1) |
 | `S3_PREFIX` / `SECRETS_PREFIX` | `vector-logs/` (separate from ES-API) |
 | `BOOTSTRAP_ADMINS` | `latish.madapada@fenixcommerce.com` |
@@ -89,8 +89,8 @@ docker compose exec vector-logs python -m app.cli check
 ```
 OK    state store: 1 user(s) in s3://fenix-es-config-api/vector-logs/
 OK    secrets: app secret present under vector-logs/
-OK    logs: 1 cluster folder(s) in s3://fenix-ecr-logs/vector/: post-btp-01
-OK    read vector/post-btp-01/dt=2026-10-01/hour=04/1790813101-....parquet (12 file(s) in that hour)
+OK    logs: 1 cluster folder(s) in s3://fenix-vector-ecs-logs/logs/: post-btp-01
+OK    read logs/post-btp-01/dt=2026-10-01/hour=04/1790813101-....parquet (12 file(s) in that hour)
 ```
 
 A `FAIL logs: ... LOGS_ACCESS_DENIED` line means Step 1 is missing or not yet active (wait a minute, run `check` again). If port 443 is already taken, `docker compose up` says *address already in use*; see who has it with `sudo ss -ltnp | grep ':443 '`.

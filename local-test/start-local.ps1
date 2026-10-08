@@ -1,7 +1,7 @@
 # Run the log viewer on this PC: http://localhost:8081/ui/
 #
 #   start-local.cmd                     synthetic sample logs (generated on the first run, no AWS needed)
-#   start-local.cmd -RealLogs           the real logs in s3://fenix-ecr-logs/vector/ and the load balancer logs
+#   start-local.cmd -RealLogs           the real logs in s3://fenix-vector-ecs-logs/logs/ and the load balancer logs
 #                                       in s3://fenix-vector-ecs-logs/loadbalancer-logs/ (needs AWS credentials
 #                                       that may read both: -AwsProfile <profile> or your default ones)
 #
@@ -12,8 +12,8 @@
 param(
     [switch]$RealLogs,
     [string]$AwsProfile = "",
-    [string]$Bucket = "fenix-ecr-logs",
-    [string]$Prefix = "vector/",
+    [string]$Bucket = "fenix-vector-ecs-logs",
+    [string]$Prefix = "logs/",
     [string]$Region = "us-west-2",
     [int]$Port = 8081
 )
