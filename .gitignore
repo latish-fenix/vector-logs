@@ -11,3 +11,4 @@ local-test/.secrets/
 local-test/.store/
 local-test/.cache/
 local-test/logs/
+_to_delete/

@@ -55,6 +55,12 @@ export function storeZone(z: Zone) {
   }
 }
 
+/** The IANA zone to write export times in: the browser's, or UTC. */
+export function exportZone(zone: Zone): string {
+  if (zone === "utc") return "UTC";
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; }
+}
+
 export function localZoneName(): string {
   const parts = new Intl.DateTimeFormat("en-US", { timeZoneName: "short" }).formatToParts(new Date());
   return parts.find((p) => p.type === "timeZoneName")?.value ?? "Local";

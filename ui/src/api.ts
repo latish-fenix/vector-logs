@@ -78,7 +78,9 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 
 export const get = <T>(path: string, query?: Query) => request<T>(path, { query });
 
-export async function downloadPost(path: string, body: unknown): Promise<{ blob: Blob; filename: string; rows: number }> {
+export interface Download { blob: Blob; filename: string; rows: number; total: number | null; firstMs: number | null; lastMs: number | null }
+
+export async function downloadPost(path: string, body: unknown): Promise<Download> {
   let res: globalThis.Response;
   try {
     res = await fetch(buildUrl(path), {
@@ -93,7 +95,8 @@ export async function downloadPost(path: string, body: unknown): Promise<{ blob:
   if (!res.ok) return fail(res, path, "Export failed");
   const cd = res.headers.get("content-disposition") ?? "";
   const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? "logs-export";
-  return { blob: await res.blob(), filename, rows: Number(res.headers.get("x-export-rows") ?? 0) };
+  const n = (h: string) => { const v = res.headers.get(h); return v ? Number(v) : null; };
+  return { blob: await res.blob(), filename, rows: n("x-export-rows") ?? 0, total: n("x-export-total"), firstMs: n("x-export-first"), lastMs: n("x-export-last") };
 }
 
 export const enc = encodeURIComponent;

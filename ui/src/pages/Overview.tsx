@@ -3,13 +3,13 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState, type FormEvent }
 import { Link, Navigate, useParams, useSearchParams } from "react-router-dom";
 import {
   downloadPost, enc, get, request,
-  type Column, type Facet, type FilterOp, type LogFilter, type LogHit, type SavedSearch, type SearchBody, type SearchResult,
+  type Column, type Download, type Facet, type FilterOp, type LogFilter, type LogHit, type SavedSearch, type SearchBody, type SearchResult,
 } from "../api";
 import { Histogram, LEVEL_VAR } from "../components/Histogram";
 import { Icon } from "../components/icons";
 import { Page } from "../components/Shell";
 import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, Spinner, copyText, useToast } from "../components/ui";
-import { bytes, duration, fmtTime, fromInput, localZoneName, num, storedZone, storeZone, toInput, type Zone } from "../format";
+import { bytes, duration, exportZone, fmtTime, fromInput, localZoneName, num, storedZone, storeZone, toInput, type Zone } from "../format";
 import { useClusters, useMe } from "../session";
 
 // ------------------------------------------------------------------ constants
@@ -330,19 +330,12 @@ export function Overview() {
           onSave={(c) => { set({ cols: c.join(",") === DEFAULT_COLS.join(",") ? null : c.join(",") }, false); setColsOpen(false); }} />
       )}
       {exportOpen && (
-        <ExportDialog total={total} shownColumns={cols.filter((c) => c !== MESSAGE)} max={me.limits.maxExportRows} describe={describe} onClose={() => setExportOpen(false)}
+        <ExportDialog total={total} shownColumns={cols.filter((c) => c !== MESSAGE)} max={me.limits.maxExportRows} describe={describe} order={order} zone={zone} onClose={() => setExportOpen(false)}
           run={async (format, columns, limit) => {
             const anchored = anchor?.key === bodyKey ? { ...body, start: String(anchor.start), end: String(anchor.end) } : body;
-            const { blob, filename, rows } = await downloadPost(`${base}/_export`, { ...anchored, format, columns: columns.length ? columns : null, limit });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-            toast(`Downloaded ${num(rows)} log lines as ${filename}`);
+            const d = await downloadPost(`${base}/_export`, { ...anchored, format, columns: columns.length ? columns : null, limit, timeZone: exportZone(zone) });
+            saveDownload(d);
+            toast(exportedText(d, zone));
             setExportOpen(false);
           }} />
       )}
@@ -671,11 +664,34 @@ export function ColumnsDialog({ columns, selected, onSave, onClose }: {
 
 // ------------------------------------------------------------------ export dialog
 
-export function ExportDialog({ total, shownColumns, max, describe, run, onClose }: {
+/** Hands a downloaded blob to the browser as a file. */
+export function saveDownload(d: Download) {
+  const url = URL.createObjectURL(d.blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = d.filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** "Downloaded 10,000 of 1,639,581 log lines (08:57:03 → 08:59:59 IST) as …" */
+export function exportedText(d: Download, zone: Zone): string {
+  const of = d.total && d.total > d.rows ? ` of ${num(d.total)}` : "";
+  const span = d.firstMs && d.lastMs
+    ? ` (${fmtTime(Math.min(d.firstMs, d.lastMs), zone, false)} → ${fmtTime(Math.max(d.firstMs, d.lastMs), zone, false)} ${zone === "utc" ? "UTC" : localZoneName()})`
+    : "";
+  return `Downloaded ${num(d.rows)}${of} log lines${span} as ${d.filename}`;
+}
+
+export function ExportDialog({ total, shownColumns, max, describe, order, zone, run, onClose }: {
   total: number;
   shownColumns: string[];
   max: number;
   describe: string;
+  order: "asc" | "desc";
+  zone: Zone;
   run: (format: "csv" | "json" | "ndjson", columns: string[], limit: number) => Promise<void>;
   onClose: () => void;
 }) {
@@ -715,9 +731,16 @@ export function ExportDialog({ total, shownColumns, max, describe, run, onClose 
           <label className="check"><input type="radio" name="cols" checked={which === "shown"} onChange={() => setWhich("shown")} disabled={!shownColumns.length} /> <span>Only the shown columns <span className="hint">· {shownColumns.join(", ") || "none"}</span></span></label>
         </fieldset>
         <div className="field" style={{ maxWidth: 260 }}>
-          <label className="label" htmlFor="exp-limit">Log lines <span className="hint">· up to {num(cap)}{total > max ? ` (the first ${num(max)} in the current order)` : ""}</span></label>
+          <label className="label" htmlFor="exp-limit">Log lines <span className="hint">· up to {num(cap)}</span></label>
           <input id="exp-limit" className="input" type="number" min={1} max={cap} value={limit} onChange={(e) => setLimit(Number(e.target.value))} />
         </div>
+        {Math.min(limit, cap) < total && (
+          <Callout tone="warn" icon="info">
+            The file holds the {order === "desc" ? "newest" : "oldest"} {num(Math.max(1, Math.min(limit, cap)))} of {num(total)} lines, so it covers only the {order === "desc" ? "end" : "start"} of the time range.
+            To export another part, narrow the time range{order === "desc" ? " or switch to Oldest first" : " or switch to Newest first"}.
+          </Callout>
+        )}
+        <span className="hint">Times in the file (log_time) are in {zone === "utc" ? "UTC" : `your time zone, ${localZoneName()}`}, with the offset, as on screen.</span>
         <Callout tone="neutral" icon="info">Logs can hold customer details (tracking numbers, zip codes). Treat the file accordingly.</Callout>
         {error ? <ErrorCallout error={error} /> : null}
       </div>

@@ -5,11 +5,11 @@ import { downloadPost, enc, get, request, type Column, type LogFilter, type LogH
 import { Icon } from "../components/icons";
 import { Page } from "../components/Shell";
 import { Empty, ErrorCallout, Loading, Spinner, copyText, useToast } from "../components/ui";
-import { duration, fmtTime, localZoneName, num, storedZone, storeZone, type Zone } from "../format";
+import { duration, exportZone, fmtTime, localZoneName, num, storedZone, storeZone, type Zone } from "../format";
 import { useClusters, useMe } from "../session";
 import {
   Cell, ColumnsDialog, DEFAULT_COLS, DEFAULT_RANGE, DETAIL_ORDER, ExportDialog, FacetList, FilterDialog, LevelBadge, MESSAGE, NEGATIVE,
-  SaveDialog, SavedMenu, TimePicker, ZoneToggle, cellText, filterText, rangeLabel, readJson,
+  SaveDialog, SavedMenu, TimePicker, ZoneToggle, cellText, exportedText, filterText, rangeLabel, readJson, saveDownload,
 } from "./Overview";
 
 // The logs-first view: the search bar and filters on top, the log lines fill the rest of the
@@ -283,19 +283,12 @@ export function LogView() {
           onSave={(c) => { set({ cols: c.join(",") === DEFAULT_COLS.join(",") ? null : c.join(",") }); setColsOpen(false); }} />
       )}
       {exportOpen && (
-        <ExportDialog total={total} shownColumns={cols.filter((c) => c !== MESSAGE)} max={me.limits.maxExportRows} describe={describe} onClose={() => setExportOpen(false)}
+        <ExportDialog total={total} shownColumns={cols.filter((c) => c !== MESSAGE)} max={me.limits.maxExportRows} describe={describe} order={order} zone={zone} onClose={() => setExportOpen(false)}
           run={async (format, columns, limit) => {
             const anchored = first ? { ...body, start: String(first.start), end: String(first.end) } : body;
-            const { blob, filename, rows } = await downloadPost(`${base}/_export`, { ...anchored, format, columns: columns.length ? columns : null, limit });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
-            toast(`Downloaded ${num(rows)} log lines as ${filename}`);
+            const d = await downloadPost(`${base}/_export`, { ...anchored, format, columns: columns.length ? columns : null, limit, timeZone: exportZone(zone) });
+            saveDownload(d);
+            toast(exportedText(d, zone));
             setExportOpen(false);
           }} />
       )}

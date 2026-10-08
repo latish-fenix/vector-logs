@@ -87,7 +87,8 @@ curl -s -H "$AUTH" "$API/clusters/post-btp-01/logs/_record?key=vector/post-btp-0
 | --- | --- |
 | `format` | `csv` (UTF-8 with BOM, opens in Excel), `json` or `ndjson` |
 | `columns` | Column list; omit for all |
-| `limit` | Up to 10,000 (`MAX_EXPORT_ROWS`), in the search's order |
+| `limit` | Up to 10,000 (`MAX_EXPORT_ROWS`): the first lines in the search's `order` (`desc` = newest first) |
+| `timeZone` | Optional IANA zone, e.g. `Asia/Kolkata`: `log_time` is written in it with its offset (`2026-10-07 01:03:16.571 +05:30`). Default UTC |
 
 ```bash
 curl -s -H "$AUTH" -H 'Content-Type: application/json' -OJ \
@@ -95,7 +96,9 @@ curl -s -H "$AUTH" -H 'Content-Type: application/json' -OJ \
   -d '{"start":"now-1h","end":"now","query":"level:error","format":"csv","limit":5000}'
 ```
 
-The response header `X-Export-Rows` gives the number of lines.
+Response headers: `X-Export-Rows` (lines in the file), `X-Export-Total` (all matching lines),
+`X-Export-First` / `X-Export-Last` (`log_time_ms` of the first and last line). The file name gives the
+times it covers and the order, e.g. `logs-alpha-edds_2026-10-07_0857-0859_+0530_newest-first.json`.
 
 ## ECS health
 

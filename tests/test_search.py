@@ -153,7 +153,8 @@ def test_export_csv_json_ndjson(client):
     assert r.status_code == 200 and r.headers["x-export-rows"] == "7"
     rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
     assert rows[0] == ["log_time", "level", "msg"] and len(rows) == 8 and all(x[1] == "ERROR" for x in rows[1:])
-    assert 'filename="logs-post-btp-01-' in r.headers["content-disposition"]
+    assert 'filename="logs-post-btp-01_' in r.headers["content-disposition"]
+    assert r.headers["content-disposition"].endswith('_UTC_newest-first.csv"')
     r = client.post(f"{URL}/_export", json={**body, "format": "json", "limit": 3}, headers=ROOT_H)
     data = r.json()
     assert len(data) == 3 and data[0]["level"] == "ERROR" and "cluster" in data[0]
@@ -161,6 +162,28 @@ def test_export_csv_json_ndjson(client):
     assert len([json.loads(x) for x in r.text.splitlines()]) == 4
     r = client.post(f"{URL}/_export", json={**body, "format": "csv", "columns": ["nope"]}, headers=ROOT_H)
     assert r.status_code == 400
+
+
+def test_export_matches_the_screen_and_time_zone(client):
+    """The file holds the same lines, in the same order, as the screen; log_time in the viewer's zone."""
+    first = client.post(f"{URL}/_search", json={"start": "now-6h", "end": "now", "size": 5}, headers=ROOT_H).json()
+    for order in ("desc", "asc"):
+        body = {"start": str(first["start"]), "end": str(first["end"]), "order": order}
+        page = client.post(f"{URL}/_search", json={**body, "size": 20}, headers=ROOT_H).json()
+        r = client.post(f"{URL}/_export", json={**body, "format": "json", "limit": 20, "timeZone": "Asia/Kolkata"},
+                        headers=ROOT_H)
+        data = r.json()
+        assert [d["log_time_ms"] for d in data] == [h["log_time_ms"] for h in page["hits"]]
+        assert r.headers["x-export-total"] == str(first["total"])
+        assert r.headers["x-export-first"] == str(data[0]["log_time_ms"])
+        assert r.headers["x-export-last"] == str(data[-1]["log_time_ms"])
+        assert r.headers["content-disposition"].endswith(f'_+0530_{"newest" if order == "desc" else "oldest"}-first.json"')
+        from datetime import datetime, timedelta, timezone
+        utc = datetime.fromtimestamp(data[0]["log_time_ms"] / 1000, timezone.utc)
+        assert data[0]["log_time"] == (utc + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S.") + \
+            f"{data[0]['log_time_ms'] % 1000:03d} +05:30"
+    r = client.post(f"{URL}/_export", json={"start": "now-1h", "end": "now", "timeZone": "Mars/Base"}, headers=ROOT_H)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "INVALID_TIME_ZONE"
 
 
 def test_export_is_capped(tmp_path, logs_dir):

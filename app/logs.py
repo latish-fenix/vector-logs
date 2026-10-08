@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import boto3
 import duckdb
@@ -744,11 +745,14 @@ class LogService:
 
     # -- export
     def export(self, cluster: str, spec: SearchSpec, fmt: str, columns: list[str] | None,
-               limit: int) -> tuple[Iterator[bytes], int, str]:
+               limit: int, tz: str | None = None) -> "Export":
+        """The first `limit` matching lines in spec.order. With tz (an IANA name such as
+        Asia/Kolkata), log_time is written in that zone with its offset, as the viewer shows it."""
+        zone = export_zone(tz)
         start_ms, end_ms, files = self._prepare(cluster, spec)
         limit = max(1, min(int(limit), self.settings.max_export_rows))
         if not files:
-            return _encode(fmt, list(columns or []), []), 0, fmt
+            return Export(_encode(fmt, list(columns or []), []), 0, fmt, start_ms, end_ms, 0, None, None, zone)
         paths, _ = self.materialize([k for k, _ in files])
         con = self._db()
         try:
@@ -758,15 +762,56 @@ class LogService:
             for c in names:
                 wb._col(c)
             has_time = {"log_time_ms": 1} if "log_time_ms" in cols else {}
+            total = con.execute("SELECT count(*) FROM m").fetchone()[0]
             rows, desc = self._rows_for(con, has_time, spec.order, limit, 0, truncate=False)
+            first = last = None
             if rows:
                 idx = {d[0]: i for i, d in enumerate(desc)}
-                rows = [tuple(r[idx[n]] for n in names) for r in rows]
+                t = idx.get("log_time_ms")
+                if t is not None:
+                    first, last = rows[0][t], rows[-1][t]
+                get = {n: (lambda r, i=idx[n]: r[i]) for n in names}
+                if zone and t is not None and "log_time" in get:
+                    get["log_time"] = lambda r: zone_time(r[t], zone)
+                rows = [tuple(get[n](r) for n in names) for r in rows]
         except duckdb.Error as e:
             raise self._db_error(e) from e
         finally:
             con.close()
-        return _encode(fmt, names, rows), len(rows), fmt
+        return Export(_encode(fmt, names, rows), len(rows), fmt, start_ms, end_ms, total, first, last, zone)
+
+
+@dataclass
+class Export:
+    stream: Iterator[bytes]
+    rows: int
+    fmt: str
+    start_ms: int
+    end_ms: int
+    total: int            # all matching lines; the file holds the first `rows` of them
+    first_ms: int | None  # log_time_ms of the first and last line in the file
+    last_ms: int | None
+    zone: Any = None      # ZoneInfo the times were written in (None: as stored, UTC)
+
+
+def export_zone(tz: str | None):
+    if not tz or tz.upper() == "UTC":
+        return None
+    try:
+        return ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise bad_request("INVALID_TIME_ZONE", f"Unknown time zone '{tz}'") from None
+
+
+def zone_time(ms: int | None, zone, with_ms: bool = True) -> str | None:
+    """2026-10-07 01:03:16.571 +05:30"""
+    if ms is None:
+        return None
+    d = datetime.fromtimestamp(ms / 1000, timezone.utc).astimezone(zone) if zone else \
+        datetime.fromtimestamp(ms / 1000, timezone.utc)
+    off = d.strftime("%z")
+    off = f"{off[:3]}:{off[3:]}" if off else "+00:00"
+    return d.strftime("%Y-%m-%d %H:%M:%S") + (f".{d.microsecond // 1000:03d}" if with_ms else "") + f" {off}"
 
 
 def _cell(v: Any) -> Any:
