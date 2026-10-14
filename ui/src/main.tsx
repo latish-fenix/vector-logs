@@ -5,6 +5,7 @@ import "@fontsource/ibm-plex-sans/latin-700.css";
 import "@fontsource/ibm-plex-mono/latin-400.css";
 import "@fontsource/ibm-plex-mono/latin-500.css";
 import "./styles.css";
+import "./components.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";

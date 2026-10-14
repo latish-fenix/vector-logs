@@ -117,8 +117,8 @@ function SlackCard({ d }: { d: AlertsOverview }) {
           <div className="field">
             <label className="label" htmlFor="curl">Console address <span className="hint">· for links in Slack</span></label>
             <div className="row" style={{ gap: 8 }}>
-              <input id="curl" className="input" placeholder="https://app-logs-int.infra.fenixcommerce.com" value={consoleUrl} onChange={(e) => setConsoleUrl(e.target.value)} />
-              {!consoleUrl && <button type="button" className="btn btn-sm" onClick={() => setConsoleUrl(here)}>Use {here.replace(/^https?:\/\//, "")}</button>}
+              <input id="curl" className="input" style={{ flex: "1 1 240px", minWidth: 0 }} placeholder="https://app-logs-int.infra.fenixcommerce.com" value={consoleUrl} onChange={(e) => setConsoleUrl(e.target.value)} />
+              {!consoleUrl && <button type="button" className="btn btn-sm nowrap" onClick={() => setConsoleUrl(here)}>Use {here.replace(/^https?:\/\//, "")}</button>}
             </div>
           </div>
           <div className="field">
@@ -202,7 +202,7 @@ function RulesTable({ d, onEdit }: { d: AlertsOverview; onEdit: (r: AlertRule) =
   });
   if (!d.rules.length) return <Empty title="No alert rules">Add one with “Add alert”.</Empty>;
   return (
-    <div className="table-scroll">
+    <div className="table-scroll no-max">
       <table className="table">
         <thead><tr><th style={{ width: 54 }}>On</th><th>Rule</th><th>Alerts when</th><th>State</th><th>Checked</th><th><span className="sr-only">Actions</span></th></tr></thead>
         <tbody>
