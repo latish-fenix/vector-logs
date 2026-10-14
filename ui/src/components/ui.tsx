@@ -56,6 +56,69 @@ export function SearchInput({ label, value, onChange, placeholder }: { label: st
   );
 }
 
+/** A one-choice menu with a search box (for long lists: load balancers, target groups). */
+export function SearchSelect({ id, label, value, options, onChange, allLabel, mono, maxWidth }: {
+  id: string; label: string; value: string; options: { value: string; label?: string }[]; onChange: (v: string) => void;
+  allLabel?: string; mono?: boolean; maxWidth?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [active, setActive] = useState(0);
+  const box = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    setFilter("");
+    setActive(0);
+    setTimeout(() => input.current?.focus(), 0);
+    const away = (e: MouseEvent) => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+  const all = allLabel !== undefined ? [{ value: "", label: allLabel }] : [];
+  const items = [...all, ...options];
+  const f = filter.trim().toLowerCase();
+  const shown = f ? options.filter((o) => (o.label ?? o.value).toLowerCase().includes(f)) : items;
+  const current = items.find((o) => o.value === value);
+  const pick = (v: string) => { setOpen(false); button.current?.focus(); if (v !== value) onChange(v); };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setOpen(false); button.current?.focus(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); setActive((i) => Math.min(i + 1, shown.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)); }
+    else if (e.key === "Enter" && shown[active]) { e.preventDefault(); pick(shown[active].value); }
+  };
+  return (
+    <div className="ssel" ref={box} style={{ maxWidth }}>
+      <button ref={button} id={id} type="button" className={`select ssel-button ${mono ? "mono" : ""}`} aria-haspopup="listbox" aria-expanded={open}
+        aria-label={`${label}: ${current?.label ?? current?.value ?? value}`} title={current?.label ?? current?.value ?? value}
+        onClick={() => setOpen((o) => !o)} onKeyDown={(e) => { if (e.key === "ArrowDown" && !open) { e.preventDefault(); setOpen(true); } }}>
+        <span className="ssel-text">{current?.label ?? current?.value ?? value}</span>
+        <Icon name="caret" size={16} />
+      </button>
+      {open && (
+        <div className="ssel-pop" onKeyDown={onKey}>
+          <div className="search" style={{ padding: 6 }}>
+            <Icon name="search" size={16} style={{ left: 17, top: 18 }} />
+            <input ref={input} className="input" type="search" placeholder={`Search ${options.length}`} aria-label={`Search ${label}`}
+              aria-activedescendant={shown[active] ? `${id}-o-${active}` : undefined}
+              value={filter} onChange={(e) => { setFilter(e.target.value); setActive(0); }} />
+          </div>
+          <div className="ssel-list" role="listbox" aria-label={label}>
+            {shown.map((o, i) => (
+              <button key={o.value || "_all"} id={`${id}-o-${i}`} type="button" role="option" aria-selected={o.value === value}
+                className={`ssel-opt ${i === active ? "active" : ""} ${mono && o.value ? "mono" : ""}`} onMouseEnter={() => setActive(i)} onClick={() => pick(o.value)}>
+                <span>{o.label ?? o.value}</span>{o.value === value && <Icon name="check" size={14} />}
+              </button>
+            ))}
+            {!shown.length && <span className="hint" style={{ padding: "8px 10px" }}>Nothing matches.</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ errors
 
 interface Explained {

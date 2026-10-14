@@ -129,15 +129,23 @@ function ClusterAccess({ value, onChange }: { value: Access; onChange: (v: Acces
     }
     onChange(next);
   };
-  const toggle = (c: string, on: boolean) => {
+  const [filter, setFilter] = useState("");
+  const setMany = (names: string[], on: boolean) => {
     const next = { ...value };
-    if (all) {
-      if (on) delete next[c];
-      else next[c] = "none";
-    } else if (on) next[c] = "view";
-    else delete next[c];
+    for (const c of names) {
+      if (all) {
+        if (on) delete next[c];
+        else next[c] = "none";
+      } else if (on) next[c] = "view";
+      else delete next[c];
+    }
     onChange(next);
   };
+  const toggle = (c: string, on: boolean) => setMany([c], on);
+  const list = [...folders, ...extra];
+  const f = filter.trim().toLowerCase();
+  const shown = list.filter((c) => c.toLowerCase().includes(f));
+  const isOn = (c: string) => (value[c] ?? value["*"]) === "view";
   if (q.isLoading) return <Loading what="Loading clusters…" />;
   return (
     <div className="stack" style={{ gap: 8 }}>
@@ -148,10 +156,17 @@ function ClusterAccess({ value, onChange }: { value: Access; onChange: (v: Acces
           <span className="hint">Includes clusters that appear later. Untick single clusters below to leave them out.</span>
         </span>
       </label>
-      <div className="access-list">
+      <div className="picker">
+        <div className="picker-bar">
+          <div style={{ flex: "1 1 180px" }}><SearchInput label="Search clusters" placeholder="Search clusters" value={filter} onChange={setFilter} /></div>
+          <button type="button" className="btn btn-sm" disabled={!shown.length || shown.every(isOn)} onClick={() => setMany(shown, true)}>{f ? `Select ${shown.length} shown` : "Select all"}</button>
+          <button type="button" className="btn btn-sm btn-ghost" disabled={!shown.some(isOn)} onClick={() => setMany(shown, false)}>{f ? "Clear shown" : "Clear all"}</button>
+        </div>
+      <div className="picker-list single">
         {folders.length === 0 && <span className="hint">No cluster folders found in S3 yet.</span>}
-        {[...folders, ...extra].map((c) => {
-          const on = (value[c] ?? value["*"]) === "view";
+        {folders.length > 0 && !shown.length && <span className="hint">No cluster matches the search.</span>}
+        {shown.map((c) => {
+          const on = isOn(c);
           return (
             <label key={c} className="check">
               <input type="checkbox" checked={on} onChange={(e) => toggle(c, e.target.checked)} />
@@ -160,6 +175,7 @@ function ClusterAccess({ value, onChange }: { value: Access; onChange: (v: Acces
             </label>
           );
         })}
+      </div>
       </div>
     </div>
   );

@@ -125,6 +125,17 @@ CATALOG: list[dict] = [
                 _num("thresholdPercent", "At least", 5, 0.1, 100, "% of requests"),
                 _num("minRequests", "Only with at least", 50, 1, 10_000_000, "requests"),
                 _num("minutes", "Within", 15, 5, 240, "min")]},
+    {"type": "lb_status", "group": "Load balancers", "title": "Specific status codes (e.g. 400)",
+     "description": f"Requests answered with the given status codes per target group, e.g. 400, 404, 502,503 or a "
+                    f"whole class like 4xx, from the ALB access logs. Combine \"Within\" with \"Alert only after it "
+                    f"has been bad for\" to alert on codes that keep coming. The data is about {LB_LAG_MINUTES} minutes behind.",
+     "every": 5, "forMinutes": 0,
+     "params": [_pick("targetGroups", "targetGroups", "Target groups"),
+                {"key": "codes", "kind": "codes", "label": "Status codes", "default": "400",
+                 "help": "Comma-separated: 400 · 400,404 · 502,503,504 · 4xx"},
+                _num("threshold", "At least", 100, 1, 100_000_000, "requests with these codes"),
+                _num("thresholdPercent", "and at least", 0, 0, 100, "% of the requests (0 = any share)"),
+                _num("minutes", "Within", 15, 5, 240, "min")]},
     {"type": "lb_latency", "group": "Load balancers", "title": "Slow responses (p95)",
      "description": f"95th percentile of the target's response time per target group, from the ALB access logs "
                     f"(approximate). The data is about {LB_LAG_MINUTES} minutes behind.",
@@ -208,6 +219,8 @@ def validate_rule(body: dict, existing: dict | None = None) -> dict:
             if v not in [o["value"] for o in p["options"]]:
                 raise bad_request("INVALID_ALERT", f"'{label}' must be one of "
                                   + ", ".join(o["value"] for o in p["options"]))
+        elif p["kind"] == "codes":
+            v = ",".join(parse_codes(v, label))
         elif p["kind"] == "text":
             v = str(v or "").strip()
             if len(v) > 500:
@@ -230,6 +243,23 @@ def validate_rule(body: dict, existing: dict | None = None) -> dict:
             "params": params,
             "forMinutes": minutes("forMinutes", spec["forMinutes"], 1440),
             "repeatMinutes": minutes("repeatMinutes", 0, 10080)}
+
+
+def parse_codes(value: Any, label: str = "Status codes") -> list[str]:
+    """'400, 502 503,4xx' → ['400', '502', '503', '4xx'] (codes 100–599, classes 1xx–5xx)."""
+    out: list[str] = []
+    for t in re.split(r"[\s,;]+", str(value or "").strip().lower()):
+        if not t:
+            continue
+        if not re.fullmatch(r"[1-5](\d\d|xx)", t):
+            raise bad_request("INVALID_ALERT", f"'{label}': '{t}' isn't a status code (like 400) or class (like 4xx)")
+        if t not in out:
+            out.append(t)
+    if not out:
+        raise bad_request("INVALID_ALERT", f"Give at least one code in '{label}'")
+    if len(out) > 20:
+        raise bad_request("INVALID_ALERT", f"At most 20 codes in '{label}'")
+    return out
 
 
 def mask_webhook(url: str) -> str:
@@ -671,6 +701,43 @@ class AlertService:
                 msg += f"\nmost: {te['code']} {te.get('method') or ''} {te.get('pathGroup') or ''} ×{te['count']:,}"
             out.append(Finding(r["tg"], bad, msg, value=round(pct, 2), cluster=r.get("cluster"),
                                link="/ui/lb?" + self._q(tg=r["tg"], st=cls, start=iso_ms(start), end=iso_ms(end))))
+        return out
+
+    def _check_lb_status(self, p: dict, now: int) -> list[Finding]:
+        from .lb_logs import LbQuery
+        lb = self._need("lb")
+        codes = parse_codes(p["codes"])
+        classes = [c for c in codes if c.endswith("xx")]
+        singles = [int(c) for c in codes if not c.endswith("xx") and f"{c[0]}xx" not in classes]
+        end = now - LB_LAG_MINUTES * MINUTE
+        start = end - p["minutes"] * MINUTE
+        tgs = p["targetGroups"]
+        totals = {r["tg"]: r for r in lb.summary(LbQuery(start=start, end=end, target_groups=tgs), None)
+                  .get("targetGroups", []) if r.get("tg")}
+        matched: dict[str, int] = {}
+        top: dict[str, dict] = {}
+        for q in ([LbQuery(start=start, end=end, target_groups=tgs, status_classes=classes)] if classes else []) + \
+                 ([LbQuery(start=start, end=end, target_groups=tgs, status_codes=singles)] if singles else []):
+            for r in lb.summary(q, None).get("targetGroups", []):
+                if r.get("tg"):
+                    matched[r["tg"]] = matched.get(r["tg"], 0) + r["requests"]
+                    if r.get("topError") and r["topError"]["count"] > top.get(r["tg"], {}).get("count", -1):
+                        top[r["tg"]] = r["topError"]
+        cfg, out = self.config(), []
+        span = f"{self._fmt(cfg, start)}–{self._fmt(cfg, end, True)}"
+        label = ", ".join(codes)
+        link_code = {"code": codes[0]} if len(codes) == 1 and not classes else \
+            {"st": codes[0]} if codes == classes and len(classes) == 1 else {}
+        for tg, r in totals.items():
+            n = matched.get(tg, 0)
+            pct = n / r["requests"] * 100 if r["requests"] else 0
+            bad = n >= p["threshold"] and pct >= p["thresholdPercent"]
+            msg = f"{n:,} × {label} ({pct:.1f}% of {r['requests']:,} requests, {span})"
+            te = top.get(tg)
+            if n and te:
+                msg += f"\nmost: {te['code']} {te.get('method') or ''} {te.get('pathGroup') or ''} ×{te['count']:,}"
+            out.append(Finding(tg, bad, msg, value=n, cluster=r.get("cluster"),
+                               link="/ui/lb?" + self._q(tg=tg, start=iso_ms(start), end=iso_ms(end), **link_code)))
         return out
 
     def _check_lb_latency(self, p: dict, now: int) -> list[Finding]:

@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createContext, Fragment, useContext, useEffect, useId, useState, type ReactNode } from "react";
+import { createContext, Fragment, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { request } from "../api";
 import { lastCluster, rememberCluster, useClusters, useMe } from "../session";
@@ -17,26 +17,71 @@ function NavItem({ to, icon, label, end }: { to: string; icon: IconName; label: 
   );
 }
 
+/** The current cluster, with a searchable list to switch (keeps the search when switching). */
 function ClusterSwitch({ current }: { current: string | undefined }) {
   const clusters = useClusters().data ?? [];
   const navigate = useNavigate();
   const location = useLocation();
   const id = useId();
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [active, setActive] = useState(0);
+  const box = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    setFilter("");
+    setActive(0);
+    setTimeout(() => input.current?.focus(), 0);
+    const away = (e: MouseEvent) => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
   if (!clusters.length) return null;
   const value = current && clusters.some((c) => c.id === current) ? current : clusters[0].id;
-  const onChange = (next: string) => {
+  const f = filter.trim().toLowerCase();
+  const shown = clusters.filter((c) => c.id.toLowerCase().includes(f));
+  const pick = (next: string) => {
+    setOpen(false);
+    if (next === value && /^\/(logs|overview)\//.test(location.pathname)) return;
     // Keep the search (time range, query, filters) when switching clusters.
     const section = location.pathname.startsWith("/overview/") ? "overview" : "logs";
     navigate(`/${section}/${encodeURIComponent(next)}${/^\/(logs|overview)\//.test(location.pathname) ? location.search : ""}`);
   };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") { e.preventDefault(); setOpen(false); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); setActive((i) => Math.min(i + 1, shown.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)); }
+    else if (e.key === "Enter" && shown[active]) { e.preventDefault(); pick(shown[active].id); }
+  };
   return (
-    <div className="cluster-switch">
-      <label htmlFor={id} className="cs-label">Cluster</label>
+    <div className="cluster-switch" ref={box}>
+      <button type="button" className="cs-button" aria-haspopup="listbox" aria-expanded={open} aria-labelledby={`${id}-l ${id}-v`}
+        onClick={() => setOpen((o) => !o)} onKeyDown={(e) => { if (e.key === "ArrowDown" && !open) { e.preventDefault(); setOpen(true); } }}>
+        <span id={`${id}-v`}>{value}</span>
+      </button>
+      <span id={`${id}-l`} className="cs-label">Cluster</span>
       <span className="cs-dot"><Icon name="server" size={14} /></span>
-      <select id={id} value={value} onChange={(e) => onChange(e.target.value)}>
-        {clusters.map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
-      </select>
-      <span className="cs-caret"><Icon name="caret" size={16} /></span>
+      <span className="cs-caret"><Icon name="caret" size={16} style={{ transform: open ? "rotate(180deg)" : undefined }} /></span>
+      {open && (
+        <div className="cs-pop" onKeyDown={onKey}>
+          <div className="search" style={{ padding: 6 }}>
+            <Icon name="search" size={16} style={{ left: 17, top: 18 }} />
+            <input ref={input} className="input" type="search" placeholder={`Search ${clusters.length} clusters`} aria-label="Search clusters"
+              aria-controls={`${id}-list`} aria-activedescendant={shown[active] ? `${id}-o-${active}` : undefined}
+              value={filter} onChange={(e) => { setFilter(e.target.value); setActive(0); }} />
+          </div>
+          <div className="cs-list" role="listbox" id={`${id}-list`} aria-label="Clusters">
+            {shown.map((c, i) => (
+              <button key={c.id} id={`${id}-o-${i}`} type="button" role="option" aria-selected={c.id === value}
+                className={`cs-opt ${i === active ? "active" : ""}`} onMouseEnter={() => setActive(i)} onClick={() => pick(c.id)}>
+                <span className="mono">{c.id}</span>{c.id === value && <Icon name="check" size={14} />}
+              </button>
+            ))}
+            {!shown.length && <span className="hint" style={{ padding: "8px 10px" }}>No cluster matches.</span>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

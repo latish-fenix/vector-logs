@@ -64,7 +64,7 @@ def test_default_rules_and_catalog(env):
     d = client.get(URL, headers=ROOT_H).json()
     types = [r["type"] for r in d["rules"]]
     assert {"app_aws", "app_converter", "logs_stale", "ecs_targets", "lb_errors"} <= set(types)
-    assert len(d["catalog"]) == 12 and d["slack"]["configured"] is False
+    assert len(d["catalog"]) == 13 and d["slack"]["configured"] is False
     assert d["settings"]["timeZone"] == "Asia/Kolkata"
     # members can't see or change rules
     add_user(client, "m@x.com", {"alpha-edds-2": "view"})
@@ -226,6 +226,22 @@ def test_lb_rules(tmp_path, logs_dir):
     assert "% 5xx:" in hit.message and hit.link.startswith(f"/ui/lb?tg={hit.subject}&st=5xx")
     f = svc.evaluate(validate_rule({"type": "lb_errors", "params": {"thresholdPercent": 99, "minutes": 60}}))
     assert f and not any(x.bad for x in f)
+    # a specific code: 400 (count and share), a class, and a code inside a listed class counted once
+    f = svc.evaluate(validate_rule({"type": "lb_status", "params": {"codes": "400", "threshold": 1, "minutes": 60}}))
+    hit = next(x for x in f if x.bad)
+    assert "× 400 (" in hit.message and "&code=400" in hit.link
+    a = {x.subject: x.value for x in f}
+    f = svc.evaluate(validate_rule({"type": "lb_status", "params": {"codes": "4xx, 400", "threshold": 1, "minutes": 60}}))
+    b = {x.subject: x.value for x in f}
+    assert all(b[k] >= a[k] for k in a) and "&st=4xx" not in f[0].link
+    f = svc.evaluate(validate_rule({"type": "lb_status", "params": {"codes": "4xx", "threshold": 1, "minutes": 60}}))
+    assert {x.subject: x.value for x in f} == b and "st=4xx" in f[0].link
+    f = svc.evaluate(validate_rule({"type": "lb_status", "params": {"codes": "400", "threshold": 1,
+                                                                     "thresholdPercent": 100, "minutes": 60}}))
+    assert not any(x.bad for x in f)
+    with pytest.raises(ApiError):
+        validate_rule({"type": "lb_status", "params": {"codes": "40x"}})
+    assert validate_rule({"type": "lb_status", "params": {"codes": " 502 503;504,502"}})["params"]["codes"] == "502,503,504"
     f = svc.evaluate(validate_rule({"type": "lb_latency", "params": {"p95Ms": 10, "minRequests": 1, "minutes": 60}}))
     assert any(x.bad for x in f)
     # newest ALB file per load balancer, from the converter status

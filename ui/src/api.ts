@@ -407,7 +407,7 @@ export interface EcsServiceMetrics {
 }
 
 // ------------------------------------------------------------------ alerts
-export type AlertParamKind = "number" | "logClusters" | "ecsClusters" | "lbs" | "targetGroups" | "select" | "text" | "bool";
+export type AlertParamKind = "number" | "logClusters" | "ecsClusters" | "lbs" | "targetGroups" | "select" | "text" | "codes" | "bool";
 export interface AlertParamSpec {
   key: string; kind: AlertParamKind; label: string; default: unknown; help?: string;
   min?: number; max?: number; unit?: string; required?: boolean; options?: { value: string; label: string }[];

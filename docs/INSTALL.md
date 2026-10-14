@@ -184,7 +184,7 @@ Default rules (all on; change limits, scope, "alert only after" and "remind ever
 | High CPU / High memory | 90 % on average over 15 min (CloudWatch) |
 | 5xx rate above 5 % | a target group answers ≥ 5 % 5xx (50+ requests) in 15 min |
 
-Also available: **Error lines in application logs** (a Logs-page search, e.g. `level:error`, finds N lines in a window), **Slow responses (p95)**, a 4xx rate. **Check now** in a rule's editor shows what it finds right now without sending anything.
+Also available: **Specific status codes** (e.g. 400, or 502,503,504, or 4xx: at least N requests, optionally at least X % of the requests, within N minutes, per target group), **Error lines in application logs** (a Logs-page search, e.g. `level:error`, finds N lines in a window), **Slow responses (p95)**, a 4xx rate. **Check now** in a rule's editor shows what it finds right now without sending anything.
 
 If the whole server or container is down, nothing can alert from it: add an outside check of `https://<host>/healthz` (for example an ALB target group health check with a CloudWatch alarm, or Route 53 health check) if you need that.
 

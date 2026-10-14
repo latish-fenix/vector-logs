@@ -7,7 +7,7 @@ import {
 } from "../api";
 import { Icon, type IconName } from "../components/icons";
 import { Page } from "../components/Shell";
-import { Callout, Dialog, Empty, ErrorCallout, Loading, Spinner, useToast } from "../components/ui";
+import { Callout, Dialog, Empty, ErrorCallout, Loading, SearchSelect, Spinner, useToast } from "../components/ui";
 import { ago, duration, fmtInterval, fmtTick, fmtTime, num, storedZone, storeZone, type Zone } from "../format";
 import { useClusters, useMe } from "../session";
 import { TimePicker, ZoneToggle } from "./Overview";
@@ -178,11 +178,8 @@ export function LoadBalancers() {
           <TimePicker start={start} end={end} zone={zone} maxHours={me.limits.maxSearchHours} compact draft={draft}
             onChange={(s, e) => set({ start: s, end: e === "now" ? null : e })} />
           <div className="field">
-            <label className="sr-only" htmlFor="lb-pick">Load balancer</label>
-            <select id="lb-pick" className="select" style={{ width: "auto" }} value={p("lb")} onChange={(e) => set({ lb: e.target.value || null })}>
-              <option value="">All load balancers</option>
-              {lbNames.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
+            <SearchSelect id="lb-pick" label="Load balancer" allLabel="All load balancers" value={p("lb")}
+              options={lbNames.map((n) => ({ value: n }))} onChange={(v) => set({ lb: v || null })} />
           </div>
           <div className="field">
             <label className="sr-only" htmlFor="lb-status">Status</label>

@@ -4,7 +4,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { get, request, type LbOverview, type LbRequest } from "../api";
 import { Icon } from "../components/icons";
 import { Page } from "../components/Shell";
-import { Empty, ErrorCallout, Loading, Spinner, copyText, useToast } from "../components/ui";
+import { Empty, ErrorCallout, Loading, SearchSelect, Spinner, copyText, useToast } from "../components/ui";
 import { duration, fmtTime, localZoneName, num, storedZone, storeZone, type Zone } from "../format";
 import { useMe } from "../session";
 import { CodePill, DETAIL, LbExportDialog, STATUS_CHOICES, lbBodyFromParams, lbLink, secs } from "./LoadBalancers";
@@ -165,19 +165,13 @@ export function LbLogs() {
         </form>
         <div className="lv-bar" style={{ paddingTop: 0 }}>
           <div className="field">
-            <label className="sr-only" htmlFor="lbl-lb">Load balancer</label>
-            <select id="lbl-lb" className="select" style={{ width: "auto" }} value={p("lb")} onChange={(e) => set({ lb: e.target.value || null, tg: null })}>
-              <option value="">All load balancers</option>
-              {lbNames.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
+            <SearchSelect id="lbl-lb" label="Load balancer" allLabel="All load balancers" value={p("lb")}
+              options={lbNames.map((n) => ({ value: n }))} onChange={(v) => set({ lb: v || null, tg: null })} />
           </div>
           <div className="field">
-            <label className="sr-only" htmlFor="lbl-tg">Target group</label>
-            <select id="lbl-tg" className="select mono" style={{ width: "auto", maxWidth: 300 }} value={p("tg")} onChange={(e) => set({ tg: e.target.value || null })}>
-              <option value="">All target groups</option>
-              {tgNames.names.map((n) => <option key={n} value={n}>{n}</option>)}
-              {(tgNames.none || p("tg") === "-") && <option value="-">(no target group)</option>}
-            </select>
+            <SearchSelect id="lbl-tg" label="Target group" allLabel="All target groups" value={p("tg")} mono maxWidth={300}
+              options={[...tgNames.names.map((n) => ({ value: n })), ...((tgNames.none || p("tg") === "-") ? [{ value: "-", label: "(no target group)" }] : [])]}
+              onChange={(v) => set({ tg: v || null })} />
           </div>
           <div className="field">
             <label className="sr-only" htmlFor="lbl-st">Status</label>

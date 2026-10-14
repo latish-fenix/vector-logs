@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { enc, get, type AdminCluster } from "../../api";
 import { Icon } from "../../components/icons";
 import { Page } from "../../components/Shell";
-import { Badge, Empty, ErrorCallout, Loading, Spinner } from "../../components/ui";
+import { Badge, Empty, ErrorCallout, Loading, SearchInput, Spinner } from "../../components/ui";
 import { num } from "../../format";
 
 interface AdminClusters {
@@ -21,6 +22,9 @@ export function Clusters() {
     qc.invalidateQueries({ queryKey: ["clusters"] });
   };
   const d = q.data;
+  const [filter, setFilter] = useState("");
+  const f = filter.trim().toLowerCase();
+  const items = (d?.items ?? []).filter((c) => !f || c.id.toLowerCase().includes(f) || c.users.some((u) => u.toLowerCase().includes(f)));
   return (
     <Page crumbs={[{ label: "Administration" }, { label: "Clusters" }]} title="Clusters">
       <div className="page-head" style={{ alignItems: "center" }}>
@@ -41,13 +45,20 @@ export function Clusters() {
         </div>
       )}
       <section className="card" style={{ overflow: "hidden" }}>
+        {(d?.items.length ?? 0) > 0 && (
+          <div className="card-head">
+            <div style={{ width: 320, maxWidth: "100%" }}><SearchInput label="Search clusters" placeholder="Search clusters or members" value={filter} onChange={setFilter} /></div>
+            <span className="hint">{f ? `${num(items.length)} of ${num(d!.items.length)}` : `${num(d!.items.length)} clusters`}</span>
+          </div>
+        )}
         {q.isLoading ? <Loading /> : q.error ? <div className="card-body"><ErrorCallout error={q.error} admin /></div> : !d?.items.length ? (
           <Empty title="No cluster folders found">Vector writes to <span className="mono">{d?.source}</span>&lt;cluster&gt;/dt=…/hour=…/. Check LOGS_BUCKET and LOGS_PREFIX in .env.</Empty>
         ) : (
           <table className="table">
             <thead><tr><th>Cluster</th><th>Members with access</th><th><span className="sr-only">Open</span></th></tr></thead>
             <tbody>
-              {d.items.map((c) => (
+              {!items.length && <tr><td colSpan={3} className="hint">No cluster matches the search.</td></tr>}
+              {items.map((c) => (
                 <tr key={c.id}>
                   <td className="mono" style={{ fontWeight: 600 }}>{c.id}</td>
                   <td>

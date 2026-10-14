@@ -7,7 +7,7 @@ import {
 } from "../api";
 import { Icon } from "../components/icons";
 import { Page } from "../components/Shell";
-import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, Spinner, useToast } from "../components/ui";
+import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, SearchInput, Spinner, useToast } from "../components/ui";
 import { ago, fmtTime, localZoneName, num, storedZone } from "../format";
 import { useMe } from "../session";
 
@@ -160,6 +160,7 @@ export function describeRule(r: { type: string; params: Record<string, unknown>;
     log_errors: () => `${scope(p.clusters, "")}: ${num(p.threshold)}+ lines of “${p.query || "anything"}” within ${p.minutes} min`,
     lb_logs_stale: () => `${scope(p.lbs, "All load balancers")}: ${p.mode === "all" ? "none of them" : "any one"} delivered a file for ${p.minutes} min`,
     lb_errors: () => `${scope(p.targetGroups, "All target groups")}: ${p.statusClass} ≥ ${p.thresholdPercent}% of requests (${num(p.minRequests)}+) within ${p.minutes} min`,
+    lb_status: () => `${scope(p.targetGroups, "All target groups")}: ${num(p.threshold)}+ requests with ${p.codes}${Number(p.thresholdPercent) ? ` and ≥ ${p.thresholdPercent}%` : ""} within ${p.minutes} min`,
     lb_latency: () => `${scope(p.targetGroups, "All target groups")}: p95 ≥ ${num(p.p95Ms)} ms (${num(p.minRequests)}+ requests) within ${p.minutes} min`,
     ecs_targets: () => `${scope(p.clusters, "All clusters")}: ${p.minUnhealthy}+ unhealthy target${p.minUnhealthy === 1 ? "" : "s"}`,
     ecs_tasks: () => `${scope(p.clusters, "All clusters")}: a service runs fewer tasks than desired`,
@@ -348,7 +349,7 @@ function RuleDialog({ type, rule, lag, onClose }: { type: AlertType; rule?: Aler
         </div>
         <span className="hint">
           Checked every {type.every === 1 ? "minute" : `${type.every} minutes`}. One Slack message when it starts failing, one when it's back to normal.
-          {type.type.startsWith("lb_") && type.type !== "lb_logs_stale" ? ` Load balancer data is about ${lag} minutes behind.` : ""}
+          {["lb_errors", "lb_status", "lb_latency"].includes(type.type) ? ` Load balancer data is about ${lag} minutes behind.` : ""}
         </span>
         <span className="hint" style={{ fontStyle: "italic" }}>{describeRule({ type: type.type, params, forMinutes, repeatMinutes })}</span>
         {preview && <Preview data={preview} />}
@@ -387,7 +388,7 @@ function ParamField({ spec, value, onChange, options, loading }: {
       </div>
     );
   }
-  if (spec.kind === "text") {
+  if (spec.kind === "text" || spec.kind === "codes") {
     return (
       <div className="field">
         <label className="label" htmlFor={id}>{spec.label}</label>
@@ -413,26 +414,33 @@ function NamePicker({ label, help, required, names, value, onChange, loading }: 
 }) {
   const [filter, setFilter] = useState("");
   const list = [...new Set([...value, ...names])].sort();
-  const shown = list.filter((n) => n.toLowerCase().includes(filter.toLowerCase()));
+  const f = filter.trim().toLowerCase();
+  const shown = list.filter((n) => n.toLowerCase().includes(f));
   const on = new Set(value);
   const flip = (n: string) => onChange(on.has(n) ? value.filter((x) => x !== n) : [...value, n]);
+  const allShownOn = shown.length > 0 && shown.every((n) => on.has(n));
+  const selectShown = () => onChange([...new Set([...value, ...shown])]);
+  const clearShown = () => onChange(f ? value.filter((n) => !shown.includes(n)) : []);
   return (
     <div className="field">
-      <span className="label">{label} <span className="hint">· {value.length ? `${value.length} picked` : required ? "pick at least one" : "all (none picked)"}</span></span>
+      <span className="label">{label} <span className="hint">· {value.length ? `${value.length} of ${list.length} picked` : required ? "pick at least one" : "none picked = all, including new ones"}</span></span>
       {loading ? <Loading what="Listing names…" /> : (
-        <div style={{ border: "1px solid var(--border)", borderRadius: 10 }}>
-          {list.length > 8 && (
-            <div style={{ padding: 8, borderBottom: "1px solid var(--border)" }}>
-              <input className="input" placeholder="Filter" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label={`Filter ${label}`} />
-            </div>
-          )}
-          <div style={{ maxHeight: 190, overflow: "auto", padding: "8px 12px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 6 }}>
+        <div className="picker">
+          <div className="picker-bar">
+            <div style={{ flex: "1 1 200px" }}><SearchInput label={`Search ${label}`} placeholder={`Search ${label.toLowerCase()}`} value={filter} onChange={setFilter} /></div>
+            <button type="button" className="btn btn-sm" onClick={selectShown} disabled={!shown.length || allShownOn}>
+              {f ? `Select ${shown.length} shown` : "Select all"}
+            </button>
+            <button type="button" className="btn btn-sm btn-ghost" onClick={clearShown} disabled={!value.length}>
+              {f ? "Clear shown" : required ? "Clear" : "Clear (= all)"}
+            </button>
+          </div>
+          <div className="picker-list">
             {shown.map((n) => (
               <label key={n} className="check" style={{ fontSize: 13 }}><input type="checkbox" checked={on.has(n)} onChange={() => flip(n)} /> <span className="mono" style={{ overflowWrap: "anywhere" }}>{n}</span></label>
             ))}
-            {!shown.length && <span className="hint">Nothing to pick{filter ? " with that filter" : ""}.</span>}
+            {!shown.length && <span className="hint">{list.length ? "No name matches the search." : "Nothing to pick yet."}</span>}
           </div>
-          {value.length > 0 && <div style={{ padding: "6px 12px", borderTop: "1px solid var(--border)" }}><button type="button" className="linkish" onClick={() => onChange([])}>Clear{required ? "" : " (= all)"}</button></div>}
         </div>
       )}
       {help && <span className="hint">{help}</span>}
