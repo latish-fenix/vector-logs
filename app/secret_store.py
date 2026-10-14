@@ -87,6 +87,11 @@ class AwsSecretStore:
     def full_name(self, name: str) -> str:
         return _check(f"{self.prefix}{name}")
 
+    def forget(self, name: str) -> None:
+        """Drop the cached value, so the next get() reads Secrets Manager (changed by another worker)."""
+        with self.cache._lock:
+            self.cache._data.pop(self.full_name(name), None)
+
     def get(self, name: str) -> dict | None:
         full = self.full_name(name)
         cached, value = self.cache.get(full)
@@ -170,6 +175,9 @@ class LocalSecretStore:
 
     def _path(self, full: str) -> Path:
         return self.dir / (quote(full, safe="") + ".json")
+
+    def forget(self, name: str) -> None:
+        pass  # nothing cached
 
     def get(self, name: str) -> dict | None:
         p = self._path(self.full_name(name))

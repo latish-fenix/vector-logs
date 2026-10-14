@@ -12,7 +12,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from . import routes_admin, routes_auth, routes_health, routes_lb, routes_logs
+from . import routes_admin, routes_alerts, routes_auth, routes_health, routes_lb, routes_logs
+from .alerts import AlertService
 from .auth import generate_password, hash_password, password_problems
 from .errors import ApiError
 from .ecs_health import HealthService
@@ -92,6 +93,14 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
         # Every API worker starts one; a file lock lets only one of them convert.
         app.state.lb_converter = Converter(settings)
         app.state.lb_converter.start()
+    app.state.alerts = None
+    if settings.alerts_enabled:
+        app.state.alerts = AlertService(settings, store, secrets, logs=app.state.logs, lb=app.state.lb,
+                                        health=app.state.health if settings.health_enabled else None,
+                                        metrics=app.state.metrics if settings.health_enabled else None)
+        if settings.alerts_background:
+            # Every API worker starts one; a file lock lets only one of them check.
+            app.state.alerts.start()
     if settings.auth_mode == "password":
         _bootstrap_passwords(settings, app.state.users, bootstrap_pw, secrets)
 
@@ -99,7 +108,13 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
     async def request_id(request: Request, call_next):
         rid = request.headers.get("x-request-id") or uuid.uuid4().hex
         request.state.request_id = rid
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            _server_error(request, 500)
+            raise
+        if response.status_code >= 500:
+            _server_error(request, response.status_code)
         response.headers["X-Request-ID"] = rid
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
@@ -107,6 +122,10 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
             response.headers["X-Frame-Options"] = "DENY"
             response.headers["Content-Security-Policy"] = UI_CSP
         return response
+
+    def _server_error(request: Request, status: int) -> None:
+        if app.state.alerts is not None and request.url.path.startswith("/api/"):
+            app.state.alerts.errors.record(status, request.method, request.url.path)
 
     @app.exception_handler(ApiError)
     async def api_error(request: Request, exc: ApiError):
@@ -127,6 +146,8 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
     app.include_router(routes_health.router)
     app.include_router(routes_lb.router)
     app.include_router(routes_admin.router)
+    app.include_router(routes_alerts.admin)
+    app.include_router(routes_alerts.public)
     _mount_ui(app)
     return app
 

@@ -160,6 +160,34 @@ The converted files moved from the server's disk to `s3://fenix-vector-ecs-logs/
 3. `git pull && docker compose up -d --build`, then `docker compose exec vector-logs python -m app.cli check`. It now also prints `OK    converted files: s3://fenix-vector-ecs-logs/loadbalancer-parquet/v3/ · … write and read work`.
 4. The server removes its old local copies and converts the logs again into S3 (the days since logging began; a few minutes per day of traffic). The pages show the progress.
 
+## Alerts to Slack (October 2026)
+
+The server checks rules all the time and posts to one Slack channel through an incoming webhook. Nothing to add to IAM: the webhook is the Secrets Manager secret `vector-logs/alerts` (covered by `SecretsManagerOwnPrefixOnly`), the rules and history are `state/alerts*.json` in the state bucket (covered by `ReadWriteState`). The server must be able to reach `https://hooks.slack.com` (outbound HTTPS).
+
+1. In Slack, create the webhook: **Apps → Incoming WebHooks → Add to Slack** (or, in your own Slack app, **Incoming Webhooks → Add New Webhook to Workspace**), pick the channel, copy the URL `https://hooks.slack.com/services/…`.
+2. `git pull && docker compose up -d --build`.
+3. Sign in as an admin → **Alerts**: paste the URL → **Save** → **Send test message**. Set **Console address** (e.g. `https://app-logs-int.infra.fenixcommerce.com`) so messages link to the right page.
+4. To change the Slack channel later, paste the new webhook URL and Save; the old one stops being used at once.
+
+Default rules (all on; change limits, scope, "alert only after" and "remind every" per rule, or add more):
+
+| Rule | Alerts when |
+| --- | --- |
+| Viewer can't reach AWS | listing the logs in S3, ECS / load balancer APIs or CloudWatch fails (2 min) |
+| Load balancer log converter failing | it reports an error or hasn't updated for 30 min |
+| Server disk almost full | 85 % used |
+| Viewer server errors | 10 HTTP 5xx answers in 15 min |
+| Application logs stopped arriving | a cluster has no new Vector file for 30 min |
+| Load balancer logs stopped arriving | none of the load balancers delivered a file for 60 min |
+| Unhealthy targets | a target group of an ECS cluster has an unhealthy target for 5 min |
+| Service below its desired tasks | running < desired for 10 min |
+| High CPU / High memory | 90 % on average over 15 min (CloudWatch) |
+| 5xx rate above 5 % | a target group answers ≥ 5 % 5xx (50+ requests) in 15 min |
+
+Also available: **Error lines in application logs** (a Logs-page search, e.g. `level:error`, finds N lines in a window), **Slow responses (p95)**, a 4xx rate. **Check now** in a rule's editor shows what it finds right now without sending anything.
+
+If the whole server or container is down, nothing can alert from it: add an outside check of `https://<host>/healthz` (for example an ALB target group health check with a CloudWatch alarm, or Route 53 health check) if you need that.
+
 ## Day-to-day operations
 
 | Task | Command (in `~/vector-logs`) |
@@ -169,6 +197,7 @@ The converted files moved from the server's disk to `s3://fenix-vector-ecs-logs/
 | Which secrets exist | `docker compose exec vector-logs python -m app.cli secrets-status` |
 | Cache size | Administration → Clusters (top right), limit `CACHE_MAX_MB`; load balancer files: `docker compose exec vector-logs du -sh /app/cache/lb` |
 | Load balancer converter state | `docker compose exec vector-logs cat /app/cache/lb/status.json` (also shown on the page) |
+| Alerts: what was sent and why something wasn't | the Alerts page (Recent alerts), or `docker compose logs | grep vector_logs.alerts` |
 | Restart | `docker compose restart` |
 
 ## How searches perform

@@ -67,6 +67,11 @@ class Settings:
     lb_converter_memory_mb: int = 256
     lb_background: bool = True                # run the converter thread (off in tests)
 
+    # ---- alerts to Slack (rules and the webhook are set on the Alerts page)
+    alerts_enabled: bool = True
+    alerts_background: bool = True            # run the alert checker thread (off in tests)
+    alerts_interval_seconds: int = 60         # how often the checker wakes up
+
     # ---- app state (users, saved searches): S3 or a local folder
     storage_backend: str = "s3"               # "s3" or "local" (local = dev only)
     s3_bucket: str = ""
@@ -137,6 +142,9 @@ class Settings:
             lb_poll_seconds=int(env("LB_POLL_SECONDS", "300")),
             lb_converter_memory_mb=int(env("LB_CONVERTER_MEMORY_MB", "256")),
             lb_background=_bool(env("LB_BACKGROUND"), True),
+            alerts_enabled=_bool(env("ALERTS_ENABLED"), True),
+            alerts_background=_bool(env("ALERTS_BACKGROUND"), True),
+            alerts_interval_seconds=int(env("ALERTS_INTERVAL_SECONDS", "60")),
             storage_backend=storage,
             s3_bucket=env("S3_BUCKET", ""),
             s3_prefix=_slash(env("S3_PREFIX", "vector-logs/")),

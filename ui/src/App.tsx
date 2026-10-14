@@ -1,6 +1,7 @@
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { Page, Shell } from "./components/Shell";
 import { Empty, Loading } from "./components/ui";
+import { Alerts } from "./pages/Alerts";
 import { Clusters } from "./pages/admin/Clusters";
 import { Users } from "./pages/admin/Users";
 import { ChangePassword } from "./pages/ChangePassword";
@@ -54,6 +55,7 @@ export function App() {
         <Route path="health" element={<Health />} />
         <Route path="lb" element={<LoadBalancers />} />
         <Route path="lb-logs" element={<LbLogs />} />
+        <Route path="alerts" element={<Alerts />} />
         <Route path="account/password" element={<ChangePassword />} />
         <Route path="admin/clusters" element={<RequireAdmin><Clusters /></RequireAdmin>} />
         <Route path="admin/users" element={<RequireAdmin><Users /></RequireAdmin>} />

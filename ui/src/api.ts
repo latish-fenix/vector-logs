@@ -405,3 +405,33 @@ export interface EcsServiceMetrics {
   generatedAt: string;
   services: Record<string, { cpu?: MetricSeries; memory?: MetricSeries }>;
 }
+
+// ------------------------------------------------------------------ alerts
+export type AlertParamKind = "number" | "logClusters" | "ecsClusters" | "lbs" | "targetGroups" | "select" | "text" | "bool";
+export interface AlertParamSpec {
+  key: string; kind: AlertParamKind; label: string; default: unknown; help?: string;
+  min?: number; max?: number; unit?: string; required?: boolean; options?: { value: string; label: string }[];
+}
+export interface AlertType {
+  type: string; group: string; title: string; description: string; every: number; forMinutes: number; params: AlertParamSpec[];
+}
+export interface AlertSubject { subject: string; state: "pending" | "firing"; since: number; firedAt?: number; message: string; link?: string | null }
+export interface AlertRule {
+  id: string; type: string; title: string; name: string; enabled: boolean; params: Record<string, unknown>;
+  forMinutes: number; repeatMinutes: number; updatedAt?: string; updatedBy?: string;
+  status: { lastRunAt: number | null; lastError: string | null; tookMs: number | null; firing: AlertSubject[]; pending: AlertSubject[] };
+}
+export interface AlertsOverview {
+  settings: { consoleUrl: string; timeZone: string; paused: boolean; updatedAt?: string; updatedBy?: string };
+  slack: { configured: boolean; hint: string | null; updatedAt?: string; updatedBy?: string };
+  checker: { checkedAt: number | null; pid?: number; since?: number; intervalSeconds: number; background: boolean };
+  rules: AlertRule[];
+  catalog: AlertType[];
+  lbLagMinutes: number;
+}
+export interface AlertOptions { logClusters: string[]; ecsClusters: string[]; lbs: string[]; targetGroups: string[]; errors: string[] }
+export interface AlertFinding { subject: string; bad: boolean; message: string; value: number | null; link: string | null }
+export interface AlertEvent {
+  id: string; at: number; ruleId: string; ruleName: string; type: string; event: "firing" | "repeat" | "resolved";
+  subject: string; message: string; cluster: string | null; link: string | null; since: number | null; delivered: boolean; error: string | null;
+}

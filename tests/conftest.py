@@ -34,7 +34,7 @@ def make_settings(tmp: Path, logs_dir: Path, **kw) -> Settings:
     base = dict(logs_backend="local", logs_local_dir=str(logs_dir), logs_prefix="vector/", storage_backend="local",
                 local_store_dir=str(tmp / "store"), secrets_backend="local",
                 local_secrets_dir=str(tmp / "secrets"), auth_mode="header", bootstrap_admins=["root"],
-                cache_dir=str(tmp / "cache"), duckdb_threads=2, lb_background=False,
+                cache_dir=str(tmp / "cache"), duckdb_threads=2, lb_background=False, alerts_background=False,
                 lb_logs_backend="local", lb_logs_local_dir=str(tmp / "alb-bucket"),
                 lb_parquet_local_dir=str(tmp / "alb-parquet"))
     base.update(kw)

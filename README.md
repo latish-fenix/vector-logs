@@ -24,6 +24,7 @@ A web console for the application logs that Vector ships from the Fenix app serv
 - **Export** up to 10,000 lines as CSV, JSON or NDJSON.
 - **Save searches** (per user) and **share links** (the URL holds cluster, time range, query and filters).
 - Times in your browser's time zone (IST) or UTC, with one click.
+- **Alerts to Slack**: the server keeps checking the viewer itself, the application logs, ECS and the load balancers, and posts to a Slack channel when something goes wrong and again when it's fixed. Admins set the Slack webhook and the rules on the **Alerts** page (no restart); members see the alerts about their clusters there.
 
 Admins also see every cluster folder (new folders appear by themselves), add users, give each person access per cluster (or to all clusters, with exceptions), reset passwords and remove users.
 
@@ -127,6 +128,7 @@ All settings are environment variables in `.env` (see [.env.example](.env.exampl
 | `LB_PARQUET_BUCKET`, `LB_PARQUET_PREFIX` | the logs bucket, `loadbalancer-parquet/` | Where converted files are stored |
 | `LB_CACHE_MAX_MB`, `LB_MAX_FETCH_FILES` | `4096`, `500` | Server copies of converted files; most hours one view may fetch |
 | `LB_WARM_DAYS`, `LB_RETENTION_DAYS`, `LB_POLL_SECONDS`, `LB_CONVERTER_MEMORY_MB` | `30`, `30`, `300`, `256` | Load balancer converter |
+| `ALERTS_ENABLED`, `ALERTS_INTERVAL_SECONDS` | `true`, `60` | Alert checker (rules and the Slack webhook are set on the Alerts page) |
 | `S3_BUCKET` / `S3_PREFIX` / `AWS_REGION` | `fenix-es-config-api` / `vector-logs/` / `us-east-1` | App state |
 | `SECRETS_PREFIX` | `vector-logs/` | Secrets Manager names |
 | `BOOTSTRAP_ADMINS` | your email | Always admins |

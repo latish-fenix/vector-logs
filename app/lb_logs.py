@@ -648,6 +648,7 @@ class Converter:
         self._bases: tuple[float, list[str]] | None = None
         self._done: dict[tuple[str, str], set[str]] = {}
         self._known: dict[tuple[str, str], set[str]] = {}
+        self._latest: dict[str, str] = {}   # load balancer → end time of its newest AWS file (alerts)
         self._last_cycle = 0.0
         self._last_index = 0.0
         self._last_error: dict | None = None
@@ -749,6 +750,8 @@ class Converter:
             days = self._days(warm_from - timedelta(hours=1), now)
             for f in self._listed(days):
                 self._known.setdefault((f.lb, f.hour), set()).add(f.key)
+                if f.end > self._latest.get(f.lb, ""):
+                    self._latest[f.lb] = f.end
             last_status = time.monotonic()
             for (lb, hk), keys in sorted(self._known.items(), key=lambda kv: kv[0][1], reverse=True):
                 if hour_of_key(hk) + timedelta(hours=1) <= warm_from:
@@ -989,6 +992,7 @@ class Converter:
             "warmDays": self.settings.lb_warm_days, "pollSeconds": self.settings.lb_poll_seconds,
             "cycleMs": self._cycle_ms, "lastError": self._last_error,
             "lbs": sorted({lb for lb, _ in self._known}), "hours": hours,
+            "latestFile": dict(sorted(self._latest.items())),
             "days": sorted({d for _, d in self._listings})})
 
 
