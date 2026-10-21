@@ -427,3 +427,61 @@ def test_sync_index_skips_old_minute_files(lb_env):
     keys = list((store.root / "keys").rglob("*.json"))
     minutes = list((store.root / "minute").rglob("*.parquet"))
     assert keys and 0 < len(minutes) < len(keys)      # every keys file, only the recent minute files
+
+
+def test_one_failing_hour_does_not_stop_the_others(tmp_path, logs_dir):
+    """A conversion error in one hour (e.g. DuckDB out of memory) is reported and retried later; the
+    other hours are converted and the clean-up still runs."""
+    settings = make_settings(tmp_path, logs_dir)
+    generate(Path(settings.lb_logs_local_dir), now=NOW, start=START, rows_per_file=6, seed=12)
+    conv = Converter(settings)
+    real = conv._write_hour
+    bad_hour = (START + timedelta(hours=1)).strftime("%Y-%m-%dT%H")
+
+    def flaky(lb, hk, *a, **kw):
+        if hk == bad_hour:
+            raise RuntimeError("Out of Memory Error: failed to allocate")
+        return real(lb, hk, *a, **kw)
+    conv._write_hour = flaky
+    conv.run_once()
+    store = LbStore(Path(settings.cache_dir) / "lb")
+    hours_done = {(p.parent.parent.name, f"{p.parent.name}T{p.stem}") for p in (store.root / "keys").rglob("*.json")}
+    assert all(hk != bad_hour for _, hk in hours_done)
+    assert any(hk < bad_hour for _, hk in hours_done)                 # older hours were not blocked
+    st = store.read_status()
+    assert st["lastError"]["code"] == "LB_HOURS_FAILED" and bad_hour in st["lastError"]["message"]
+    # the converter alert sees it
+    from app.alerts import AlertService, validate_rule
+    app = create_app(settings)
+    f = app.state.alerts.evaluate(validate_rule({"type": "app_converter"}))
+    assert f[0].bad and "LB_HOURS_FAILED" in f[0].message
+    # fixed: converted on a later cycle, error cleared
+    conv._write_hour = real
+    conv.RETRY_FAILED_SECONDS = 0
+    conv._last_cycle = 0
+    conv.run_once()
+    hours_done = {f"{p.parent.name}T{p.stem}" for p in (store.root / "keys").rglob("*.json")}
+    assert bad_hour in hours_done and store.read_status()["lastError"] is None
+
+
+def test_out_of_memory_is_retried_with_more_memory(tmp_path, logs_dir):
+    import duckdb as _duckdb
+    settings = make_settings(tmp_path, logs_dir)
+    generate(Path(settings.lb_logs_local_dir), now=NOW, start=START, rows_per_file=6, seed=13)
+    conv = Converter(settings)
+    real_db, seen = conv._db, []
+
+    class Boom:
+        def execute(self, *a, **kw):
+            raise _duckdb.OutOfMemoryException("Out of Memory Error")
+
+        def close(self):
+            pass
+
+    def db(memory_mb=None):
+        seen.append(memory_mb)
+        return Boom() if memory_mb == settings.lb_converter_memory_mb else real_db(memory_mb)
+    conv._db = db
+    conv.run_once()
+    assert settings.lb_converter_memory_mb in seen and max(m or 0 for m in seen) >= 768
+    assert list((Path(settings.cache_dir) / "lb" / "keys").rglob("*.json"))

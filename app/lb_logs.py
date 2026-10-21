@@ -711,6 +711,7 @@ class Converter:
         self._last_cycle = 0.0
         self._last_index = 0.0
         self._last_error: dict | None = None
+        self._failed: dict[tuple[str, str], dict] = {}   # hours that could not be converted: when, why
         self._cycle_ms = 0
         self.converted_files = 0         # 5-minute AWS files converted by this process (tests, logs)
         self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="lb-fetch")
@@ -817,21 +818,50 @@ class Converter:
             for (lb, hk), keys in sorted(self._known.items(), key=lambda kv: kv[0][1], reverse=True):
                 if hour_of_key(hk) + timedelta(hours=1) <= warm_from:
                     continue
-                self._sync_hour(lb, hk, keys, now)
+                failed = self._failed.get((lb, hk))
+                if failed and time.monotonic() - failed["t"] < self.RETRY_FAILED_SECONDS:
+                    continue                                 # tried recently; the others go on
+                try:
+                    self._sync_hour(lb, hk, keys, now)
+                    self._failed.pop((lb, hk), None)
+                except ApiError:
+                    raise                                    # S3 / access: the whole cycle can't work
+                except Exception as e:  # noqa: BLE001 - one bad hour must not stop the others
+                    msg = f"{type(e).__name__}: {str(e).splitlines()[0][:300] if str(e) else ''}"
+                    if not failed or failed["error"] != msg:
+                        log.warning("load balancer logs: %s %s could not be converted: %s", lb, hk, msg)
+                    self._failed[(lb, hk)] = {"t": time.monotonic(), "error": msg, "at": _iso()}
                 if time.monotonic() - last_status > 5:      # the page shows progress while catching up
                     self.write_status()
+                    self._empty_trash()                      # merged work files go now, not next cycle
                     last_status = time.monotonic()
                 if self._stop.is_set():
                     break
             self.process_wanted()
-            self._prune(now)
-            self._last_error = None
+            self._last_error = self._failed_summary()
         except ApiError as e:
             self._last_error = {"code": e.code, "message": e.message, "at": _iso()}
             log.warning("load balancer logs: %s", e.message)
+        except Exception as e:  # noqa: BLE001 - reported on the page and to the converter alert
+            self._last_error = {"code": "LB_CONVERTER_ERROR", "message": f"{type(e).__name__}: {e}"[:400], "at": _iso()}
+            log.exception("load balancer log converter failed")
         finally:
+            try:
+                self._prune(self.now())                      # clean-up runs even when a cycle fails
+            except Exception:  # noqa: BLE001
+                log.exception("load balancer cache clean-up failed")
             self._cycle_ms = int((time.monotonic() - t0) * 1000)
             self.write_status()
+
+    RETRY_FAILED_SECONDS = 1800
+
+    def _failed_summary(self) -> dict | None:
+        recent = {k: v for k, v in self._failed.items()}
+        if not recent:
+            return None
+        (lb, hk), last = max(recent.items(), key=lambda kv: kv[0][1])
+        return {"code": "LB_HOURS_FAILED", "at": _iso(), "hours": len(recent),
+                "message": f"{len(recent)} hour(s) could not be converted; newest {lb} {hk}: {last['error']}"}
 
     def _days(self, start: datetime, end: datetime) -> list[date]:
         d, out = start.date(), []
@@ -887,8 +917,8 @@ class Converter:
             self._merge(lb, hk)
 
     # -- conversions
-    def _db(self) -> duckdb.DuckDBPyConnection:
-        con = duckdb.connect(config={"threads": 1, "memory_limit": f"{self.settings.lb_converter_memory_mb}MB",
+    def _db(self, memory_mb: int | None = None) -> duckdb.DuckDBPyConnection:
+        con = duckdb.connect(config={"threads": 1, "memory_limit": f"{memory_mb or self.settings.lb_converter_memory_mb}MB",
                                      "preserve_insertion_order": False})
         con.execute("SET enable_progress_bar = false")
         tmp = self.store.tmp_dir / "duckdb"
@@ -951,14 +981,25 @@ class Converter:
         for p in finals.values():
             p.parent.mkdir(parents=True, exist_ok=True)
         parts = {k: p.with_name(f".{p.name}.{tag}.part") for k, p in finals.items()}
-        con = self._db()
+        con = None
         try:
-            con.execute(f"COPY ({select_sql}) TO '{parts['hour'].as_posix()}' (FORMAT parquet, COMPRESSION zstd, "
-                        "ROW_GROUP_SIZE 100000)")
-            src = f"read_parquet({_sql_list([parts['hour']])})"
-            con.execute(f"COPY ({rollup_sql(src)}) TO '{parts['minute'].as_posix()}' (FORMAT parquet, COMPRESSION zstd)")
-            con.execute(f"COPY ({paths_rollup_sql(src)}) TO '{parts['paths'].as_posix()}' "
-                        "(FORMAT parquet, COMPRESSION zstd)")
+            base = self.settings.lb_converter_memory_mb
+            for memory in (base, max(base * 3, 768)):       # a busy hour may need more: one retry
+                con = self._db(memory)
+                try:
+                    con.execute(f"COPY ({select_sql}) TO '{parts['hour'].as_posix()}' (FORMAT parquet, "
+                                "COMPRESSION zstd, ROW_GROUP_SIZE 25000)")
+                    src = f"read_parquet({_sql_list([parts['hour']])})"
+                    con.execute(f"COPY ({rollup_sql(src)}) TO '{parts['minute'].as_posix()}' (FORMAT parquet, COMPRESSION zstd)")
+                    con.execute(f"COPY ({paths_rollup_sql(src)}) TO '{parts['paths'].as_posix()}' "
+                                "(FORMAT parquet, COMPRESSION zstd)")
+                    break
+                except duckdb.OutOfMemoryException:
+                    con.close()
+                    con = None
+                    if memory != base:
+                        raise
+                    log.info("load balancer logs: %s %s needs more than %d MB; trying again with more", lb, hk, base)
             parts["keys"].write_text(json.dumps(sorted(keys), separators=(",", ":")))
             for kind in ("hour", "paths", "minute", "keys"):
                 self.converted.put(parts[kind], rel(kind, lb, hk))
@@ -969,7 +1010,8 @@ class Converter:
                 os.replace(parts[kind], finals[kind])
             self._done[(lb, hk)] = set(keys)
         finally:
-            con.close()
+            if con is not None:
+                con.close()
             for p in parts.values():
                 p.unlink(missing_ok=True)
         evict_cache(self.store, self.settings.lb_cache_max_mb)
