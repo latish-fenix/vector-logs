@@ -70,6 +70,12 @@ def _select(key, label, options, default, help_=""):
             "options": [{"value": v, "label": lab} for v, lab in options], "help": help_}
 
 
+INCLUDE_LOGS = {"key": "includeLogs", "kind": "bool", "default": True,
+                "label": "Explain it: add the service's own error lines from the same minutes",
+                "help": "When the target group's service has application logs (tg-<cluster>), the alert shows how many "
+                        "ERROR lines it wrote, the top exceptions and the newest message (up to 200 characters; log "
+                        "messages can hold customer details)."}
+
 CATALOG: list[dict] = [
     {"type": "app_aws", "group": "Vector Logs viewer", "title": "Viewer can't reach AWS",
      "description": "The viewer can't list the application logs in S3, read the ECS and load balancer state, "
@@ -124,7 +130,8 @@ CATALOG: list[dict] = [
                 _select("statusClass", "Status", [("5xx", "5xx (server errors)"), ("4xx", "4xx (client errors)")], "5xx"),
                 _num("thresholdPercent", "At least", 5, 0.1, 100, "% of requests"),
                 _num("minRequests", "Only with at least", 50, 1, 10_000_000, "requests"),
-                _num("minutes", "Within", 15, 5, 240, "min")]},
+                _num("minutes", "Within", 15, 5, 240, "min"),
+                INCLUDE_LOGS]},
     {"type": "lb_status", "group": "Load balancers", "title": "Specific status codes (e.g. 400)",
      "description": f"Requests answered with the given status codes per target group, e.g. 400, 404, 502,503 or a "
                     f"whole class like 4xx, from the ALB access logs. Combine \"Within\" with \"Alert only after it "
@@ -135,7 +142,8 @@ CATALOG: list[dict] = [
                  "help": "Comma-separated: 400 · 400,404 · 502,503,504 · 4xx"},
                 _num("threshold", "At least", 100, 1, 100_000_000, "requests with these codes"),
                 _num("thresholdPercent", "and at least", 0, 0, 100, "% of the requests (0 = any share)"),
-                _num("minutes", "Within", 15, 5, 240, "min")]},
+                _num("minutes", "Within", 15, 5, 240, "min"),
+                INCLUDE_LOGS]},
     {"type": "lb_latency", "group": "Load balancers", "title": "Slow responses (p95)",
      "description": f"95th percentile of the target's response time per target group, from the ALB access logs "
                     f"(approximate). The data is about {LB_LAG_MINUTES} minutes behind.",
@@ -501,6 +509,17 @@ class AlertService:
         d = d.astimezone(zone) if zone else d
         return d.strftime("%d %b %H:%M %Z" if date else "%H:%M")
 
+    def _span(self, cfg: dict, start: int, end: int) -> str:
+        """04:40–04:55 IST (with the day when it isn't today)."""
+        tz = (cfg.get("settings") or {}).get("timeZone") or "UTC"
+        zone = self._zone(tz)
+        a, b = (datetime.fromtimestamp(x / 1000, timezone.utc) for x in (start, end))
+        if zone:
+            a, b = a.astimezone(zone), b.astimezone(zone)
+        today = datetime.now(b.tzinfo).date()
+        day = "" if b.date() == today else b.strftime("%d %b ")
+        return f"{day}{a:%H:%M}–{b:%H:%M} {b.strftime('%Z') or 'UTC'}"
+
     # -- links into the console
     @staticmethod
     def _q(**kw) -> str:
@@ -690,17 +709,17 @@ class AlertService:
     def _check_lb_errors(self, p: dict, now: int) -> list[Finding]:
         start, end, rows = self._lb_rows(p, now)
         cfg, cls, out = self.config(), p["statusClass"], []
-        span = f"{self._fmt(cfg, start)}–{self._fmt(cfg, end, True)}"
+        span = self._span(cfg, start, end)
         for r in rows:
             n = r["s5xx"] if cls == "5xx" else r["s4xx"]
             pct = n / r["requests"] * 100 if r["requests"] else 0
             bad = r["requests"] >= p["minRequests"] and pct >= p["thresholdPercent"]
-            msg = f"{pct:.1f}% {cls}: {n:,} of {r['requests']:,} requests ({span})"
-            te = r.get("topError")
-            if bad and te and str(te.get("code", ""))[:1] == cls[0]:
-                msg += f"\nmost: {te['code']} {te.get('method') or ''} {te.get('pathGroup') or ''} ×{te['count']:,}"
+            msg = f"{pct:.0f}% of requests failed with {cls}: {n:,} of {r['requests']:,} ({span})" if pct >= 10 else \
+                f"{pct:.1f}% of requests failed with {cls}: {n:,} of {r['requests']:,} ({span})"
             out.append(Finding(r["tg"], bad, msg, value=round(pct, 2), cluster=r.get("cluster"),
-                               link="/ui/lb?" + self._q(tg=r["tg"], st=cls, start=iso_ms(start), end=iso_ms(end))))
+                               link="/ui/lb?" + self._q(tg=r["tg"], st=cls, start=iso_ms(start), end=iso_ms(end)),
+                               extra={"lb": {"start": start, "end": end, "classes": [cls], "codes": [], "pct": pct,
+                                             "logs": p.get("includeLogs", True)}}))
         return out
 
     def _check_lb_status(self, p: dict, now: int) -> list[Finding]:
@@ -724,7 +743,7 @@ class AlertService:
                     if r.get("topError") and r["topError"]["count"] > top.get(r["tg"], {}).get("count", -1):
                         top[r["tg"]] = r["topError"]
         cfg, out = self.config(), []
-        span = f"{self._fmt(cfg, start)}–{self._fmt(cfg, end, True)}"
+        span = self._span(cfg, start, end)
         label = ", ".join(codes)
         link_code = {"code": codes[0]} if len(codes) == 1 and not classes else \
             {"st": codes[0]} if codes == classes and len(classes) == 1 else {}
@@ -732,18 +751,17 @@ class AlertService:
             n = matched.get(tg, 0)
             pct = n / r["requests"] * 100 if r["requests"] else 0
             bad = n >= p["threshold"] and pct >= p["thresholdPercent"]
-            msg = f"{n:,} × {label} ({pct:.1f}% of {r['requests']:,} requests, {span})"
-            te = top.get(tg)
-            if n and te:
-                msg += f"\nmost: {te['code']} {te.get('method') or ''} {te.get('pathGroup') or ''} ×{te['count']:,}"
+            msg = f"{n:,} requests answered {label} ({pct:.1f}% of {r['requests']:,}, {span})"
             out.append(Finding(tg, bad, msg, value=n, cluster=r.get("cluster"),
-                               link="/ui/lb?" + self._q(tg=tg, start=iso_ms(start), end=iso_ms(end), **link_code)))
+                               link="/ui/lb?" + self._q(tg=tg, start=iso_ms(start), end=iso_ms(end), **link_code),
+                               extra={"lb": {"start": start, "end": end, "classes": classes, "codes": singles,
+                                             "pct": pct, "logs": p.get("includeLogs", True)}}))
         return out
 
     def _check_lb_latency(self, p: dict, now: int) -> list[Finding]:
         start, end, rows = self._lb_rows(p, now)
         cfg, out = self.config(), []
-        span = f"{self._fmt(cfg, start)}–{self._fmt(cfg, end, True)}"
+        span = self._span(cfg, start, end)
         for r in rows:
             if r.get("p95") is None:
                 continue
@@ -809,6 +827,122 @@ class AlertService:
                                value=round(avg, 1), cluster=n, link="/ui/health?" + self._q(q=n)))
         return out
 
+    # ================================================================ explaining an alert
+    def explain(self, f: Finding, now: int | None = None) -> None:
+        """Add the evidence someone would look up next to f.extra["details"] / ["links"]: for a
+        load balancer finding, the codes and who answered them, the failing paths, the usual rate,
+        target health, and the service's own error lines in the same minutes. Best effort."""
+        info = f.extra.get("lb")
+        if not info or f.extra.get("details") is not None:
+            return
+        from .lb_logs import LbQuery
+        cfg, tg, details, links = self.config(), f.subject, [], []
+        start, end = info["start"], info["end"]
+        q = dict(start=start, end=end, target_groups=[tg], status_classes=info["classes"], status_codes=info["codes"])
+        if info["classes"] and info["codes"]:          # both: the class covers what matters for "who answered"
+            q["status_codes"] = []
+        lb = self._need("lb")
+
+        def step(name, fn):
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 - one missing piece must not lose the alert
+                log.info("alert details (%s) for %s: %s", name, tg, _err(e))
+
+        def codes():
+            counts = lb.code_counts(LbQuery(**q))
+            if not counts:
+                return
+            app = sum(c["app"] for c in counts.values())
+            total = sum(c["n"] for c in counts.values())
+            by = ", ".join(f"{code} ×{c['n']:,}" for code, c in list(counts.items())[:5])
+            if app == total:
+                who = "the service itself answered all of them (the load balancer reached it)"
+            elif app == 0:
+                who = ("the load balancer answered them itself: no healthy target, target timed out "
+                       "or refused the connection")
+            else:
+                who = f"the service answered {app:,}, the load balancer {total - app:,} (no target / timeout)"
+            details.append(f"Codes: {by} · {who}")
+
+        def paths():
+            res = lb.paths(LbQuery(**q), None, sort="requests", limit=3)
+            items = [i for i in res.get("items", []) if i["requests"]]
+            if not items:
+                return
+            alls = {(i["method"], i["pathGroup"]): i["requests"] for i in lb.paths(
+                LbQuery(start=start, end=end, target_groups=[tg]), None, sort="requests", limit=200).get("items", [])}
+            parts = []
+            for i in items:
+                total = alls.get((i["method"], i["pathGroup"]))
+                share = f" of {total:,}" if total else ""
+                parts.append(f"{i['method'] or ''} {i['pathGroup']} — {i['requests']:,}{share} ({i['topCode']})")
+            details.append("Paths: " + " · ".join(parts))
+
+        def usual():
+            day0 = start - 24 * 3600 * 1000
+            base = {r["tg"]: r for r in lb.summary(LbQuery(start=day0, end=start, target_groups=[tg]), None)
+                    .get("targetGroups", []) if r.get("tg")}.get(tg)
+            if not base or not base["requests"]:
+                details.append("Usual rate: no traffic for this target group in the 24 hours before")
+                return
+            bad = sum(c["n"] for c in lb.code_counts(LbQuery(**{**q, "start": day0, "end": start})).values())
+            details.append(f"Usual rate: {bad / base['requests'] * 100:.2f}% over the 24 hours before "
+                           f"({bad:,} of {base['requests']:,} requests)")
+
+        def health():
+            if self.health is None:
+                return
+            snap = self.health.snapshot()
+            for c in snap["clusters"]:
+                for t in c["targetGroups"]:
+                    if t["name"] == tg:
+                        line = f"Targets now: {t['counts'].get('healthy', 0)} of {t['total']} healthy"
+                        bad = sorted({x.get("reason") or x["state"] for x in t["targets"] if x["state"] != "healthy"})
+                        if bad:
+                            line += f" ({', '.join(bad[:3])})"
+                        svcs = [s for s in c["services"] if tg in (s.get("targetGroups") or [])] or \
+                            [s for s in c["services"] if s.get("desired")]
+                        if svcs:
+                            line += " · " + ", ".join(f"{s['name']} {s['running']}/{s['desired']} tasks" for s in svcs[:3])
+                        details.append(line + f" (ECS cluster {c['name']})")
+                        links.append(("ECS health", "/ui/health?" + self._q(q=c["name"])))
+                        return
+
+        def app_logs():
+            if not info.get("logs") or self.logs is None:
+                return
+            from .logs import SearchSpec
+            cluster = f.cluster or (tg[3:] if tg.startswith("tg-") else tg)
+            if cluster not in self.logs.clusters():
+                details.append(f"App logs: none — there is no Vector log folder '{cluster}'")
+                return
+            s, e = start - 2 * MINUTE, end + 2 * MINUTE
+            res = self.logs.search(cluster, SearchSpec(start=s, end=e, query="level:error"), size=1, with_aggs=True)
+            n = res["total"]
+            links.append(("App errors", f"/ui/logs/{cluster}?" + self._q(q="level:error", start=iso_ms(s), end=iso_ms(e))))
+            if not n:
+                details.append(f"App logs ({cluster}): no ERROR lines in these minutes — the cause is likely "
+                               "outside this service's own logging (crash, timeout, a dependency)")
+                return
+            top = [x for x in (res.get("facets") or {}).get("exception", []) if x.get("value")][:3]
+            line = f"App logs ({cluster}): {n:,} ERROR lines"
+            if top:
+                line += " · " + ", ".join(f"{x['value']} ×{x['count']:,}" for x in top)
+            details.append(line)
+            if res["hits"]:
+                h = res["hits"][0]
+                text = str(h.get("msg") or h.get("body") or h.get("raw") or "").replace("\n", " ").strip()[:200]
+                if text:
+                    details.append(f"Newest: {('[' + str(h['service']) + '] ') if h.get('service') else ''}{text}")
+        for name, fn in (("codes", codes), ("paths", paths), ("usual", usual), ("health", health), ("logs", app_logs)):
+            step(name, fn)
+        links.insert(0, ("Failed requests", "/ui/lb-logs?" + self._q(
+            tg=tg, start=iso_ms(start), end=iso_ms(end),
+            **({"st": info["classes"][0]} if len(info["classes"]) == 1 and not info["codes"] else
+               {"code": str(info["codes"][0])} if len(info["codes"]) == 1 and not info["classes"] else {}))))
+        f.extra["details"], f.extra["links"] = details, links
+
     # ================================================================ the checker
     def state(self) -> dict:
         data, _ = self.store.get_json(STATE_KEY)
@@ -849,6 +983,8 @@ class AlertService:
                 continue
             rs.update(lastRunAt=now, tookMs=int((time.monotonic() - t0) * 1000))
             fired, repeated, resolved = self._transition(rule, rs, findings, now)
+            for f, _ in (fired + repeated)[:5]:
+                self.explain(f, now)
             for kind, items in (("firing", fired), ("repeat", repeated), ("resolved", resolved)):
                 if items:
                     changes.append((rule, kind, items))
@@ -911,7 +1047,7 @@ class AlertService:
     def message(self, cfg: dict, rule: dict, kind: str, items: list[tuple[Finding, dict]], now: int) -> dict:
         icon = {"firing": ":red_circle:", "repeat": ":red_circle:", "resolved": ":large_green_circle:"}[kind]
         what = {"firing": "", "repeat": " — still failing", "resolved": " — resolved"}[kind]
-        lines = []
+        sections = []
         for f, cur in items[:10]:
             link = self._link(cfg, f.link)
             subj = f"<{link}|{_esc(f.subject)}>" if link else f"*{_esc(f.subject)}*"
@@ -921,14 +1057,21 @@ class AlertService:
             if kind == "resolved":
                 mins = (now - cur.get("firedAt", now)) / MINUTE
                 text = f"back to normal after {_dur(mins)}" + (f": {text}" if f.message else "")
-            lines.append(f"• {subj} — {text}")
+            lines = [f"• *{subj}* — {text}" if not link else f"• {subj} — {text}"]
+            if kind != "resolved":
+                lines += [f"      ◦ {_esc(d)}" for d in f.extra.get("details") or []]
+                ls = [f"<{u}|{_esc(label)}>" for label, p in f.extra.get("links") or [] if (u := self._link(cfg, p))]
+                if ls:
+                    lines.append("      " + " · ".join(ls))
+            sections.append("\n".join(lines))
         if len(items) > 10:
-            lines.append(f"…and {len(items) - 10} more")
+            sections.append(f"…and {len(items) - 10} more")
         head = f"{icon} *{_esc(rule['name'])}*{what}"
         fallback = f"{rule['name']}{what}: " + "; ".join(f.subject for f, _ in items[:5])
-        return {"text": fallback, "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": (head + "\n" + "\n".join(lines))[:2900]}},
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": self._footer(cfg, now, rule)}]}]}
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": head}}]
+        blocks += [{"type": "section", "text": {"type": "mrkdwn", "text": t[:2900]}} for t in sections]
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": self._footer(cfg, now, rule)}]})
+        return {"text": fallback, "blocks": blocks}
 
     def _notify(self, cfg: dict, changes, now: int) -> list[dict]:
         paused = (cfg.get("settings") or {}).get("paused")
@@ -953,6 +1096,7 @@ class AlertService:
             for f, cur in items:
                 entries.append({"id": new_id()[:12], "at": now, "ruleId": rule["id"], "ruleName": rule["name"],
                                 "type": rule["type"], "event": kind, "subject": f.subject, "message": f.message,
+                                "details": f.extra.get("details") or [], "links": [list(x) for x in f.extra.get("links") or []],
                                 "cluster": f.cluster, "link": f.link, "since": cur.get("firedAt"),
                                 "delivered": error is None, "error": error})
             log.info("alert %s %s: %s%s", rule["name"], kind, ", ".join(f.subject for f, _ in items),

@@ -36,6 +36,7 @@ class Settings:
     download_threads: int = 32
     cache_dir: str = "/app/cache"             # downloaded Parquet files (immutable, so safe to keep)
     cache_max_mb: int = 4096
+    cache_max_age_hours: int = 24             # downloaded / converted copies unused this long are deleted (0 = keep)
     duckdb_threads: int = 4
     duckdb_memory_mb: int = 768
     listing_cache_seconds: int = 30           # recent hours; older hours are cached longer
@@ -116,6 +117,7 @@ class Settings:
             download_threads=int(env("DOWNLOAD_THREADS", "32")),
             cache_dir=env("CACHE_DIR", "/app/cache"),
             cache_max_mb=int(env("CACHE_MAX_MB", "4096")),
+            cache_max_age_hours=int(env("CACHE_MAX_AGE_HOURS", "24")),
             duckdb_threads=int(env("DUCKDB_THREADS", "4")),
             duckdb_memory_mb=int(env("DUCKDB_MEMORY_MB", "768")),
             listing_cache_seconds=int(env("LISTING_CACHE_SECONDS", "30")),

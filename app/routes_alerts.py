@@ -141,8 +141,11 @@ def preview(body: RuleBody, request: Request, rule_id: str | None = Query(None, 
         raise
     except Exception as e:  # noqa: BLE001
         raise ApiError(502, "CHECK_FAILED", f"The check failed: {_err(e)}") from e
+    for f in [f for f in findings if f.bad][:3]:
+        svc.explain(f)
     return {"findings": [{"subject": f.subject, "bad": f.bad, "message": f.message, "value": f.value,
-                          "link": f.link} for f in findings],
+                          "link": f.link, "details": f.extra.get("details") or [],
+                          "links": [list(x) for x in f.extra.get("links") or []]} for f in findings],
             "bad": sum(1 for f in findings if f.bad), "forMinutes": rule.get("forMinutes", 0)}
 
 

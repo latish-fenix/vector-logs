@@ -128,6 +128,7 @@ All settings are environment variables in `.env` (see [.env.example](.env.exampl
 | `LB_PARQUET_BUCKET`, `LB_PARQUET_PREFIX` | the logs bucket, `loadbalancer-parquet/` | Where converted files are stored |
 | `LB_CACHE_MAX_MB`, `LB_MAX_FETCH_FILES` | `4096`, `500` | Server copies of converted files; most hours one view may fetch |
 | `LB_WARM_DAYS`, `LB_RETENTION_DAYS`, `LB_POLL_SECONDS`, `LB_CONVERTER_MEMORY_MB` | `30`, `30`, `300`, `256` | Load balancer converter |
+| `CACHE_MAX_AGE_HOURS` | `24` | Downloaded log files and converted load balancer copies unused this long are deleted (read from S3 again when needed) |
 | `ALERTS_ENABLED`, `ALERTS_INTERVAL_SECONDS` | `true`, `60` | Alert checker (rules and the Slack webhook are set on the Alerts page) |
 | `S3_BUCKET` / `S3_PREFIX` / `AWS_REGION` | `fenix-es-config-api` / `vector-logs/` / `us-east-1` | App state |
 | `SECRETS_PREFIX` | `vector-logs/` | Secrets Manager names |

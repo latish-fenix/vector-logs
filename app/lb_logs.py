@@ -526,7 +526,7 @@ class LbStore:
 
     def lbs(self) -> list[str]:
         names = set()
-        for kind in ("minute", "raw"):
+        for kind in ("minute", "raw", "keys"):
             d = self.root / kind
             if d.is_dir():
                 names |= {p.name for p in d.iterdir() if p.is_dir() and LB_NAME_RE.match(p.name)}
@@ -551,6 +551,65 @@ class LbStore:
 
 _evict_lock = threading.Lock()
 _last_evict = [0.0]
+
+
+def expire_cache(store: LbStore, max_age_seconds: float, now: float | None = None) -> tuple[int, int]:
+    """Delete local copies not used for max_age_seconds: hour, paths and minute files (all kept in
+    S3 and fetched again when a page needs them), the 5-minute work files of hours that are merged,
+    and leftovers of interrupted downloads. Keys files (tiny; how the converter knows an hour is
+    done) and the status are kept. Returns (files removed, bytes freed)."""
+    now = now or time.time()
+    cutoff = now - max_age_seconds
+    removed = freed = 0
+
+    def drop(p: str, size: int) -> None:
+        nonlocal removed, freed
+        try:
+            os.unlink(p)
+            removed += 1
+            freed += size
+        except OSError:
+            pass
+    for kind in ("hour", "paths", "minute"):
+        root = store.root / kind
+        for dirpath, dirs, names in os.walk(root, topdown=False):
+            for n in names:
+                p = os.path.join(dirpath, n)
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                if st.st_mtime < cutoff:
+                    drop(p, st.st_size)
+            if dirpath != str(root):
+                try:
+                    os.rmdir(dirpath)          # only when empty
+                except OSError:
+                    pass
+    raw = store.root / "raw"
+    if raw.is_dir():   # raw/<lb>/<day>/<HH>/: work files of an hour; gone once the hour is merged
+        for hour_dir in raw.glob("*/*/*"):
+            try:
+                lb, day, hh = hour_dir.parts[-3:]
+                if hour_dir.stat().st_mtime < cutoff and store.keys_file(lb, f"{day}T{hh}").exists():
+                    size = sum(f.stat().st_size for f in hour_dir.iterdir() if f.is_file())
+                    shutil.rmtree(hour_dir, ignore_errors=True)
+                    removed += 1
+                    freed += size
+            except (OSError, ValueError):
+                continue
+    for d in (store.tmp_dir, store.trash_dir):
+        if d.is_dir():
+            for p in d.iterdir():
+                try:
+                    if p.stat().st_mtime < now - 3600:
+                        shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    if removed:
+        log.info("load balancer cache: removed %d copies unused for %d h (%d MB)", removed,
+                 max_age_seconds // 3600, freed // (1024 * 1024))
+    return removed, freed
 
 
 def evict_cache(store: LbStore, max_mb: int, keep_seconds: int = 600, force: bool = False) -> int:
@@ -712,6 +771,7 @@ class Converter:
         """Copy every keys and minute file S3 has (within the retention) that the cache lacks, so a
         new or wiped server knows what is converted without converting it again."""
         oldest = self.now() - timedelta(days=self.settings.lb_retention_days)
+        age = self.settings.cache_max_age_hours * 3600     # older minute files are fetched when needed
         have = set()
         missing = []
         for r in self.converted.list("keys/"):
@@ -722,12 +782,13 @@ class Converter:
             if hour_of_key(hk) + timedelta(hours=1) < oldest:
                 continue
             have.add((lb, hk))
-            if not self.store.keys_file(lb, hk).exists() or not self.store.minute_file(lb, hk).exists():
-                missing.append((lb, hk))
+            want_minute = not age or hour_of_key(hk) + timedelta(hours=1) > self.now() - timedelta(seconds=age)
+            if not self.store.keys_file(lb, hk).exists() or (want_minute and not self.store.minute_file(lb, hk).exists()):
+                missing.append((lb, hk, want_minute))
 
         def pull(item):
-            lb, hk = item
-            if self.converted.get(rel("minute", lb, hk), self.store.minute_file(lb, hk)):
+            lb, hk, want_minute = item
+            if not want_minute or self.converted.get(rel("minute", lb, hk), self.store.minute_file(lb, hk)):
                 self.converted.get(rel("keys", lb, hk), self.store.keys_file(lb, hk))
                 self._done.pop((lb, hk), None)
         list(self._pool.map(pull, missing))
@@ -981,6 +1042,8 @@ class Converter:
         for k in [k for k in self._known if hour_of_key(k[1]) + timedelta(hours=1) < keep_until]:
             self._known.pop(k, None)
             self._done.pop(k, None)
+        if self.settings.cache_max_age_hours:
+            expire_cache(self.store, self.settings.cache_max_age_hours * 3600)
         evict_cache(self.store, self.settings.lb_cache_max_mb, force=True)
 
     def write_status(self) -> None:
@@ -1165,13 +1228,28 @@ class LbService:
     def sources(self, start_ms: int, end_ms: int, lbs: list[str]) -> Sources:
         names = [n for n in (lbs or self.store.lbs()) if LB_NAME_RE.match(n)]
         src = Sources([], [], [])
+        fetch: list[tuple[str, str]] = []
         for lb in names:
             for hk in hours_in(start_ms - 10 * MINUTE, end_ms):
                 minute = self.store.minute_file(lb, hk)
                 if minute.exists():
                     src.hours.append((lb, hk))
                     src.minutes.append(minute)
+                elif self.store.keys_file(lb, hk).exists():
+                    fetch.append((lb, hk))     # converted, but the local copy was removed (unused 24 h)
                 src.raws += self.store.raw_files(lb, hk)
+        if fetch:
+            got = list(self._pool.map(lambda it: self.converted.get(rel("minute", *it), self.store.minute_file(*it)), fetch))
+            for (lb, hk), ok in zip(fetch, got):
+                if ok:
+                    src.hours.append((lb, hk))
+                    src.minutes.append(self.store.minute_file(lb, hk))
+        now = time.time()
+        for p in src.minutes:
+            try:
+                os.utime(p, (now, now))       # used now: kept for another CACHE_MAX_AGE_HOURS
+            except OSError:
+                pass
         return src
 
     def local(self, kind: str, items: list[tuple[str, str]]) -> list[Path]:
@@ -1376,7 +1454,7 @@ class LbService:
                     self._paths_table(con, q, src, s, e, access)
                     for tg, method, pg, code, n in con.execute("""
                             SELECT tg, method, path_group, code, total FROM (
-                              SELECT tg, method, path_group, arg_max(elb_code, cn) AS code, sum(cn) AS total,
+                              SELECT tg, method, path_group, first(elb_code ORDER BY cn DESC, elb_code DESC) AS code, sum(cn) AS total,
                                      row_number() OVER (PARTITION BY tg ORDER BY sum(cn) DESC, path_group) AS rn
                               FROM (SELECT tg, method, path_group, elb_code, sum(n) AS cn FROM pt
                                     WHERE elb_code >= 400 GROUP BY ALL)
@@ -1392,6 +1470,23 @@ class LbService:
         self._run(go)
         out["tookMs"] = int((time.monotonic() - t0) * 1000)
         return out
+
+    def code_counts(self, q: LbQuery, access: Access | None = None) -> dict[int, dict]:
+        """Requests per status code: {code: {"n": count, "app": answered by the target}}."""
+        s, e = self.resolve_range(q.start, q.end)
+        src = self.sources(s, e, q.lbs)
+        if not src.count:
+            return {}
+
+        def go():
+            con = self._db()
+            try:
+                self._rollup_table(con, q, src, s, e, access)
+                return con.execute("SELECT elb_code, sum(n), coalesce(sum(n) FILTER (WHERE tgt_code IS NOT NULL), 0) "
+                                   "FROM m WHERE elb_code IS NOT NULL GROUP BY 1 ORDER BY 2 DESC").fetchall()
+            finally:
+                con.close()
+        return {int(c): {"n": int(n), "app": int(a)} for c, n, a in self._run(go)}
 
     def paths(self, q: LbQuery, access: Access | None, sort: str = "errors", limit: int = 50) -> dict:
         t0 = time.monotonic()
@@ -1431,7 +1526,7 @@ class LbService:
                 names = [d[0] for d in cur.description]
                 rows = [dict(zip(names, r)) for r in cur.fetchall()]
                 codes = {(m, pg): c for m, pg, c in con.execute(
-                    "SELECT method, path_group, arg_max(elb_code, cn) FROM (SELECT method, path_group, elb_code, "
+                    "SELECT method, path_group, first(elb_code ORDER BY cn DESC, elb_code DESC) FROM (SELECT method, path_group, elb_code, "
                     "sum(n) AS cn FROM pt GROUP BY ALL) GROUP BY ALL").fetchall()}
             finally:
                 con.close()

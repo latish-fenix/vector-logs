@@ -508,6 +508,67 @@ class LogService:
         finally:
             self._evict_lock.release()
 
+    # folders in CACHE_DIR that are not downloaded log files
+    NOT_LOG_CACHE = {"lb", "alerts", ".duckdb-tmp", ".results"}
+
+    def expire_cache(self, now: float | None = None) -> tuple[int, int]:
+        """Delete downloaded log files not used for CACHE_MAX_AGE_HOURS (they are read from S3 again
+        when a search needs them), in every bucket folder, including one no longer configured.
+        Returns (files removed, bytes freed)."""
+        hours = self.settings.cache_max_age_hours
+        root = Path(self.settings.cache_dir)
+        if not hours or not root.is_dir():
+            return 0, 0
+        now = now or time.time()
+        cutoff, part_cutoff = now - hours * 3600, now - 3600
+        removed = freed = 0
+        for top in root.iterdir():
+            if top.name in self.NOT_LOG_CACHE or not top.is_dir():
+                continue
+            for dirpath, _, names in os.walk(top, topdown=False):
+                for n in names:
+                    if not (n.endswith(".parquet") or n.endswith(".part")):
+                        continue
+                    p = os.path.join(dirpath, n)
+                    try:
+                        st = os.stat(p)
+                        if st.st_mtime < (part_cutoff if n.endswith(".part") else cutoff):
+                            os.unlink(p)
+                            removed += 1
+                            freed += st.st_size
+                    except OSError:
+                        pass
+                if dirpath != str(top):
+                    try:
+                        os.rmdir(dirpath)     # only when empty
+                    except OSError:
+                        pass
+            try:
+                top.rmdir()                   # an old bucket folder that is now empty
+            except OSError:
+                pass
+        if removed:
+            log.info("cache: removed %d log files unused for %d h (%d MB)", removed, hours, freed // (1024 * 1024))
+        return removed, freed
+
+    def start_janitor(self, lb_store=None, interval: int = 600) -> None:
+        """Every `interval` seconds (one worker at a time): expire the log cache and, when given,
+        the load balancer cache, so unused copies go even when nobody searches."""
+        def loop():
+            from .lb_logs import _FileLock, expire_cache
+            lock = _FileLock(Path(self.settings.cache_dir) / "alerts" / ".janitor.lock")
+            time.sleep(60)
+            while True:
+                if lock.fh is not None or lock.acquire():
+                    try:
+                        self.expire_cache()
+                        if lb_store is not None and self.settings.cache_max_age_hours:
+                            expire_cache(lb_store, self.settings.cache_max_age_hours * 3600)
+                    except Exception:  # noqa: BLE001 - never stop the thread
+                        log.exception("cache clean-up failed")
+                time.sleep(interval)
+        threading.Thread(target=loop, name="cache-janitor", daemon=True).start()
+
     def cache_stats(self) -> dict:
         if not isinstance(self.source, S3LogSource):
             return {"backend": "local"}

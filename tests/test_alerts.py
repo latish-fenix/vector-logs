@@ -33,7 +33,7 @@ class Slack:
         self.sent.append((url, payload))
 
     def texts(self):
-        return [p["blocks"][0]["text"]["text"] for _, p in self.sent]
+        return ["\n".join(b["text"]["text"] for b in p["blocks"] if b["type"] == "section") for _, p in self.sent]
 
 
 @pytest.fixture()
@@ -130,8 +130,8 @@ def test_ecs_rules_fire_once_then_resolve(env):
         svc.run_once(t + 2 * MINUTE)
     finally:
         fake_aws.TGS["tg-alpha-edds-2"] = old
-    resolved = [p for _, p in slack.sent if ":large_green_circle:" in p["blocks"][0]["text"]["text"]]
-    assert resolved and "alpha-edds-2" in resolved[0]["blocks"][0]["text"]["text"]
+    resolved = [t for t in slack.texts() if ":large_green_circle:" in t]
+    assert resolved and "alpha-edds-2" in resolved[0]
     hist = client.get("/api/v1/alerts/history", headers=ROOT_H).json()["items"]
     assert hist[0]["event"] == "resolved" and all(h["delivered"] for h in hist)
 
@@ -223,13 +223,27 @@ def test_lb_rules(tmp_path, logs_dir):
                                                                      "minutes": 60}}))
     assert f and any(x.bad for x in f)
     hit = next(x for x in f if x.bad)
-    assert "% 5xx:" in hit.message and hit.link.startswith(f"/ui/lb?tg={hit.subject}&st=5xx")
+    assert "% of requests failed with 5xx:" in hit.message and hit.link.startswith(f"/ui/lb?tg={hit.subject}&st=5xx")
+    # explained: codes and who answered, failing paths, the usual rate, links to the failed requests
+    svc.explain(hit)
+    d = "\n".join(hit.extra["details"])
+    assert d.startswith("Codes: 5") and ("service" in d or "load balancer" in d)
+    assert "Paths: " in d and "Usual rate:" in d
+    assert "App logs: none" in d                       # the demo target groups have no Vector log folder
+    assert hit.extra["links"][0][0] == "Failed requests" and "/ui/lb-logs?tg=" in hit.extra["links"][0][1]
+    msg = svc.message(svc.config(), {"name": "5xx", "id": "x"}, "firing", [(hit, {})], now_ms())
+    text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
+    assert "◦ Codes:" in text and "Failed requests" not in text      # no console address set: no links
+    svc.update_settings({"consoleUrl": "https://logs.example.com"}, "root")
+    msg = svc.message(svc.config(), {"name": "5xx", "id": "x"}, "firing", [(hit, {})], now_ms())
+    text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
+    assert "|Failed requests>" in text and "https://logs.example.com/ui/lb-logs?tg=" in text
     f = svc.evaluate(validate_rule({"type": "lb_errors", "params": {"thresholdPercent": 99, "minutes": 60}}))
     assert f and not any(x.bad for x in f)
     # a specific code: 400 (count and share), a class, and a code inside a listed class counted once
     f = svc.evaluate(validate_rule({"type": "lb_status", "params": {"codes": "400", "threshold": 1, "minutes": 60}}))
     hit = next(x for x in f if x.bad)
-    assert "× 400 (" in hit.message and "&code=400" in hit.link
+    assert "requests answered 400 (" in hit.message and "&code=400" in hit.link
     a = {x.subject: x.value for x in f}
     f = svc.evaluate(validate_rule({"type": "lb_status", "params": {"codes": "4xx, 400", "threshold": 1, "minutes": 60}}))
     b = {x.subject: x.value for x in f}
@@ -291,3 +305,25 @@ def test_rule_crud(env):
     opts = client.get(f"{URL}/options", headers=ROOT_H).json()
     assert "alpha-edds-2" in opts["ecsClusters"] and "tg-alpha-edds-2" in opts["targetGroups"]
     assert "post-btp-01" in opts["logClusters"]
+
+
+def test_explain_adds_app_errors_and_target_health(env):
+    """A target group named tg-<cluster> with Vector logs: the alert shows that service's ERROR lines
+    from the same minutes and the target health from ECS."""
+    from app.alerts import Finding
+    client, svc, _ = env
+    t = now_ms()
+    f = Finding("tg-post-btp-01", True, "50% of requests failed with 5xx", cluster="post-btp-01",
+                extra={"lb": {"start": t - 4 * 3600_000, "end": t, "classes": ["5xx"], "codes": [], "pct": 50,
+                              "logs": True}})
+    svc.explain(f, t)
+    d = "\n".join(f.extra["details"])
+    assert "App logs (post-btp-01):" in d and "ERROR lines" in d and "Newest: " in d
+    assert "Targets now: 2 of 2 healthy" in d and "(ECS cluster post-btp-01)" in d
+    labels = [x[0] for x in f.extra["links"]]
+    assert labels[0] == "Failed requests" and "App errors" in labels and "ECS health" in labels
+    # turned off: no log lines in the alert
+    g = Finding("tg-post-btp-01", True, "x", cluster="post-btp-01",
+                extra={"lb": {**f.extra["lb"], "logs": False}})
+    svc.explain(g, t)
+    assert not any(x.startswith("App logs") for x in g.extra["details"])

@@ -228,3 +228,29 @@ def test_cluster_access(client):
     ref = search(client, body)["hits"][0]["_ref"]
     assert client.get(f"{URL}/_record", params=ref, headers=zoe).status_code == 403
     assert client.get("/api/v1/me", headers=raj).json()["clusters"] == {"*": "view", "pre-prod-01": "none"}
+
+
+def test_log_cache_files_unused_for_a_day_are_removed(tmp_path, logs_dir):
+    import os
+    import time
+    from app.logs import LogService
+    from conftest import make_settings
+    cache = tmp_path / "cache"
+    files = {name: cache / name for name in ("fenix-vector-ecs-logs/logs/c1/dt=x/hour=1/1-a.parquet",
+                                             "fenix-vector-ecs-logs/logs/c1/dt=x/hour=1/2-b.parquet",
+                                             "fenix-ecr-logs/vector/c1/dt=x/hour=1/3-c.parquet",
+                                             "lb/minute/elb/2026-10-01/01.parquet")}
+    for p in files.values():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * 100)
+    old = time.time() - 25 * 3600
+    for name, p in files.items():
+        if not name.endswith("2-b.parquet"):
+            os.utime(p, (old, old))
+    svc = LogService(make_settings(tmp_path, logs_dir, cache_dir=str(cache)))
+    removed, freed = svc.expire_cache()
+    assert (removed, freed) == (2, 200)
+    assert files["fenix-vector-ecs-logs/logs/c1/dt=x/hour=1/2-b.parquet"].exists()   # used recently
+    assert not (cache / "fenix-ecr-logs").exists()                                    # old bucket folder gone
+    assert files["lb/minute/elb/2026-10-01/01.parquet"].exists()                      # not this cleaner's
+    assert LogService(make_settings(tmp_path, logs_dir, cache_dir=str(cache), cache_max_age_hours=0)).expire_cache() == (0, 0)

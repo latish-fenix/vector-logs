@@ -198,6 +198,8 @@ If the whole server or container is down, nothing can alert from it: add an outs
 | Cache size | Administration → Clusters (top right), limit `CACHE_MAX_MB`; load balancer files: `docker compose exec vector-logs du -sh /app/cache/lb` |
 | Load balancer converter state | `docker compose exec vector-logs cat /app/cache/lb/status.json` (also shown on the page) |
 | Alerts: what was sent and why something wasn't | the Alerts page (Recent alerts), or `docker compose logs | grep vector_logs.alerts` |
+| Disk use of the cache | `docker exec vector-logs du -sh /app/cache/* /app/cache/lb/*`. Copies unused for `CACHE_MAX_AGE_HOURS` (24) are deleted every 10 minutes |
+| Old Docker images after deploys | `docker image prune -f && docker builder prune -f` |
 | Restart | `docker compose restart` |
 
 ## How searches perform

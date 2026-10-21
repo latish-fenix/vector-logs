@@ -385,3 +385,45 @@ def test_cache_limits(lb_env):
     assert r.status_code == 400 and r.json()["error"]["code"] == "TOO_MUCH_DATA"
     # counts still work without any hour file on the server
     assert small.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()["totals"]["requests"] == len(written)
+
+
+def test_copies_unused_for_a_day_are_removed_and_fetched_again(lb_env):
+    """CACHE_MAX_AGE_HOURS: hour/paths/minute copies not used for a day go; keys stay; the pages
+    fetch what they need again from the converted store and give the same numbers."""
+    import os
+    from app.lb_logs import expire_cache
+    client, written, settings, conv = lb_env
+    store = LbStore(Path(settings.cache_dir) / "lb")
+    before = client.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()["totals"]
+    old = time.time() - 25 * 3600
+    for kind in ("hour", "paths", "minute"):
+        for p in (store.root / kind).rglob("*.parquet"):
+            os.utime(p, (old, old))
+    keys = sorted((store.root / "keys").rglob("*.json"))
+    removed, freed = expire_cache(store, 24 * 3600)
+    assert removed and freed
+    assert not list((store.root / "minute").rglob("*.parquet")) and not list((store.root / "hour").rglob("*.parquet"))
+    assert sorted((store.root / "keys").rglob("*.json")) == keys               # the converter's memory stays
+    assert {lb["name"] for lb in client.get("/api/v1/lb", headers=ROOT_H).json()["items"]}   # LBs still listed
+    after = client.post("/api/v1/lb/_summary", json=body(), headers=ROOT_H).json()["totals"]
+    assert after["requests"] == before["requests"] == len(written)
+    assert list((store.root / "minute").rglob("*.parquet"))                    # fetched back and kept
+    page = client.post("/api/v1/lb/_requests", json=body(size=5), headers=ROOT_H).json()
+    assert page["total"] == len(written) and len(page["hits"]) == 5
+    # the converter does not convert the hours again: their keys files are still there
+    n = conv.converted_files
+    conv.run_once()
+    assert conv.converted_files == n
+
+
+def test_sync_index_skips_old_minute_files(lb_env):
+    import shutil
+    client, written, settings, conv = lb_env
+    store = LbStore(Path(settings.cache_dir) / "lb")
+    for kind in ("minute", "keys"):
+        shutil.rmtree(store.root / kind)
+    young = Converter(dataclasses.replace(settings, cache_max_age_hours=2))
+    young.sync_index()
+    keys = list((store.root / "keys").rglob("*.json"))
+    minutes = list((store.root / "minute").rglob("*.parquet"))
+    assert keys and 0 < len(minutes) < len(keys)      # every keys file, only the recent minute files

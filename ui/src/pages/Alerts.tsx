@@ -460,7 +460,7 @@ function Preview({ data }: { data: { findings: AlertFinding[]; bad: number } }) 
               <tr key={f.subject}>
                 <td className="nowrap" style={{ width: 1 }}>{f.bad ? <Badge tone="red">alert</Badge> : <Badge tone="green">ok</Badge>}</td>
                 <td className="mono nowrap">{f.subject}</td>
-                <td style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{f.message}</td>
+                <td style={{ overflowWrap: "anywhere" }}><div style={{ whiteSpace: "pre-wrap" }}>{f.message}</div><Evidence details={f.details} links={f.links} /></td>
               </tr>
             ))}
           </tbody>
@@ -494,7 +494,10 @@ function History() {
                   <td>{e.event === "resolved" ? <Badge tone="green">resolved</Badge> : <Badge tone="red">{e.event === "repeat" ? "still failing" : "failing"}</Badge>}</td>
                   <td>{e.ruleName}</td>
                   <td className="mono nowrap">{e.link ? <Link to={e.link.replace(/^\/ui/, "")} className="hlink">{e.subject}</Link> : e.subject}</td>
-                  <td style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxWidth: 520, fontSize: 13 }}>{e.message}</td>
+                  <td style={{ overflowWrap: "anywhere", maxWidth: 560, fontSize: 13 }}>
+                    <div style={{ whiteSpace: "pre-wrap" }}>{e.message}</div>
+                    <Evidence details={e.details} links={e.links} />
+                  </td>
                   <td className="nowrap">{e.delivered ? <span className="hint">sent</span> : <span className="warn-text" title={e.error ?? ""}>not sent</span>}{!e.delivered && e.error ? <Detail text={e.error} /> : null}</td>
                 </tr>
               ))}
@@ -503,6 +506,21 @@ function History() {
         </div>
       )}
     </section>
+  );
+}
+
+/** What the alert found out: codes, paths, usual rate, targets, the service's own errors, links. */
+function Evidence({ details, links }: { details?: string[]; links?: [string, string][] }) {
+  if (!details?.length && !links?.length) return null;
+  return (
+    <div className="stack-sm" style={{ marginTop: 6, gap: 3 }}>
+      {details?.map((d, i) => <div key={i} className="hint" style={{ fontSize: 12.5, whiteSpace: "pre-wrap" }}>◦ {d}</div>)}
+      {links?.length ? (
+        <div className="row" style={{ gap: 10, fontSize: 12.5 }}>
+          {links.map(([label, to]) => <Link key={label} className="hlink" to={to.replace(/^\/ui/, "")}>{label}</Link>)}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

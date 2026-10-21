@@ -430,8 +430,9 @@ export interface AlertsOverview {
   lbLagMinutes: number;
 }
 export interface AlertOptions { logClusters: string[]; ecsClusters: string[]; lbs: string[]; targetGroups: string[]; errors: string[] }
-export interface AlertFinding { subject: string; bad: boolean; message: string; value: number | null; link: string | null }
+export interface AlertFinding { subject: string; bad: boolean; message: string; value: number | null; link: string | null; details?: string[]; links?: [string, string][] }
 export interface AlertEvent {
   id: string; at: number; ruleId: string; ruleName: string; type: string; event: "firing" | "repeat" | "resolved";
   subject: string; message: string; cluster: string | null; link: string | null; since: number | null; delivered: boolean; error: string | null;
+  details?: string[]; links?: [string, string][];
 }

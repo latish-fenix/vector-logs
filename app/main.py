@@ -89,6 +89,9 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
     app.state.health = health or HealthService(settings.ecs_region, settings.health_cache_seconds)
     app.state.metrics = MetricsService(app.state.health, settings.metrics_cache_seconds)
     app.state.lb = LbService(settings)
+    if settings.alerts_background and settings.cache_max_age_hours:
+        # deletes downloaded copies unused for CACHE_MAX_AGE_HOURS (one worker at a time)
+        app.state.logs.start_janitor(app.state.lb.store if settings.lb_enabled else None)
     if settings.lb_enabled and settings.lb_background:
         # Every API worker starts one; a file lock lets only one of them convert.
         app.state.lb_converter = Converter(settings)
