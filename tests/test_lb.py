@@ -485,3 +485,30 @@ def test_out_of_memory_is_retried_with_more_memory(tmp_path, logs_dir):
     conv.run_once()
     assert settings.lb_converter_memory_mb in seen and max(m or 0 for m in seen) >= 768
     assert list((Path(settings.cache_dir) / "lb" / "keys").rglob("*.json"))
+
+
+def test_out_of_memory_on_a_single_file_is_retried(tmp_path, logs_dir):
+    """The 5-minute files of the current hour are converted one by one; a big one gets more memory."""
+    import duckdb as _duckdb
+    settings = make_settings(tmp_path, logs_dir)
+    now = datetime.now(timezone.utc)
+    generate(Path(settings.lb_logs_local_dir), now=now, start=now.replace(minute=0, second=0, microsecond=0),
+             rows_per_file=6, seed=14)
+    conv = Converter(settings)
+    real_db, seen = conv._db, []
+
+    class Boom:
+        def execute(self, *a, **kw):
+            raise _duckdb.OutOfMemoryException("Out of Memory Error")
+
+        def close(self):
+            pass
+
+    def db(memory_mb=None):
+        seen.append(memory_mb)
+        return Boom() if memory_mb == settings.lb_converter_memory_mb else real_db(memory_mb)
+    conv._db = db
+    conv.run_once()
+    store = LbStore(Path(settings.cache_dir) / "lb")
+    assert list((store.root / "raw").rglob("*.parquet")) and max(m or 0 for m in seen) >= 768
+    assert store.read_status()["lastError"] is None

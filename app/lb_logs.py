@@ -937,17 +937,33 @@ class Converter:
         dest = self.store.raw_dir(lb, hk) / f.parquet_name
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_name(f".{dest.name}.part")
-        con = self._db()
         try:
-            con.execute(f"COPY ({convert_sql(_sql_list([local]))}) TO '{part.as_posix()}' "
-                        "(FORMAT parquet, COMPRESSION zstd)")
+            self._with_memory(f"{lb} {hk} {f.parquet_name}", lambda con: con.execute(
+                f"COPY ({convert_sql(_sql_list([local]))}) TO '{part.as_posix()}' "
+                "(FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 25000)"))
             os.replace(part, dest)
             self.done_keys(lb, hk).add(key)
             self.converted_files += 1
         finally:
-            con.close()
             self.source.cleanup(local)
             part.unlink(missing_ok=True)
+
+    def _with_memory(self, what: str, work) -> None:
+        """Run work(con) with LB_CONVERTER_MEMORY_MB; a file or hour that runs out of memory (the
+        busiest load balancers) is tried once more with 2x that, at least 768 MB and at most 1 GB (the
+        container's 2 GB is shared with searches)."""
+        base = self.settings.lb_converter_memory_mb
+        for memory in (base, max(base, min(max(base * 2, 768), 1024))):
+            con = self._db(memory)
+            try:
+                work(con)
+                return
+            except duckdb.OutOfMemoryException:
+                if memory != base:
+                    raise
+                log.info("load balancer logs: %s needs more than %d MB; trying again with more", what, base)
+            finally:
+                con.close()
 
     def _convert_hour(self, lb: str, hk: str, keys: list[str]) -> None:
         tmp = self.store.tmp_dir / f"hour-{os.getpid()}"
@@ -981,25 +997,15 @@ class Converter:
         for p in finals.values():
             p.parent.mkdir(parents=True, exist_ok=True)
         parts = {k: p.with_name(f".{p.name}.{tag}.part") for k, p in finals.items()}
-        con = None
+        def build(con):
+            con.execute(f"COPY ({select_sql}) TO '{parts['hour'].as_posix()}' (FORMAT parquet, "
+                        "COMPRESSION zstd, ROW_GROUP_SIZE 25000)")
+            src = f"read_parquet({_sql_list([parts['hour']])})"
+            con.execute(f"COPY ({rollup_sql(src)}) TO '{parts['minute'].as_posix()}' (FORMAT parquet, COMPRESSION zstd)")
+            con.execute(f"COPY ({paths_rollup_sql(src)}) TO '{parts['paths'].as_posix()}' "
+                        "(FORMAT parquet, COMPRESSION zstd)")
         try:
-            base = self.settings.lb_converter_memory_mb
-            for memory in (base, max(base * 3, 768)):       # a busy hour may need more: one retry
-                con = self._db(memory)
-                try:
-                    con.execute(f"COPY ({select_sql}) TO '{parts['hour'].as_posix()}' (FORMAT parquet, "
-                                "COMPRESSION zstd, ROW_GROUP_SIZE 25000)")
-                    src = f"read_parquet({_sql_list([parts['hour']])})"
-                    con.execute(f"COPY ({rollup_sql(src)}) TO '{parts['minute'].as_posix()}' (FORMAT parquet, COMPRESSION zstd)")
-                    con.execute(f"COPY ({paths_rollup_sql(src)}) TO '{parts['paths'].as_posix()}' "
-                                "(FORMAT parquet, COMPRESSION zstd)")
-                    break
-                except duckdb.OutOfMemoryException:
-                    con.close()
-                    con = None
-                    if memory != base:
-                        raise
-                    log.info("load balancer logs: %s %s needs more than %d MB; trying again with more", lb, hk, base)
+            self._with_memory(f"{lb} {hk}", build)
             parts["keys"].write_text(json.dumps(sorted(keys), separators=(",", ":")))
             for kind in ("hour", "paths", "minute", "keys"):
                 self.converted.put(parts[kind], rel(kind, lb, hk))
@@ -1010,8 +1016,6 @@ class Converter:
                 os.replace(parts[kind], finals[kind])
             self._done[(lb, hk)] = set(keys)
         finally:
-            if con is not None:
-                con.close()
             for p in parts.values():
                 p.unlink(missing_ok=True)
         evict_cache(self.store, self.settings.lb_cache_max_mb)

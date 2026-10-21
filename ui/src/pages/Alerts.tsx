@@ -167,6 +167,7 @@ export function describeRule(r: { type: string; params: Record<string, unknown>;
     ecs_usage: () => `${scope(p.clusters, "All clusters")}: ${p.metric === "cpu" ? "CPU" : "memory"} ≥ ${p.thresholdPercent}% on average over ${p.minutes} min`,
   };
   let s = text[r.type]?.() ?? r.type;
+  if (Number(p.vsUsual)) s += ` · only when ≥ ${p.vsUsual}× its usual rate`;
   if (r.forMinutes) s += ` · for ${r.forMinutes} min`;
   if (r.repeatMinutes) s += ` · remind every ${r.repeatMinutes} min`;
   return s;

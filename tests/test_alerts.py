@@ -223,7 +223,8 @@ def test_lb_rules(tmp_path, logs_dir):
                                                                      "minutes": 60}}))
     assert f and any(x.bad for x in f)
     hit = next(x for x in f if x.bad)
-    assert "% of requests failed with 5xx:" in hit.message and hit.link.startswith(f"/ui/lb?tg={hit.subject}&st=5xx")
+    assert "% 5xx · " in hit.message and " requests · usual " in hit.message
+    assert hit.link.startswith(f"/ui/lb?tg={hit.subject}&st=5xx")
     # explained: codes and who answered, failing paths, the usual rate, links to the failed requests
     svc.explain(hit)
     d = "\n".join(hit.extra["details"])
@@ -233,17 +234,31 @@ def test_lb_rules(tmp_path, logs_dir):
     assert hit.extra["links"][0][0] == "Failed requests" and "/ui/lb-logs?tg=" in hit.extra["links"][0][1]
     msg = svc.message(svc.config(), {"name": "5xx", "id": "x"}, "firing", [(hit, {})], now_ms())
     text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
-    assert "◦ Codes:" in text and "Failed requests" not in text      # no console address set: no links
+    # compact: one line, then the likely cause; no list of details; no links without a console address
+    assert "◦ Codes:" not in text and "↳ `" in text and "Failed requests" not in text
+    assert text.splitlines()[0].startswith(":red_circle: *5xx* ·")
     svc.update_settings({"consoleUrl": "https://logs.example.com"}, "root")
     msg = svc.message(svc.config(), {"name": "5xx", "id": "x"}, "firing", [(hit, {})], now_ms())
     text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
     assert "|Failed requests>" in text and "https://logs.example.com/ui/lb-logs?tg=" in text
+    assert "|ECS health>" not in text                      # only when targets are unhealthy
+    # several target groups: one header with the count and the window, a line each
+    hits = [x for x in svc.evaluate(validate_rule({"type": "lb_errors", "params": {
+        "thresholdPercent": 0.1, "minRequests": 1, "minutes": 60}})) if x.bad]
+    for x in hits:
+        svc.explain(x)
+    msg = svc.message(svc.config(), {"name": "5xx", "id": "x"}, "firing", [(x, {}) for x in hits], now_ms())
+    assert len(hits) > 1 and f"— {len(hits)} target groups ·" in msg["blocks"][0]["text"]["text"]
+    # only when unusual: an impossible multiple of the usual rate stops it
+    f = svc.evaluate(validate_rule({"type": "lb_errors", "params": {"thresholdPercent": 0.1, "minRequests": 1,
+                                                                     "minutes": 60, "vsUsual": 50}}))
+    assert f and not any(x.bad for x in f)
     f = svc.evaluate(validate_rule({"type": "lb_errors", "params": {"thresholdPercent": 99, "minutes": 60}}))
     assert f and not any(x.bad for x in f)
     # a specific code: 400 (count and share), a class, and a code inside a listed class counted once
     f = svc.evaluate(validate_rule({"type": "lb_status", "params": {"codes": "400", "threshold": 1, "minutes": 60}}))
     hit = next(x for x in f if x.bad)
-    assert "requests answered 400 (" in hit.message and "&code=400" in hit.link
+    assert " × 400 · " in hit.message and "&code=400" in hit.link
     a = {x.subject: x.value for x in f}
     f = svc.evaluate(validate_rule({"type": "lb_status", "params": {"codes": "4xx, 400", "threshold": 1, "minutes": 60}}))
     b = {x.subject: x.value for x in f}
