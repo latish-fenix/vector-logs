@@ -169,20 +169,33 @@ The server checks rules all the time and posts to one Slack channel through an i
 3. Sign in as an admin → **Alerts**: paste the URL → **Save** → **Send test message**. Set **Console address** (e.g. `https://app-logs-int.infra.fenixcommerce.com`) so messages link to the right page.
 4. To change the Slack channel later, paste the new webhook URL and Save; the old one stops being used at once.
 
-Default rules (all on; change limits, scope, "alert only after" and "remind every" per rule, or add more):
+**How alerts behave** (like the ES-API alerts):
 
-| Rule | Alerts when |
-| --- | --- |
-| Viewer can't reach AWS | listing the logs in S3, ECS / load balancer APIs or CloudWatch fails (2 min) |
-| Load balancer log converter failing | it reports an error or hasn't updated for 30 min |
-| Server disk almost full | 85 % used |
-| Viewer server errors | 10 HTTP 5xx answers in 15 min |
-| Application logs stopped arriving | a cluster has no new Vector file for 30 min |
-| Load balancer logs stopped arriving | none of the load balancers delivered a file for 60 min |
-| Unhealthy targets | a target group of an ECS cluster has an unhealthy target for 5 min |
-| Service below its desired tasks | running < desired for 10 min |
-| High CPU / High memory | 90 % on average over 15 min (CloudWatch) |
-| 5xx rate above 5 % | a target group answers ≥ 5 % 5xx (50+ requests) in 15 min |
+- **Two levels.** Every alert is a *warning* or *critical*. CPU, memory, the viewer server's disk and the load balancer error rates have two lines; service down and an instance leaving a cluster are always critical.
+- **Thresholds** (Alerts page → *Thresholds, reminders and the weekly summary*): CPU and memory 70 % warning / 80 % critical for all ECS clusters, with other lines per cluster if you add them; viewer server disk 70 % / 80 %. The load balancer rules keep their own numbers: the rule's limit (e.g. 5 % 5xx) is the warning, critical is double unless you set one.
+- **When it posts.** Once when an alert starts, at once when it changes level ("up from warning" / "down from critical"), reminders while it lasts (warnings every 60 min, criticals every 15 min; changeable, 0 = never), and "OK again" when it clears.
+- **No flapping.** An alert clears only 2 points below its line (a 70 % warning clears under 68 %). CPU must be high for 2 checks in a row; ECS health (service down, tasks below desired, unhealthy targets, instance left) is checked every 2 minutes and needs 2 checks in a row. A service below its tasks *during a deployment* gets 10 minutes.
+- **Snooze** (admins, on the Alerts page: open a failing rule): 1 h, 4 h, 24 h or until it clears. A snoozed alert posts nothing; "until it clears" still posts the OK message.
+- **Times in Slack** are shown in two zones, India and Pacific by default (e.g. `22 Oct 09:05 IST / 21 Oct 20:35 PDT`; PST in winter). Change or turn off the second zone next to *Times in Slack*.
+- **Weekly summary** every Friday 15:00 (the first time zone set for Slack): alerts of the last 7 days per rule, what is failing now, what is snoozed, and rules that can't check. **Send it now** posts one at once.
+
+Default rules (all on; change scope and limits per rule, or add more):
+
+| Rule | Checked | Level | Alerts when |
+| --- | --- | --- | --- |
+| Viewer can't reach AWS | 1 min | critical | listing the logs in S3, ECS / load balancer APIs or CloudWatch fails (2 min) |
+| Load balancer log converter failing | 1 min | warning | it reports an error or hasn't updated for 30 min |
+| Viewer server disk | 5 min | warning / critical | ≥ 70 % / ≥ 80 % used (Thresholds) |
+| Viewer server errors | 1 min | warning | 10 HTTP 5xx answers in 15 min |
+| Application logs stopped arriving | 5 min | warning | a cluster has no new Vector file for 30 min |
+| Load balancer logs stopped arriving | 5 min | warning | none of the load balancers delivered a file for 60 min |
+| Unhealthy targets | 2 min | warning / critical | some targets unhealthy / a target group with no healthy target (2 checks) |
+| Service down or below its desired tasks | 2 min | warning / critical | running < desired / running 0 (2 checks; 10 min during a deployment) |
+| Instance left the cluster | 2 min | critical | an instance's ECS agent disconnects or it isn't ACTIVE, or it disappears while services are short of tasks (2 checks; a planned scale-in that keeps every service at its count doesn't alert) |
+| High CPU / High memory | 5 min | warning / critical | average of the last 10 min ≥ 70 % / ≥ 80 % (Thresholds, per cluster); CPU 2 checks in a row |
+| 5xx rate above 5 % | 5 min | warning / critical | a target group answers ≥ 5 % / ≥ 10 % 5xx (50+ requests) in 15 min |
+
+Existing setups are moved to this model automatically on the first start (the old per-rule "remind every" and the CPU / memory / disk percentages are replaced by the Thresholds card; the rule "Instance left the cluster" is added).
 
 Also available: **Specific status codes** (e.g. 400, or 502,503,504, or 4xx: at least N requests, optionally at least X % of the requests, within N minutes, per target group), **Error lines in application logs** (a Logs-page search, e.g. `level:error`, finds N lines in a window), **Slow responses (p95)**, a 4xx rate. **Check now** in a rule's editor shows what it finds right now without sending anything.
 

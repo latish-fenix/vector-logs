@@ -3,18 +3,21 @@ import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   get, request,
-  type AlertEvent, type AlertFinding, type AlertOptions, type AlertParamSpec, type AlertRule, type AlertsOverview, type AlertType,
+  type AlertEvent, type AlertFinding, type AlertLevel, type AlertOptions, type AlertPair, type AlertParamSpec, type AlertRule,
+  type AlertSettings, type AlertSubject, type AlertThresholds, type AlertsOverview, type AlertType,
 } from "../api";
 import { Icon } from "../components/icons";
 import { Page } from "../components/Shell";
-import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, SearchInput, Spinner, useToast } from "../components/ui";
+import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, SearchInput, SearchSelect, Spinner, useToast } from "../components/ui";
 import { ago, fmtTime, localZoneName, num, storedZone } from "../format";
 import { useMe } from "../session";
 
 // Alerts: Slack webhook, the rules (what is checked and when it alerts) and what was sent.
 // Admins manage everything; members see the alerts about their clusters.
 
-const ZONES = ["Asia/Kolkata", "UTC", "America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London"];
+const ZONES = ["Asia/Kolkata", "America/Los_Angeles", "UTC", "America/New_York", "America/Chicago", "Europe/London"];
+const ZONE_LABELS: Record<string, string> = { "Asia/Kolkata": "India (IST)", "America/Los_Angeles": "Pacific (PST / PDT)" };
+const zoneLabel = (z: string) => ZONE_LABELS[z] ?? z;
 
 export function Alerts() {
   const me = useMe().data!;
@@ -25,7 +28,7 @@ export function Alerts() {
           <h1>Alerts</h1>
           <span className="sub">
             {me.admin
-              ? "The server checks these rules all the time and posts to Slack when something goes wrong, and again when it's back to normal."
+              ? "The server checks these rules all the time and posts to Slack when something goes wrong (warning or critical), when it gets worse or better, and when it's OK again."
               : "Alerts sent to Slack about the clusters you can see. Admins choose what is checked."}
           </span>
         </div>
@@ -45,6 +48,7 @@ function AdminAlerts() {
   if (q.error) return <section className="card"><div className="card-body"><ErrorCallout error={q.error} admin /></div></section>;
   const d = q.data!;
   const firing = d.rules.reduce((n, r) => n + r.status.firing.length, 0);
+  const critical = d.rules.reduce((n, r) => n + r.status.firing.filter((s) => s.level !== "warning").length, 0);
   return (
     <>
       {!d.slack.configured && (
@@ -52,12 +56,13 @@ function AdminAlerts() {
       )}
       {d.settings.paused && <Callout tone="warn" icon="warn" title="Notifications are paused">Rules are still checked; nothing is posted to Slack until you resume.</Callout>}
       <div className="stats" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
-        <div className="stat"><span className="stat-label">Failing now</span><span className="stat-value" style={{ color: firing ? "var(--danger)" : undefined }}>{num(firing)}</span><span className="stat-note">{firing ? "see the red rules below" : "all clear"}</span></div>
+        <div className="stat"><span className="stat-label">Failing now</span><span className="stat-value" style={{ color: critical ? "var(--danger)" : firing ? "var(--warn)" : undefined }}>{num(firing)}</span><span className="stat-note">{firing ? `${num(critical)} critical · ${num(firing - critical)} warning${d.snoozes.length ? ` · ${num(d.snoozes.length)} snoozed` : ""}` : "all clear"}</span></div>
         <div className="stat"><span className="stat-label">Rules on</span><span className="stat-value">{num(d.rules.filter((r) => r.enabled).length)}</span><span className="stat-note">of {num(d.rules.length)}</span></div>
         <div className="stat"><span className="stat-label">Slack</span><span className="stat-value" style={{ fontSize: 20 }}>{d.slack.configured ? (d.settings.paused ? "Paused" : "Connected") : "Not set"}</span><span className="stat-note">{d.slack.configured ? `set by ${d.slack.updatedBy ?? "?"} ${ago(d.slack.updatedAt)}` : "add a webhook below"}</span></div>
         <div className="stat"><span className="stat-label">Last check</span><span className="stat-value" style={{ fontSize: 20 }}>{d.checker.checkedAt ? ago(new Date(d.checker.checkedAt).toISOString()) : "not yet"}</span><span className="stat-note">{d.checker.background ? `every ${d.checker.intervalSeconds} s` : "the checker is off (ALERTS_BACKGROUND=false)"}</span></div>
       </div>
       <SlackCard d={d} />
+      <ThresholdsCard d={d} />
       <section className="card" style={{ overflow: "hidden" }}>
         <div className="card-head">
           <div className="grow"><span className="card-title">Rules</span><span className="hint">Turn rules on or off, change their limits, or add more. A rule that can't run shows its error.</span></div>
@@ -67,7 +72,7 @@ function AdminAlerts() {
       </section>
       <History />
       {adding && <TypePicker catalog={d.catalog} onClose={() => setAdding(false)} onPick={(type) => { setAdding(false); setEditing({ type }); }} />}
-      {editing?.type && <RuleDialog type={editing.type} rule={editing.rule} lag={d.lbLagMinutes} onClose={() => setEditing(null)} />}
+      {editing?.type && <RuleDialog type={editing.type} rule={editing.rule} lag={d.lbLagMinutes} settings={d.settings} onClose={() => setEditing(null)} />}
     </>
   );
 }
@@ -78,6 +83,7 @@ function SlackCard({ d }: { d: AlertsOverview }) {
   const [url, setUrl] = useState("");
   const [consoleUrl, setConsoleUrl] = useState(d.settings.consoleUrl || "");
   const [tz, setTz] = useState(d.settings.timeZone || "UTC");
+  const [tz2, setTz2] = useState(d.settings.timeZone2 ?? "");
   const [error, setError] = useState<unknown>(null);
   const done = (text: string) => { setError(null); toast(text); qc.invalidateQueries({ queryKey: ["alerts"] }); };
   const save = useMutation({ mutationFn: () => request("/admin/alerts/slack", { method: "PUT", body: { webhookUrl: url.trim() } }),
@@ -90,6 +96,7 @@ function SlackCard({ d }: { d: AlertsOverview }) {
     onSuccess: () => done("Saved"), onError: setError });
   const here = window.location.origin;
   const zones = ZONES.includes(tz) ? ZONES : [tz, ...ZONES];
+  const zones2 = !tz2 || ZONES.includes(tz2) ? ZONES : [tz2, ...ZONES];
   const busy = save.isPending || test.isPending || remove.isPending || settings.isPending;
   return (
     <section className="card">
@@ -122,16 +129,162 @@ function SlackCard({ d }: { d: AlertsOverview }) {
             </div>
           </div>
           <div className="field">
-            <label className="label" htmlFor="tz">Times in Slack</label>
-            <select id="tz" className="select" value={tz} onChange={(e) => setTz(e.target.value)}>
-              {zones.map((z) => <option key={z} value={z}>{z === "Asia/Kolkata" ? "India (IST)" : z}</option>)}
-            </select>
+            <label className="label" htmlFor="tz">Times in Slack <span className="hint">· shown in both zones, e.g. 09:05 IST / 20:35 PDT</span></label>
+            <div className="row" style={{ gap: 8 }}>
+              <select id="tz" aria-label="First time zone" className="select" style={{ flex: "1 1 0", minWidth: 0 }} value={tz} onChange={(e) => setTz(e.target.value)}>
+                {zones.map((z) => <option key={z} value={z}>{zoneLabel(z)}</option>)}
+              </select>
+              <select id="tz2" aria-label="Second time zone" className="select" style={{ flex: "1 1 0", minWidth: 0 }} value={tz2} onChange={(e) => setTz2(e.target.value)}>
+                <option value="">No second zone</option>
+                {zones2.filter((z) => z !== tz).map((z) => <option key={z} value={z}>{zoneLabel(z)}</option>)}
+              </select>
+            </div>
           </div>
         </div>
-        {(consoleUrl !== (d.settings.consoleUrl || "") || tz !== d.settings.timeZone) && (
+        {(consoleUrl !== (d.settings.consoleUrl || "") || tz !== d.settings.timeZone || tz2 !== (d.settings.timeZone2 ?? "")) && (
           <div className="row" style={{ gap: 8 }}>
-            <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => settings.mutate({ consoleUrl, timeZone: tz })}>Save address and time zone</button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setConsoleUrl(d.settings.consoleUrl || ""); setTz(d.settings.timeZone); }}>Cancel</button>
+            <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => settings.mutate({ consoleUrl, timeZone: tz, timeZone2: tz2 === tz ? "" : tz2 })}>Save address and time zones</button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setConsoleUrl(d.settings.consoleUrl || ""); setTz(d.settings.timeZone); setTz2(d.settings.timeZone2 ?? ""); }}>Cancel</button>
+          </div>
+        )}
+        {error ? <ErrorCallout error={error} admin /> : null}
+      </div>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------ thresholds, reminders, weekly summary
+
+const DAY_NAMES: Record<string, string> = { mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday" };
+
+function PairInputs({ id, value, onChange }: { id: string; value: AlertPair; onChange: (v: AlertPair) => void }) {
+  const bad = !(value.warning < value.critical);
+  return (
+    <>
+      <td><input id={`${id}-w`} aria-label="Warning at" className="input" type="number" min={1} max={100} value={value.warning}
+        onChange={(e) => onChange({ ...value, warning: Number(e.target.value) })} style={{ width: 78 }} /></td>
+      <td><input id={`${id}-c`} aria-label="Critical at" className="input" aria-invalid={bad} type="number" min={1} max={100} value={value.critical}
+        title={bad ? "Critical must be above warning" : undefined}
+        onChange={(e) => onChange({ ...value, critical: Number(e.target.value) })} style={{ width: 78 }} /></td>
+    </>
+  );
+}
+
+function ThresholdsCard({ d }: { d: AlertsOverview }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const s = d.settings;
+  const [t, setT] = useState<AlertThresholds>(() => JSON.parse(JSON.stringify(s.thresholds)));
+  const [repeat, setRepeat] = useState(s.repeat);
+  const [digest, setDigest] = useState(s.digest);
+  const [picking, setPicking] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const opts = useQuery({ queryKey: ["alert-options"], queryFn: () => get<AlertOptions>("/admin/alerts/options"), enabled: picking, staleTime: 60_000 });
+  const dirty = JSON.stringify([t, repeat, digest]) !== JSON.stringify([s.thresholds, s.repeat, s.digest]);
+  const pairs = [t.cpu, t.memory, t.disk, ...Object.values(t.clusters).flatMap((c) => [c.cpu, c.memory])].filter(Boolean) as AlertPair[];
+  const invalid = pairs.some((p) => !(p.warning < p.critical) || p.warning < 1 || p.critical > 100);
+  const save = useMutation({
+    mutationFn: () => request("/admin/alerts/settings", { method: "PUT", body: { thresholds: t, repeat, digest } }),
+    onSuccess: () => { setError(null); toast("Saved"); qc.invalidateQueries({ queryKey: ["alerts"] }); },
+    onError: setError,
+  });
+  const send = useMutation({
+    mutationFn: () => request("/admin/alerts/digest/_send", { method: "POST" }),
+    onSuccess: () => { setError(null); toast("Weekly summary posted to Slack"); qc.invalidateQueries({ queryKey: ["alert-history"] }); },
+    onError: setError,
+  });
+  const reset = () => { setT(JSON.parse(JSON.stringify(s.thresholds))); setRepeat(s.repeat); setDigest(s.digest); setError(null); };
+  const setCluster = (name: string, metric: "cpu" | "memory", v: AlertPair) =>
+    setT((x) => ({ ...x, clusters: { ...x.clusters, [name]: { ...x.clusters[name], [metric]: v } } }));
+  const dropCluster = (name: string) => setT((x) => { const c = { ...x.clusters }; delete c[name]; return { ...x, clusters: c }; });
+  const overrides = Object.keys(t.clusters).sort();
+  const candidates = (opts.data?.ecsClusters ?? []).filter((n) => !t.clusters[n]);
+  const zone = s.timeZone === "Asia/Kolkata" ? "IST" : s.timeZone === "America/Los_Angeles" ? "Pacific time" : s.timeZone;
+  return (
+    <section className="card">
+      <div className="card-head">
+        <div className="grow"><span className="card-title">Thresholds, reminders and the weekly summary</span>
+          <span className="hint">Two lines: warning and critical. An alert clears only 2 points below its line, so a value hovering around it doesn't post again and again. CPU alerts after 2 checks in a row (every 5 minutes).</span></div>
+      </div>
+      <div className="card-body stack">
+        <div className="table-scroll no-max" style={{ border: "1px solid var(--border)", borderRadius: 10 }}>
+          <table className="table" style={{ fontSize: 13 }}>
+            <thead>
+              <tr><th>ECS CPU and memory</th><th>CPU warning %</th><th>CPU critical %</th><th>Memory warning %</th><th>Memory critical %</th><th><span className="sr-only">Remove</span></th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td className="nowrap"><strong>All clusters</strong></td>
+                <PairInputs id="t-cpu" value={t.cpu} onChange={(v) => setT((x) => ({ ...x, cpu: v }))} />
+                <PairInputs id="t-mem" value={t.memory} onChange={(v) => setT((x) => ({ ...x, memory: v }))} />
+                <td />
+              </tr>
+              {overrides.map((name) => (
+                <tr key={name}>
+                  <td className="mono nowrap">{name}</td>
+                  <PairInputs id={`t-${name}-cpu`} value={t.clusters[name].cpu ?? t.cpu} onChange={(v) => setCluster(name, "cpu", v)} />
+                  <PairInputs id={`t-${name}-mem`} value={t.clusters[name].memory ?? t.memory} onChange={(v) => setCluster(name, "memory", v)} />
+                  <td style={{ textAlign: "right" }}><button type="button" className="btn btn-ghost btn-sm" aria-label={`Remove ${name}`} title="Use the lines of all clusters" onClick={() => dropCluster(name)}><Icon name="trash" size={16} /></button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          {!picking ? (
+            <button type="button" className="btn btn-sm" onClick={() => setPicking(true)}><Icon name="plus" /> Other lines for one cluster</button>
+          ) : opts.isLoading ? <Loading what="Listing ECS clusters…" /> : (
+            <>
+              <SearchSelect id="t-add" label="ECS cluster" value="" mono allLabel="Pick an ECS cluster…" options={candidates.map((n) => ({ value: n }))}
+                onChange={(n) => { if (n) { setT((x) => ({ ...x, clusters: { ...x.clusters, [n]: { cpu: { ...x.cpu }, memory: { ...x.memory } } } })); setPicking(false); } }} />
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPicking(false)}>Cancel</button>
+            </>
+          )}
+        </div>
+        <div className="grid-2" style={{ gap: 16 }}>
+          <div className="field">
+            <span className="label">Viewer server disk</span>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <span className="hint">warning at</span>
+              <input aria-label="Disk warning at" className="input" type="number" min={1} max={100} value={t.disk.warning} onChange={(e) => setT((x) => ({ ...x, disk: { ...x.disk, warning: Number(e.target.value) } }))} style={{ width: 78 }} />
+              <span className="hint">% · critical at</span>
+              <input aria-label="Disk critical at" className="input" type="number" min={1} max={100} value={t.disk.critical} onChange={(e) => setT((x) => ({ ...x, disk: { ...x.disk, critical: Number(e.target.value) } }))} style={{ width: 78 }} />
+              <span className="hint">%</span>
+            </div>
+            <span className="hint">The server this console runs on. Load balancer error rates keep their own lines in their rules.</span>
+          </div>
+          <div className="field">
+            <span className="label">Remind while it's still failing</span>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <span className="hint">warnings every</span>
+              <input aria-label="Warnings every" className="input" type="number" min={0} max={1440} value={repeat.warning} onChange={(e) => setRepeat((r) => ({ ...r, warning: Number(e.target.value) }))} style={{ width: 78 }} />
+              <span className="hint">min · criticals every</span>
+              <input aria-label="Criticals every" className="input" type="number" min={0} max={1440} value={repeat.critical} onChange={(e) => setRepeat((r) => ({ ...r, critical: Number(e.target.value) }))} style={{ width: 78 }} />
+              <span className="hint">min · 0 = never</span>
+            </div>
+            <span className="hint">A change of level (warning ↔ critical) is posted at once. Snooze an alert from its rule below.</span>
+          </div>
+        </div>
+        <div className="field">
+          <span className="label">Weekly summary</span>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <label className="check"><input type="checkbox" checked={digest.enabled} onChange={(e) => setDigest((x) => ({ ...x, enabled: e.target.checked }))} /> Post every</label>
+            <select aria-label="Day" className="select" style={{ width: "auto" }} value={digest.day} disabled={!digest.enabled} onChange={(e) => setDigest((x) => ({ ...x, day: e.target.value }))}>
+              {d.days.map((x) => <option key={x} value={x}>{DAY_NAMES[x] ?? x}</option>)}
+            </select>
+            <span className="hint">at</span>
+            <input aria-label="Time" className="input" type="time" value={digest.time} disabled={!digest.enabled} onChange={(e) => setDigest((x) => ({ ...x, time: e.target.value }))} style={{ width: 120 }} />
+            <span className="hint">{zone}</span>
+            <div className="grow" />
+            <button type="button" className="btn btn-sm" disabled={!d.slack.configured || send.isPending} onClick={() => send.mutate()}>{send.isPending ? <Spinner /> : null} Send it now</button>
+          </div>
+          <span className="hint">Alerts of the last 7 days per rule, what is failing now, what is snoozed, and rules that can't check.{d.checker.digestSentFor ? ` Last sent for ${d.checker.digestSentFor}.` : ""}</span>
+        </div>
+        {dirty && (
+          <div className="row" style={{ gap: 8 }}>
+            <button type="button" className="btn btn-primary btn-sm" disabled={save.isPending || invalid} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : null} Save</button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={reset}>Cancel</button>
+            {invalid && <span className="warn-text" style={{ fontSize: 13 }}>Each critical line must be above its warning line (1–100%).</span>}
           </div>
         )}
         {error ? <ErrorCallout error={error} admin /> : null}
@@ -148,38 +301,101 @@ function scope(v: unknown, all: string): string {
   return xs.length <= 3 ? xs.join(", ") : `${xs.slice(0, 3).join(", ")} +${xs.length - 3}`;
 }
 
+function pair(p: AlertPair | undefined): string {
+  return p ? `${p.warning}% warning, ${p.critical}% critical` : "";
+}
+
+/** How many checks in a row a rule needs before it alerts. */
+function confirmOf(type: string, params: Record<string, unknown>, catalogConfirm?: number): number {
+  if (type === "ecs_usage") return params.metric === "memory" ? 1 : 2;
+  return catalogConfirm ?? 1;
+}
+
 /** One line saying when the rule alerts. */
-export function describeRule(r: { type: string; params: Record<string, unknown>; forMinutes: number; repeatMinutes: number }): string {
+export function describeRule(r: { type: string; params: Record<string, unknown>; forMinutes: number }, settings?: AlertSettings): string {
   const p = r.params as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const t = settings?.thresholds;
+  const lbCrit = (w: number, c: number, unit: string) => `${num(w)}${unit} warning, ${num(Number(c) || w * 2)}${unit} critical`;
+  const usage = () => {
+    const m = p.metric === "memory" ? "memory" : "cpu";
+    const per = t ? Object.keys(t.clusters).filter((n) => t.clusters[n][m as "cpu"]).length : 0;
+    return `${scope(p.clusters, "All clusters")}: ${m === "cpu" ? "CPU" : "memory"} on average over ${p.minutes} min ≥ ${t ? pair(t[m as "cpu"]) : "the Thresholds lines"}${per ? ` (${per} cluster${per === 1 ? "" : "s"} with own lines)` : ""}`;
+  };
   const text: Record<string, () => string> = {
     app_aws: () => "Any read from S3, ECS, load balancers or CloudWatch fails",
     app_converter: () => `An error, or no update for ${p.stalledMinutes} min`,
-    app_disk: () => `Disk ${p.thresholdPercent}% or more used`,
+    app_disk: () => `Disk used ≥ ${t ? pair(t.disk) : "the Thresholds lines"}`,
     app_errors: () => `${num(p.threshold)}+ server errors within ${p.minutes} min`,
     logs_stale: () => `${scope(p.clusters, "All clusters")}: no new log file for ${p.minutes} min`,
     log_errors: () => `${scope(p.clusters, "")}: ${num(p.threshold)}+ lines of “${p.query || "anything"}” within ${p.minutes} min`,
     lb_logs_stale: () => `${scope(p.lbs, "All load balancers")}: ${p.mode === "all" ? "none of them" : "any one"} delivered a file for ${p.minutes} min`,
-    lb_errors: () => `${scope(p.targetGroups, "All target groups")}: ${p.statusClass} ≥ ${p.thresholdPercent}% of requests (${num(p.minRequests)}+) within ${p.minutes} min`,
-    lb_status: () => `${scope(p.targetGroups, "All target groups")}: ${num(p.threshold)}+ requests with ${p.codes}${Number(p.thresholdPercent) ? ` and ≥ ${p.thresholdPercent}%` : ""} within ${p.minutes} min`,
+    lb_errors: () => `${scope(p.targetGroups, "All target groups")}: ${p.statusClass} ≥ ${lbCrit(p.thresholdPercent, p.criticalPercent, "%")} of requests (${num(p.minRequests)}+) within ${p.minutes} min`,
+    lb_status: () => `${scope(p.targetGroups, "All target groups")}: requests with ${p.codes} ≥ ${lbCrit(p.threshold, p.criticalThreshold, "")}${Number(p.thresholdPercent) ? ` and ≥ ${p.thresholdPercent}%` : ""} within ${p.minutes} min`,
     lb_latency: () => `${scope(p.targetGroups, "All target groups")}: p95 ≥ ${num(p.p95Ms)} ms (${num(p.minRequests)}+ requests) within ${p.minutes} min`,
-    ecs_targets: () => `${scope(p.clusters, "All clusters")}: ${p.minUnhealthy}+ unhealthy target${p.minUnhealthy === 1 ? "" : "s"}`,
-    ecs_tasks: () => `${scope(p.clusters, "All clusters")}: a service runs fewer tasks than desired`,
-    ecs_usage: () => `${scope(p.clusters, "All clusters")}: ${p.metric === "cpu" ? "CPU" : "memory"} ≥ ${p.thresholdPercent}% on average over ${p.minutes} min`,
+    ecs_targets: () => `${scope(p.clusters, "All clusters")}: ${p.minUnhealthy}+ unhealthy target${p.minUnhealthy === 1 ? "" : "s"} (warning) · a target group with none healthy (critical)`,
+    ecs_tasks: () => `${scope(p.clusters, "All clusters")}: a service runs no task (critical) or fewer than desired (warning)`,
+    ecs_instances: () => `${scope(p.clusters, "All clusters")}: an instance loses its ECS agent, or leaves while services are short of tasks`,
+    ecs_usage: usage,
   };
   let s = text[r.type]?.() ?? r.type;
   if (Number(p.vsUsual)) s += ` · only when ≥ ${p.vsUsual}× its usual rate`;
   if (r.forMinutes) s += ` · for ${r.forMinutes} min`;
-  if (r.repeatMinutes) s += ` · remind every ${r.repeatMinutes} min`;
   return s;
+}
+
+function levelText(level?: string): string {
+  return level === "two" ? "warning or critical" : level === "critical" ? "always critical" : "warning";
+}
+
+function LevelBadge({ level, children }: { level?: AlertLevel | null; children?: ReactNode }) {
+  return <Badge tone={level === "warning" ? "amber" : "red"}>{children ?? (level === "warning" ? "warning" : "critical")}</Badge>;
 }
 
 function RuleState({ r }: { r: AlertRule }) {
   if (!r.enabled) return <Badge>Off</Badge>;
   if (r.status.lastError) return <Badge tone="amber" title={r.status.lastError}>Can't check</Badge>;
-  if (r.status.firing.length) return <Badge tone="red">Failing · {r.status.firing.length}</Badge>;
-  if (r.status.pending.length) return <Badge tone="amber" title="Bad, waiting for the rule's 'for' time">Pending · {r.status.pending.length}</Badge>;
+  const crit = r.status.firing.filter((s) => s.level !== "warning").length;
+  const warn = r.status.firing.length - crit;
+  if (r.status.firing.length) {
+    return (
+      <span className="row" style={{ gap: 4, display: "inline-flex" }}>
+        {crit ? <LevelBadge level="critical">Critical · {crit}</LevelBadge> : null}
+        {warn ? <LevelBadge level="warning">Warning · {warn}</LevelBadge> : null}
+      </span>
+    );
+  }
+  if (r.status.pending.length) return <Badge tone="blue" title="Bad, waiting for the checks in a row or the rule's 'for' time">Pending · {r.status.pending.length}</Badge>;
   if (!r.status.lastRunAt) return <Badge>Not checked yet</Badge>;
   return <Badge tone="green">OK</Badge>;
+}
+
+function SnoozeControls({ rule, s, minutes }: { rule: AlertRule; s: AlertSubject; minutes: number[] }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const zone = storedZone();
+  const go = useMutation({
+    mutationFn: (m: number | null) => m === -1
+      ? request(`/admin/alerts/snooze?${new URLSearchParams({ ruleId: rule.id, subject: s.subject })}`, { method: "DELETE" })
+      : request("/admin/alerts/snooze", { method: "POST", body: m === null ? { ruleId: rule.id, subject: s.subject, untilClear: true } : { ruleId: rule.id, subject: s.subject, minutes: m } }),
+    onSuccess: (_, m) => { toast(m === -1 ? "Snooze ended" : "Snoozed: nothing is posted about it until then"); qc.invalidateQueries({ queryKey: ["alerts"] }); },
+    onError: (e) => toast(String((e as Error).message), "error"),
+  });
+  if (s.snooze) {
+    return (
+      <div className="row" style={{ gap: 8, flexWrap: "wrap", fontSize: 13 }}>
+        <Badge tone="blue">snoozed</Badge>
+        <span className="hint">{s.snooze.until ? `until ${fmtTime(s.snooze.until, zone, false)}` : "until it clears"} · by {s.snooze.by}</span>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={go.isPending} onClick={() => go.mutate(-1)}>Unsnooze</button>
+      </div>
+    );
+  }
+  return (
+    <div className="row" style={{ gap: 4, flexWrap: "wrap", fontSize: 13 }}>
+      <span className="hint">Snooze:</span>
+      {minutes.map((m) => <button key={m} type="button" className="btn btn-ghost btn-sm" disabled={go.isPending} onClick={() => go.mutate(m)}>{m % 60 ? `${m} min` : `${m / 60} h`}</button>)}
+      <button type="button" className="btn btn-ghost btn-sm" disabled={go.isPending} onClick={() => go.mutate(null)}>until it clears</button>
+    </div>
+  );
 }
 
 function RulesTable({ d, onEdit }: { d: AlertsOverview; onEdit: (r: AlertRule) => void }) {
@@ -221,7 +437,7 @@ function RulesTable({ d, onEdit }: { d: AlertsOverview; onEdit: (r: AlertRule) =
                         <div style={{ fontWeight: 600 }}>{r.name}</div>
                         {r.name !== r.title && <div className="hint">{r.title}</div>}
                       </td>
-                      <td style={{ maxWidth: 460 }}>{describeRule(r)}</td>
+                      <td style={{ maxWidth: 460 }}>{describeRule(r, d.settings)}<div className="hint" style={{ fontSize: 12 }}>{levelText(r.level)} · every {r.every === 1 ? "minute" : `${r.every ?? "?"} min`}{(r.confirm ?? 1) > 1 ? ` · ${r.confirm} checks in a row` : ""}</div></td>
                       <td className="nowrap">
                         {subjects.length || r.status.lastError ? (
                           <button type="button" className="linkish" onClick={() => setOpen((s) => { const n = new Set(s); if (n.has(r.id)) n.delete(r.id); else n.add(r.id); return n; })}>
@@ -242,11 +458,14 @@ function RulesTable({ d, onEdit }: { d: AlertsOverview; onEdit: (r: AlertRule) =
                           {r.status.lastError && <Callout tone="warn" icon="warn" title="This rule can't check right now">{r.status.lastError}</Callout>}
                           {subjects.map((s) => (
                             <div key={s.subject} className="row" style={{ gap: 10, alignItems: "flex-start" }}>
-                              <Badge tone={s.state === "firing" ? "red" : "amber"}>{s.state === "firing" ? "failing" : "pending"}</Badge>
-                              <div style={{ minWidth: 0 }}>
-                                <div><strong className="mono">{s.subject}</strong> <span className="hint">since {ago(new Date(s.firedAt ?? s.since).toISOString())}</span></div>
+                              {s.state === "firing" ? <LevelBadge level={s.level} /> : <Badge tone="blue" title={`Will be ${s.level ?? "an alert"} if it stays bad`}>pending</Badge>}
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div><strong className="mono">{s.subject}</strong> <span className="hint">since {ago(new Date(s.firedAt ?? s.since).toISOString())}{s.lines && s.level ? ` · ${s.level} line ${num(s.lines[s.level])}${s.lines.unit}` : ""}</span></div>
                                 <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{s.message}</div>
-                                {s.link && <Link to={s.link.replace(/^\/ui/, "")} className="hlink">Open</Link>}
+                                <div className="row" style={{ gap: 12, flexWrap: "wrap", marginTop: 2 }}>
+                                  {s.link && <Link to={s.link.replace(/^\/ui/, "")} className="hlink">Open</Link>}
+                                  <SnoozeControls rule={r} s={s} minutes={d.snoozeMinutes} />
+                                </div>
                               </div>
                             </div>
                           ))}
@@ -289,7 +508,7 @@ function TypePicker({ catalog, onPick, onClose }: { catalog: AlertType[]; onPick
 
 // ------------------------------------------------------------------ the rule editor
 
-function RuleDialog({ type, rule, lag, onClose }: { type: AlertType; rule?: AlertRule; lag: number; onClose: () => void }) {
+function RuleDialog({ type, rule, lag, settings, onClose }: { type: AlertType; rule?: AlertRule; lag: number; settings: AlertSettings; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
   const needsOptions = type.params.some((p) => ["logClusters", "ecsClusters", "lbs", "targetGroups"].includes(p.kind));
@@ -300,13 +519,12 @@ function RuleDialog({ type, rule, lag, onClose }: { type: AlertType; rule?: Aler
     ...Object.fromEntries(type.params.map((p) => [p.key, p.default])), ...(rule?.params ?? {}),
   }));
   const [forMinutes, setFor] = useState(rule?.forMinutes ?? type.forMinutes);
-  const [repeatMinutes, setRepeat] = useState(rule?.repeatMinutes ?? 0);
   const [error, setError] = useState<unknown>(null);
   const [preview, setPreview] = useState<{ findings: AlertFinding[]; bad: number } | null>(null);
-  const body = { type: type.type, name, enabled, params, forMinutes, repeatMinutes };
+  const body = { type: type.type, name, enabled, params, forMinutes };
   const save = useMutation({
     mutationFn: () => rule
-      ? request(`/admin/alerts/rules/${rule.id}`, { method: "PUT", body: { name, enabled, params, forMinutes, repeatMinutes } })
+      ? request(`/admin/alerts/rules/${rule.id}`, { method: "PUT", body: { name, enabled, params, forMinutes } })
       : request("/admin/alerts/rules", { method: "POST", body }),
     onSuccess: () => { toast(rule ? "Rule saved" : "Rule added"); qc.invalidateQueries({ queryKey: ["alerts"] }); onClose(); },
     onError: setError,
@@ -338,21 +556,21 @@ function RuleDialog({ type, rule, lag, onClose }: { type: AlertType; rule?: Aler
           <ParamField key={p.key} spec={p} value={params[p.key]} onChange={(v) => set(p.key, v)} options={opts.data} loading={opts.isLoading} />
         ))}
         {opts.data?.errors.length ? <Callout tone="warn" icon="warn" title="Some names couldn't be listed">{opts.data.errors.join(" · ")}</Callout> : null}
-        <div className="grid-2" style={{ gap: 16 }}>
-          <div className="field">
-            <label className="label" htmlFor="rfor">Alert only after it has been bad for</label>
-            <div className="row" style={{ gap: 8 }}><input id="rfor" className="input" type="number" min={0} max={1440} value={forMinutes} onChange={(e) => setFor(Number(e.target.value))} style={{ width: 110 }} /> <span className="hint">min · 0 = at once</span></div>
-          </div>
-          <div className="field">
-            <label className="label" htmlFor="rrep">Remind while it's still failing every</label>
-            <div className="row" style={{ gap: 8 }}><input id="rrep" className="input" type="number" min={0} max={10080} value={repeatMinutes} onChange={(e) => setRepeat(Number(e.target.value))} style={{ width: 110 }} /> <span className="hint">min · 0 = never</span></div>
-          </div>
+        {["ecs_usage", "app_disk"].includes(type.type) && (
+          <Callout tone="neutral" icon="info" title="Warning and critical lines">
+            {type.type === "app_disk" ? `Disk: ${pair(settings.thresholds.disk)}.` : `CPU: ${pair(settings.thresholds.cpu)} · memory: ${pair(settings.thresholds.memory)}${Object.keys(settings.thresholds.clusters).length ? `, other lines for ${Object.keys(settings.thresholds.clusters).join(", ")}` : ""}.`} Change them in “Thresholds” on the Alerts page.
+          </Callout>
+        )}
+        <div className="field">
+          <label className="label" htmlFor="rfor">Alert only after it has been bad for</label>
+          <div className="row" style={{ gap: 8 }}><input id="rfor" className="input" type="number" min={0} max={1440} value={forMinutes} onChange={(e) => setFor(Number(e.target.value))} style={{ width: 110 }} /> <span className="hint">min · 0 = as soon as the checks agree</span></div>
         </div>
         <span className="hint">
-          Checked every {type.every === 1 ? "minute" : `${type.every} minutes`}. One Slack message when it starts failing, one when it's back to normal.
+          {levelText(type.level).replace(/^./, (c) => c.toUpperCase())}. Checked every {type.every === 1 ? "minute" : `${type.every} minutes`}{confirmOf(type.type, params, type.confirm) > 1 ? `; alerts when ${confirmOf(type.type, params, type.confirm)} checks in a row agree` : ""}.
+          {" "}Slack gets a message when it starts, when it changes level, and when it's OK again; reminders: warnings every {settings.repeat.warning || "—"} min, criticals every {settings.repeat.critical || "—"} min (Thresholds card).
           {["lb_errors", "lb_status", "lb_latency"].includes(type.type) ? ` Load balancer data is about ${lag} minutes behind.` : ""}
         </span>
-        <span className="hint" style={{ fontStyle: "italic" }}>{describeRule({ type: type.type, params, forMinutes, repeatMinutes })}</span>
+        <span className="hint" style={{ fontStyle: "italic" }}>{describeRule({ type: type.type, params, forMinutes }, settings)}</span>
         {preview && <Preview data={preview} />}
         {error ? <ErrorCallout error={error} admin /> : null}
       </div>
@@ -459,7 +677,7 @@ function Preview({ data }: { data: { findings: AlertFinding[]; bad: number } }) 
           <tbody>
             {[...data.findings].sort((a, b) => Number(b.bad) - Number(a.bad)).map((f) => (
               <tr key={f.subject}>
-                <td className="nowrap" style={{ width: 1 }}>{f.bad ? <Badge tone="red">alert</Badge> : <Badge tone="green">ok</Badge>}</td>
+                <td className="nowrap" style={{ width: 1 }}>{f.bad ? <LevelBadge level={f.level} /> : <Badge tone="green">ok</Badge>}</td>
                 <td className="mono nowrap">{f.subject}</td>
                 <td style={{ overflowWrap: "anywhere" }}><div style={{ whiteSpace: "pre-wrap" }}>{f.message}</div><Evidence details={f.details} links={f.links} /></td>
               </tr>
@@ -492,14 +710,14 @@ function History() {
               {items.map((e) => (
                 <tr key={e.id}>
                   <td className="nowrap mono" style={{ fontSize: 13 }}>{fmtTime(e.at, zone, false)}</td>
-                  <td>{e.event === "resolved" ? <Badge tone="green">resolved</Badge> : <Badge tone="red">{e.event === "repeat" ? "still failing" : "failing"}</Badge>}</td>
+                  <td className="nowrap"><EventBadge e={e} /></td>
                   <td>{e.ruleName}</td>
                   <td className="mono nowrap">{e.link ? <Link to={e.link.replace(/^\/ui/, "")} className="hlink">{e.subject}</Link> : e.subject}</td>
                   <td style={{ overflowWrap: "anywhere", maxWidth: 560, fontSize: 13 }}>
                     <div style={{ whiteSpace: "pre-wrap" }}>{e.message}</div>
                     <Evidence details={e.details} links={e.links} />
                   </td>
-                  <td className="nowrap">{e.delivered ? <span className="hint">sent</span> : <span className="warn-text" title={e.error ?? ""}>not sent</span>}{!e.delivered && e.error ? <Detail text={e.error} /> : null}</td>
+                  <td className="nowrap">{e.delivered ? <span className="hint">sent</span> : e.snoozed ? <span className="hint" title={e.error ?? ""}>snoozed</span> : <span className="warn-text" title={e.error ?? ""}>not sent</span>}{!e.delivered && e.error ? <Detail text={e.error} /> : null}</td>
                 </tr>
               ))}
             </tbody>
@@ -508,6 +726,15 @@ function History() {
       )}
     </section>
   );
+}
+
+function EventBadge({ e }: { e: AlertEvent }) {
+  if (e.event === "resolved") return <Badge tone="green">OK again</Badge>;
+  if (e.event === "digest") return <Badge tone="blue">weekly summary</Badge>;
+  const level = e.level ?? "critical";
+  const text = e.event === "escalated" ? `${level} ↑` : e.event === "lowered" ? `${level} ↓` : e.event === "repeat" ? `still ${level}` : level;
+  const title = e.was ? `${e.event === "escalated" ? "up" : "down"} from ${e.was}` : undefined;
+  return <span title={title}><LevelBadge level={level}>{text}</LevelBadge></span>;
 }
 
 /** What the alert found out: codes, paths, usual rate, targets, the service's own errors, links. */

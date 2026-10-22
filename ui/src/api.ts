@@ -412,27 +412,49 @@ export interface AlertParamSpec {
   key: string; kind: AlertParamKind; label: string; default: unknown; help?: string;
   min?: number; max?: number; unit?: string; required?: boolean; options?: { value: string; label: string }[];
 }
+export type AlertLevel = "warning" | "critical";
 export interface AlertType {
   type: string; group: string; title: string; description: string; every: number; forMinutes: number; params: AlertParamSpec[];
+  level: AlertLevel | "two"; confirm?: number; memo?: boolean;
 }
-export interface AlertSubject { subject: string; state: "pending" | "firing"; since: number; firedAt?: number; message: string; link?: string | null }
+export interface AlertLines { warning: number; critical: number; h: number; unit: string }
+export interface AlertSnooze { ruleId: string; ruleName: string; subject: string; until: number | null; by: string; at: number }
+export interface AlertSubject {
+  subject: string; state: "pending" | "firing"; level?: AlertLevel; since: number; firedAt?: number; message: string;
+  link?: string | null; lines?: AlertLines | null; count?: number; snooze?: AlertSnooze | null;
+}
 export interface AlertRule {
   id: string; type: string; title: string; name: string; enabled: boolean; params: Record<string, unknown>;
-  forMinutes: number; repeatMinutes: number; updatedAt?: string; updatedBy?: string;
+  forMinutes: number; updatedAt?: string; updatedBy?: string; level?: AlertLevel | "two"; every?: number; confirm?: number;
   status: { lastRunAt: number | null; lastError: string | null; tookMs: number | null; firing: AlertSubject[]; pending: AlertSubject[] };
 }
+export interface AlertPair { warning: number; critical: number }
+export interface AlertThresholds { cpu: AlertPair; memory: AlertPair; disk: AlertPair; clusters: Record<string, { cpu?: AlertPair; memory?: AlertPair }> }
+export interface AlertSettings {
+  consoleUrl: string; timeZone: string; timeZone2: string; paused: boolean; updatedAt?: string; updatedBy?: string;
+  thresholds: AlertThresholds; repeat: { warning: number; critical: number };
+  digest: { enabled: boolean; day: string; time: string };
+}
 export interface AlertsOverview {
-  settings: { consoleUrl: string; timeZone: string; paused: boolean; updatedAt?: string; updatedBy?: string };
+  settings: AlertSettings;
   slack: { configured: boolean; hint: string | null; updatedAt?: string; updatedBy?: string };
-  checker: { checkedAt: number | null; pid?: number; since?: number; intervalSeconds: number; background: boolean };
+  checker: { checkedAt: number | null; pid?: number; since?: number; intervalSeconds: number; background: boolean; digestSentFor?: string | null };
   rules: AlertRule[];
+  snoozes: AlertSnooze[];
+  snoozeMinutes: number[];
+  days: string[];
   catalog: AlertType[];
   lbLagMinutes: number;
 }
 export interface AlertOptions { logClusters: string[]; ecsClusters: string[]; lbs: string[]; targetGroups: string[]; errors: string[] }
-export interface AlertFinding { subject: string; bad: boolean; message: string; value: number | null; link: string | null; details?: string[]; links?: [string, string][] }
+export interface AlertFinding {
+  subject: string; bad: boolean; level?: AlertLevel | null; message: string; value: number | null; lines?: AlertLines | null;
+  link: string | null; details?: string[]; links?: [string, string][];
+}
 export interface AlertEvent {
-  id: string; at: number; ruleId: string; ruleName: string; type: string; event: "firing" | "repeat" | "resolved";
+  id: string; at: number; ruleId: string | null; ruleName: string; type: string;
+  event: "firing" | "repeat" | "resolved" | "escalated" | "lowered" | "digest"; level?: AlertLevel | null; was?: AlertLevel | null;
+  snoozed?: boolean;
   subject: string; message: string; cluster: string | null; link: string | null; since: number | null; delivered: boolean; error: string | null;
   details?: string[]; links?: [string, string][];
 }
