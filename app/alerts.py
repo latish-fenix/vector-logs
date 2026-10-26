@@ -1463,15 +1463,25 @@ class AlertService:
             top = [x for x in (res.get("facets") or {}).get("exception", []) if x.get("value")][:3]
             if top:
                 facts["app"]["top"] = top[0]["value"]
+                facts["app"]["topN"] = top[0].get("count")
             line = f"App logs ({cluster}): {n:,} ERROR lines"
             if top:
                 line += " · " + ", ".join(f"{x['value']} ×{x['count']:,}" for x in top)
             details.append(line)
-            if res["hits"]:
-                h = res["hits"][0]
-                text = str(h.get("msg") or h.get("body") or h.get("raw") or "").replace("\n", " ").strip()[:200]
+            h = res["hits"][0] if res["hits"] else None
+            if top:                          # the newest line of the most common error, so the two match
+                try:
+                    r2 = self.logs.search(cluster, SearchSpec(start=s, end=e, query='level:error exception:"'
+                                                              + top[0]["value"].replace('"', "") + '"'),
+                                          size=1, with_aggs=False)
+                    h = r2["hits"][0] if r2["hits"] else h
+                except Exception:  # noqa: BLE001 - no exception column: the newest error line will do
+                    pass
+            if h:
+                text = _error_text(h)
                 if text:
                     facts["app"]["newest"] = text
+                    facts["app"]["service"] = h.get("service")
                     details.append(f"Newest: {('[' + str(h['service']) + '] ') if h.get('service') else ''}{text}")
         for name, fn in (("codes", codes), ("paths", paths), ("usual", usual), ("health", health), ("logs", app_logs)):
             step(name, fn)
@@ -1708,19 +1718,25 @@ class AlertService:
         if facts.get("who") == "lb":
             bits.append("answered by the load balancer: no healthy target, timeout or refused connection")
         app = facts.get("app")
-        if app is not None:
-            if not app.get("n"):
-                bits.append("no ERROR lines in its logs")
-            else:
-                text = app.get("newest") or ""
-                exc = app.get("top")
-                if exc and text.startswith(exc):
-                    text = self._short_exc(exc) + text[len(exc):]
-                elif exc:
-                    text = f"{self._short_exc(exc)} · {text}" if text else self._short_exc(exc)
-                text = re.sub(r"\s+", " ", text)
-                bits.append(text[:150] + ("…" if len(text) > 150 else ""))
+        if app is not None and not app.get("n"):
+            bits.append("no ERROR lines in its logs")
         return " — ".join(bits) if bits else None
+
+    def _error_lines(self, f: Finding) -> list[str]:
+        """The service's error in full (a code block), with how often it came in those minutes."""
+        app = (f.extra.get("facts") or {}).get("app") or {}
+        if not app.get("n") or not (app.get("newest") or app.get("top")):
+            return []
+        exc, n, top_n = app.get("top"), app["n"], app.get("topN")
+        head = "Most common error" if exc else "Newest error"
+        head += f": `{_esc(self._short_exc(exc))}`" if exc else ""
+        head += f" ×{top_n:,} of {n:,} ERROR lines" if exc and top_n else f" ({n:,} ERROR lines)"
+        if app.get("service"):
+            head += f" · {_esc(app['service'])}"
+        out = [f"      {head}"]
+        if app.get("newest"):
+            out.append("```" + _esc(app["newest"]).replace("```", "'''") + "```")
+        return out
 
     @staticmethod
     def _line_text(lines: dict | None, level: str) -> str:
@@ -1759,6 +1775,7 @@ class AlertService:
                 why = self._why(f)
                 if why:
                     lines.append(f"      ↳ {_esc(why)}")
+                lines += self._error_lines(f)
                 h = (f.extra.get("facts") or {}).get("health")
                 if h and h[0] < h[1]:
                     lines.append(f"      ⚠ only {h[0]} of {h[1]} targets healthy (ECS cluster {_esc(h[2])})")
@@ -2090,6 +2107,18 @@ def _alb_end(text: str) -> int | None:
         return int(datetime.strptime(text, "%Y%m%dT%H%MZ").replace(tzinfo=timezone.utc).timestamp() * 1000)
     except (TypeError, ValueError):
         return None
+
+
+def _error_text(h: dict, limit: int = 2000) -> str:
+    """An application log line's error in full: the message (or body), without the stack trace
+    lines ("at …") that follow it, up to `limit` characters."""
+    text = str(h.get("msg") or h.get("body") or h.get("raw") or "").strip()
+    exc = str(h.get("exception") or "").strip()
+    if exc and exc not in text:
+        text = f"{exc}: {text}" if text else exc
+    text = re.split(r"\n\s*at [\w$.<>]+\(", text, maxsplit=1)[0]          # drop the stack trace
+    text = re.sub(r"[ \t]+", " ", text).strip()
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def _chunks_of(text: str, size: int) -> list[str]:

@@ -590,3 +590,26 @@ def test_slack_times_in_ist_and_pacific(env):
     assert client.put(f"{URL}/settings", json={"timeZone2": ""}, headers=ROOT_H).json()["timeZone2"] == ""
     assert svc._fmt(svc.config(), summer, True) == "22 Oct 09:05 IST" and svc._fmt(svc.config(), summer) == "09:05"
     assert client.put(f"{URL}/settings", json={"timeZone2": "Mars/Base"}, headers=ROOT_H).status_code == 400
+
+
+def test_slack_shows_the_whole_error(env):
+    """The service's error is shown in full (a code block, up to 2,000 characters), without its stack trace."""
+    from app.alerts import Finding, _error_text
+    long = "Delivery Estimates:Delivery Estimates:com.fenix.RequestValidatorAndBuilderService " + "x" * 400
+    assert _error_text({"msg": long + "\n\tat com.fenix.A.b(A.java:1)\n\tat c.D.e(D.java:2)",
+                        "exception": "org.elasticsearch.ElasticsearchException"}) == \
+        "org.elasticsearch.ElasticsearchException: " + long
+    assert _error_text({"msg": "y" * 3000}).endswith("…") and len(_error_text({"msg": "y" * 3000})) == 2001
+    client, svc, _ = env
+    t = now_ms()
+    f = Finding("tg-post-btp-01", True, "50 × 400", cluster="post-btp-01",
+                extra={"lb": {"start": t - 4 * 3600_000, "end": t, "classes": ["4xx"], "codes": [], "pct": 50,
+                              "logs": True}, "facts": {}})
+    f.extra.pop("facts")
+    svc.explain(f, t)
+    msg = svc.message(svc.config(), {"name": "400s", "id": "x"}, "firing", [(f, {})], t)
+    text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
+    assert "Most common error: `" in text and " ERROR lines" in text
+    block = text.split("```")[1]
+    from app.alerts import _esc
+    assert len(block) > 150 and block == _esc(f.extra["facts"]["app"]["newest"])  # not cut at 150 any more
