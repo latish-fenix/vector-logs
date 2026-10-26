@@ -1455,7 +1455,7 @@ class AlertService:
             res = self.logs.search(cluster, SearchSpec(start=s, end=e, query="level:error"), size=1, with_aggs=True)
             n = res["total"]
             links.append(("App errors", f"/ui/logs/{cluster}?" + self._q(q="level:error", start=iso_ms(s), end=iso_ms(e))))
-            facts["app"] = {"n": n}
+            facts["app"] = {"n": n, "cluster": cluster}
             if not n:
                 details.append(f"App logs ({cluster}): no ERROR lines in these minutes — the cause is likely "
                                "outside this service's own logging (crash, timeout, a dependency)")
@@ -1483,6 +1483,14 @@ class AlertService:
                     facts["app"]["newest"] = text
                     facts["app"]["service"] = h.get("service")
                     details.append(f"Newest: {('[' + str(h['service']) + '] ') if h.get('service') else ''}{text}")
+            try:                             # every kind of error, with how often and for which stores
+                eg = self.logs.error_groups(cluster, SearchSpec(start=s, end=e, query="level:error"), limit=200)
+                facts["app"]["groups"], facts["app"]["kinds"] = eg["groups"], eg["kinds"]
+                for g in eg["groups"][:100]:
+                    details.append(f"{g['n']:,} × {_error_label(g)}"
+                                   + (f" · stores: {', '.join(g['stores'][:30])}" if g["stores"] else ""))
+            except Exception as ex:  # noqa: BLE001 - the newest error above still shows
+                log.info("alert details (error kinds) for %s: %s", tg, _err(ex))
         for name, fn in (("codes", codes), ("paths", paths), ("usual", usual), ("health", health), ("logs", app_logs)):
             step(name, fn)
         links.insert(0, ("Failed requests", "/ui/lb-logs?" + self._q(
@@ -1722,21 +1730,40 @@ class AlertService:
             bits.append("no ERROR lines in its logs")
         return " — ".join(bits) if bits else None
 
-    def _error_lines(self, f: Finding) -> list[str]:
-        """The service's error in full (a code block), with how often it came in those minutes."""
+    def _error_lines(self, f: Finding) -> tuple[list[str], list[str]]:
+        """Every kind of error the service logged in those minutes, with how often and for which
+        stores: (lines for the item, code blocks of at most 2,800 characters each)."""
         app = (f.extra.get("facts") or {}).get("app") or {}
-        if not app.get("n") or not (app.get("newest") or app.get("top")):
-            return []
-        exc, n, top_n = app.get("top"), app["n"], app.get("topN")
-        head = "Most common error" if exc else "Newest error"
-        head += f": `{_esc(self._short_exc(exc))}`" if exc else ""
-        head += f" ×{top_n:,} of {n:,} ERROR lines" if exc and top_n else f" ({n:,} ERROR lines)"
-        if app.get("service"):
-            head += f" · {_esc(app['service'])}"
-        out = [f"      {head}"]
-        if app.get("newest"):
-            out.append("```" + _esc(app["newest"]).replace("```", "'''") + "```")
-        return out
+        if not app.get("n"):
+            return [], []
+        groups = app.get("groups")
+        if not groups:                       # older details: just the newest error
+            if not app.get("newest"):
+                return [], []
+            return [f"      Newest error ({app['n']:,} ERROR lines):"], \
+                ["```" + _esc(app["newest"]).replace("```", "'''") + "```"]
+        kinds = app.get("kinds") or len(groups)
+        who = f"{_esc(app['cluster'])}'s" if app.get("cluster") else "the service's"
+        head = f"      Errors in {who} logs, same minutes: {app['n']:,} ERROR lines, {kinds:,} kind{'s' if kinds != 1 else ''}"
+        if kinds > len(groups):
+            head += f" (the {len(groups)} most frequent below; all in App errors)"
+        width = len(f"{groups[0]['n']:,}")
+        entries = []
+        for g in groups:
+            e = f"{g['n']:>{width},} × {_error_label(g)}"
+            if g.get("stores"):
+                st = g["stores"]
+                e += f"\n{' ' * (width + 3)}stores ({len(st)}): {', '.join(st[:40])}" + (" …" if len(st) > 40 else "")
+            entries.append(_esc(e).replace("```", "'''"))
+        blocks, cur = [], []
+        for e in entries:
+            if cur and sum(len(x) + 1 for x in cur) + len(e) > 2780:
+                blocks.append("```" + "\n".join(cur) + "```")
+                cur = []
+            cur.append(e[:2780])
+        if cur:
+            blocks.append("```" + "\n".join(cur) + "```")
+        return [head], blocks
 
     @staticmethod
     def _line_text(lines: dict | None, level: str) -> str:
@@ -1757,8 +1784,8 @@ class AlertService:
         count = f"{len(items)} target groups" if len(items) > 1 and span else ""
         head = (f"{icon} *{tag}*{what} · *{_esc(rule['name'])}*" + (f" — {count}" if count else "")
                 + (f" · {span}" if span else ""))
-        sections = []
-        for f, cur in items[:10]:
+        chunks: list[str] = []
+        for f, cur in items[:50]:
             link = self._link(cfg, f.link)
             subj = f"<{link}|{_esc(f.subject)}>" if link else f"*{_esc(f.subject)}*"
             text = _esc(f.message).replace("\n", "\n      ")
@@ -1775,13 +1802,21 @@ class AlertService:
                 why = self._why(f)
                 if why:
                     lines.append(f"      ↳ {_esc(why)}")
-                lines += self._error_lines(f)
                 h = (f.extra.get("facts") or {}).get("health")
                 if h and h[0] < h[1]:
                     lines.append(f"      ⚠ only {h[0]} of {h[1]} targets healthy (ECS cluster {_esc(h[2])})")
+                err_head, err_blocks = self._error_lines(f)
+                lines += err_head
                 keep = {"Failed requests", "App errors"} | ({"ECS health"} if h and h[0] < h[1] else set())
                 ls = [f"<{u}|{_esc(label)}>" for label, p in f.extra.get("links") or []
                       if label in keep and (u := self._link(cfg, p))]
+                if err_blocks:
+                    chunks.append("\n".join(lines))
+                    chunks += err_blocks
+                    lines = ["      " + " · ".join(ls)] if ls else []
+                    if lines:
+                        chunks.append(lines[0])
+                    continue
                 if ls:
                     lines.append("      " + " · ".join(ls))
             elif kind != "resolved":
@@ -1789,18 +1824,39 @@ class AlertService:
                 ls = [f"<{u}|{_esc(label)}>" for label, p in f.extra.get("links") or [] if (u := self._link(cfg, p))]
                 if ls:
                     lines.append("      " + " · ".join(ls))
-            sections.append("\n".join(lines))
-        if len(items) > 10:
-            sections.append(f"…and {len(items) - 10} more")
+            chunks.append("\n".join(lines))
+        if len(items) > 50:
+            chunks.append(f"…and {len(items) - 50} more")
         fallback = f"{tag}{what}: {rule['name']}: " + "; ".join(f.subject for f, _ in items[:5])
-        text = "\n".join(sections)
-        if len(text) <= 2900:
-            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": head + "\n" + text}}]
-        else:
-            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": head}}]
-            blocks += [{"type": "section", "text": {"type": "mrkdwn", "text": t[:2900]}} for t in sections]
+        texts: list[str] = []                # pack the pieces into sections of at most 2,900 characters
+        for c in [head] + chunks:
+            c = c[:2900]
+            if texts and len(texts[-1]) + 1 + len(c) <= 2900:
+                texts[-1] += "\n" + c
+            else:
+                texts.append(c)
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": t}} for t in texts]
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": self._footer(cfg, now, rule)}]})
         return {"text": fallback, "blocks": blocks}
+
+    @staticmethod
+    def _payloads(msg: dict, per: int = 40, max_chars: int = 35000) -> list[dict]:
+        """One Slack message, or several in a row when it is too long for one (Slack: 50 blocks)."""
+        blocks, footer = msg["blocks"][:-1], msg["blocks"][-1:]
+        out, cur, size = [], [], 0
+        for b in blocks:
+            n = len(b["text"]["text"])
+            if cur and (len(cur) >= per or size + n > max_chars):
+                out.append(cur)
+                cur, size = [], 0
+            cur.append(b)
+            size += n
+        out.append(cur)
+        total = len(out)
+        return [{"text": msg["text"] + (f" ({i + 1}/{total})" if total > 1 else ""),
+                 "blocks": part + (footer if i == total - 1 else [{"type": "context", "elements": [
+                     {"type": "mrkdwn", "text": f"continued below ({i + 1}/{total})"}]}])}
+                for i, part in enumerate(out)]
 
     def _delivery(self, cfg: dict) -> tuple[str | None, str | None]:
         """(webhook URL, why nothing is sent)."""
@@ -1836,7 +1892,8 @@ class AlertService:
                 error = "Snoozed " + (f"until {self._fmt(cfg, until, True)}" if until else "until it clears")
             elif url:
                 try:
-                    self.sender(url, self.message(cfg, rule, kind, items, now, level))
+                    for payload in self._payloads(self.message(cfg, rule, kind, items, now, level)):
+                        self.sender(url, payload)
                 except Exception as e:  # noqa: BLE001
                     error = _err(e)
                     log.warning("alert %s: Slack message failed: %s", rule["name"], error)
@@ -2107,6 +2164,17 @@ def _alb_end(text: str) -> int | None:
         return int(datetime.strptime(text, "%Y%m%dT%H%MZ").replace(tzinfo=timezone.utc).timestamp() * 1000)
     except (TypeError, ValueError):
         return None
+
+
+def _error_label(g: dict) -> str:
+    """One kind of error for Slack: the short exception name and the message."""
+    text, exc = g.get("error") or "", g.get("exception") or ""
+    short = exc.rsplit(".", 1)[-1]
+    if exc and text.startswith(exc):
+        text = short + text[len(exc):]
+    elif exc and exc not in text:
+        text = f"{short}: {text}" if text else short
+    return text
 
 
 def _error_text(h: dict, limit: int = 2000) -> str:

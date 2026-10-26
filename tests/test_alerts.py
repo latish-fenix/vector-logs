@@ -609,7 +609,26 @@ def test_slack_shows_the_whole_error(env):
     svc.explain(f, t)
     msg = svc.message(svc.config(), {"name": "400s", "id": "x"}, "firing", [(f, {})], t)
     text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
-    assert "Most common error: `" in text and " ERROR lines" in text
-    block = text.split("```")[1]
-    from app.alerts import _esc
-    assert len(block) > 150 and block == _esc(f.extra["facts"]["app"]["newest"])  # not cut at 150 any more
+    app = f.extra["facts"]["app"]
+    # every kind of error is listed, with its count: not only the most common one
+    assert "Errors in post-btp-01's logs, same minutes:" in text and f"{app['n']:,} ERROR lines" in text
+    assert len(app["groups"]) >= 4 and sum(g["n"] for g in app["groups"]) == app["n"]
+    for g in app["groups"]:
+        assert f"{g['n']:,} × " in text
+    assert "IllegalArgumentException: value cannot be null" in text and "404 Not Found" in text
+
+
+def test_long_alerts_are_split_into_several_messages(env):
+    from app.alerts import Finding
+    _, svc, _ = env
+    f = Finding("tg-x", True, "1 × 400", extra={"facts": {"app": {"n": 9000, "kinds": 120, "cluster": "x", "groups": [
+        {"n": 100 - i % 50, "exception": "com.a.BoomException", "error": f"com.a.BoomException: kind {i} " + "z" * 300,
+         "stores": [f"store-{j}" for j in range(5)]} for i in range(120)]}}})
+    msg = svc.message(svc.config(), {"name": "400s", "id": "x"}, "firing", [(f, {})], now_ms())
+    assert all(len(b["text"]["text"]) <= 2900 for b in msg["blocks"] if b["type"] == "section")
+    text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
+    assert all(f"kind {i} " in text for i in range(120))                   # all of them
+    assert all(b["text"]["text"].count("```") % 2 == 0 for b in msg["blocks"] if b["type"] == "section")
+    parts = svc._payloads(msg)
+    assert len(parts) > 1 and all(len(p["blocks"]) <= 50 for p in parts)
+    assert parts[0]["text"].endswith(f"(1/{len(parts)})") and "Vector Logs viewer" in parts[-1]["blocks"][-1]["elements"][0]["text"]

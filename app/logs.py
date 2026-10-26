@@ -804,6 +804,51 @@ class LogService:
         finally:
             con.close()
 
+    # -- errors grouped by kind (for alerts)
+    _STORE_RX = r"[A-Za-z0-9-]+\.myshopify\.com"
+    _NORMALIZE = [(_STORE_RX, "<store>"),
+                  (r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}", "<uuid>"),
+                  (r"[0-9A-Fa-f]{16,}", "<id>"), (r"[0-9]{4,}", "<n>")]
+
+    def error_groups(self, cluster: str, spec: SearchSpec, limit: int = 200) -> dict:
+        """The matching lines grouped by kind of error: the first line of the message with store names,
+        ids and numbers taken out. {"total", "kinds", "groups": [{"n", "exception", "error", "example",
+        "stores", "service"}]}, the most frequent first."""
+        start_ms, end_ms, files = self._prepare(cluster, spec)
+        if not files:
+            return {"total": 0, "kinds": 0, "groups": []}
+        paths, _ = self.materialize([k for k, _ in files])
+        con = self._db()
+        try:
+            cols = self._columns_cached(con, paths)
+            wb = self._where(cols, spec, start_ms, end_ms)
+            parts = [f"nullif(trim(CAST({quote_ident(c)} AS VARCHAR)), '')" for c in ("msg", "body", "raw") if c in cols]
+            text = f"coalesce({', '.join(parts)}, '')" if parts else "''"
+            exc = "nullif(trim(CAST(\"exception\" AS VARCHAR)), '')" if "exception" in cols else "NULL::VARCHAR"
+            svc = "CAST(\"service\" AS VARCHAR)" if "service" in cols else "NULL::VARCHAR"
+            sig = "line"
+            params: list[Any] = []
+            for rx, rep in self._NORMALIZE:
+                sig = f"regexp_replace({sig}, ?, ?, 'g')"
+                params += [rx, rep]
+            sql = f"""
+              WITH t AS (SELECT {exc} AS exc, left(split_part({text}, chr(10), 1), 1000) AS line, {svc} AS svc
+                         FROM {self._src()} WHERE {wb.where()}),
+                   s AS (SELECT exc, line, svc, left({sig}, 400) AS sig,
+                                regexp_extract(line, ?, 0) AS store FROM t)
+              SELECT coalesce(exc, '') AS exc, sig, count(*) AS n, any_value(line) AS example,
+                     list(DISTINCT replace(store, '.myshopify.com', '')) FILTER (WHERE store <> '') AS stores,
+                     any_value(svc) AS svc, count(*) OVER () AS kinds, sum(count(*)) OVER () AS total
+              FROM s GROUP BY 1, 2 ORDER BY n DESC, sig LIMIT ?"""
+            rows = con.execute(sql, [paths, *wb.params, *params, self._STORE_RX, int(limit)]).fetchall()
+        except duckdb.Error as e:
+            raise self._db_error(e) from e
+        finally:
+            con.close()
+        groups = [{"n": int(n), "exception": exc or None, "error": sig, "example": ex, "stores": sorted(st or []),
+                   "service": sv} for exc, sig, n, ex, st, sv, _, _ in rows]
+        return {"total": int(rows[0][7]) if rows else 0, "kinds": int(rows[0][6]) if rows else 0, "groups": groups}
+
     # -- export
     def export(self, cluster: str, spec: SearchSpec, fmt: str, columns: list[str] | None,
                limit: int, tz: str | None = None, offset_minutes: int | None = None) -> "Export":
