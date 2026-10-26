@@ -36,7 +36,7 @@ def make_settings(tmp: Path, logs_dir: Path, **kw) -> Settings:
                 local_secrets_dir=str(tmp / "secrets"), auth_mode="header", bootstrap_admins=["root"],
                 cache_dir=str(tmp / "cache"), duckdb_threads=2, lb_background=False, alerts_background=False,
                 lb_logs_backend="local", lb_logs_local_dir=str(tmp / "alb-bucket"),
-                lb_parquet_local_dir=str(tmp / "alb-parquet"))
+                lb_parquet_local_dir=str(tmp / "alb-parquet"), alert_mutes_file=str(tmp / "alert-mutes.yaml"))
     base.update(kw)
     return Settings(**base)
 

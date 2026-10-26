@@ -1534,6 +1534,23 @@ class LbService:
                 con.close()
         return {int(c): {"n": int(n), "app": int(a)} for c, n, a in self._run(go)}
 
+    def path_code_counts(self, q: LbQuery) -> list[tuple[str, str | None, str | None, int | None, int]]:
+        """Requests per (target group, method, grouped path, status code): for alert mutes by path."""
+        s, e = self.resolve_range(q.start, q.end)
+        src = self.sources(s, e, q.lbs)
+        if not src.count:
+            return []
+
+        def go():
+            con = self._db()
+            try:
+                self._paths_table(con, q, src, s, e, None)
+                return con.execute("SELECT tg, method, path_group, elb_code, sum(n) FROM pt WHERE tg IS NOT NULL "
+                                   "GROUP BY ALL").fetchall()
+            finally:
+                con.close()
+        return [(tg, m, pg, None if c is None else int(c), int(n)) for tg, m, pg, c, n in self._run(go)]
+
     def paths(self, q: LbQuery, access: Access | None, sort: str = "errors", limit: int = 50) -> dict:
         t0 = time.monotonic()
         s, e = self.resolve_range(q.start, q.end)

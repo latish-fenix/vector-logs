@@ -426,12 +426,21 @@ export interface AlertSubject {
 export interface AlertRule {
   id: string; type: string; title: string; name: string; enabled: boolean; params: Record<string, unknown>;
   forMinutes: number; updatedAt?: string; updatedBy?: string; level?: AlertLevel | "two"; every?: number; confirm?: number;
-  status: { lastRunAt: number | null; lastError: string | null; tookMs: number | null; firing: AlertSubject[]; pending: AlertSubject[] };
+  status: {
+    lastRunAt: number | null; lastError: string | null; tookMs: number | null; firing: AlertSubject[]; pending: AlertSubject[];
+    muted?: { subject: string; ids: string[]; level?: AlertLevel; since: number; message?: string }[];
+  };
 }
+export interface AlertMuteEntry {
+  id: string; enabled: boolean; title: string; owner: string; reason: string;
+  kind: "subject" | "path" | "signature" | "health" | "converter"; rules: string[] | null; matches: string;
+  match: Record<string, unknown>; muted24h: number; muted7d: number;
+}
+export interface AlertMutes { file: string; exists: boolean; error: string | null; loadedAt: number | null; paused: boolean; entries: AlertMuteEntry[] }
 export interface AlertPair { warning: number; critical: number }
 export interface AlertThresholds { cpu: AlertPair; memory: AlertPair; disk: AlertPair; clusters: Record<string, { cpu?: AlertPair; memory?: AlertPair }> }
 export interface AlertSettings {
-  consoleUrl: string; timeZone: string; timeZone2: string; paused: boolean; updatedAt?: string; updatedBy?: string;
+  consoleUrl: string; timeZone: string; timeZone2: string; paused: boolean; mutesPaused: boolean; updatedAt?: string; updatedBy?: string;
   thresholds: AlertThresholds; repeat: { warning: number; critical: number };
   digest: { enabled: boolean; day: string; time: string };
 }
@@ -441,6 +450,7 @@ export interface AlertsOverview {
   checker: { checkedAt: number | null; pid?: number; since?: number; intervalSeconds: number; background: boolean; digestSentFor?: string | null };
   rules: AlertRule[];
   snoozes: AlertSnooze[];
+  mutes: AlertMutes;
   snoozeMinutes: number[];
   days: string[];
   catalog: AlertType[];
@@ -448,13 +458,13 @@ export interface AlertsOverview {
 }
 export interface AlertOptions { logClusters: string[]; ecsClusters: string[]; lbs: string[]; targetGroups: string[]; errors: string[] }
 export interface AlertFinding {
-  subject: string; bad: boolean; level?: AlertLevel | null; message: string; value: number | null; lines?: AlertLines | null;
+  subject: string; bad: boolean; level?: AlertLevel | null; message: string; mutedBy?: string[]; mutedLevel?: AlertLevel | null; value: number | null; lines?: AlertLines | null;
   link: string | null; details?: string[]; links?: [string, string][];
 }
 export interface AlertEvent {
   id: string; at: number; ruleId: string | null; ruleName: string; type: string;
-  event: "firing" | "repeat" | "resolved" | "escalated" | "lowered" | "digest"; level?: AlertLevel | null; was?: AlertLevel | null;
-  snoozed?: boolean;
+  event: "firing" | "repeat" | "resolved" | "escalated" | "lowered" | "digest" | "muted"; level?: AlertLevel | null; was?: AlertLevel | null;
+  snoozed?: boolean; mutedBy?: string[];
   subject: string; message: string; cluster: string | null; link: string | null; since: number | null; delivered: boolean; error: string | null;
   details?: string[]; links?: [string, string][];
 }

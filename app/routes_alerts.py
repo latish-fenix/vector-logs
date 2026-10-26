@@ -33,6 +33,7 @@ class SettingsBody(BaseModel):
     timeZone2: str | None = Field(None, max_length=64, description='A second zone for times in Slack, e.g. '
                                   'America/Los_Angeles (PST/PDT); "" = none')
     paused: bool | None = Field(None, description="true = check but send nothing")
+    mutesPaused: bool | None = Field(None, description="true = ignore the mute file (every alert is posted)")
     thresholds: dict[str, Any] | None = Field(None, description='{"cpu": {"warning": 70, "critical": 80}, "memory": '
                                               '{...}, "disk": {...}, "clusters": {"<ECS cluster>": {"cpu": {...}}}}')
     repeat: dict[str, Any] | None = Field(None, description='Minutes between reminders while failing, '
@@ -87,7 +88,10 @@ def _public_rule(rule: dict, status: dict | None, snoozes: dict) -> dict:
     return {**rule, "title": spec.get("title", rule["type"]), "level": spec.get("level"),
             "every": spec.get("every"), "confirm": confirm_of(rule),
             "status": {"lastRunAt": status.get("lastRunAt"), "lastError": status.get("lastError"),
-                       "tookMs": status.get("tookMs"), "firing": items("firing"), "pending": items("pending")}}
+                       "tookMs": status.get("tookMs"), "firing": items("firing"), "pending": items("pending"),
+                       "muted": sorted(({"subject": k, **v} for k, v in (status.get("muted") or {}).items()
+                                        if v.get("state", "muted") == "muted"),
+                                       key=lambda x: x["subject"])}}
 
 
 @admin.get("", summary="Rules with their current state, the settings and the catalog of alert types")
@@ -109,6 +113,7 @@ def overview(request: Request, user: User = Depends(require_admin)):
             "snoozes": sorted((s for s in snoozes.values() if s.get("until") is None or s["until"] > now),
                               key=lambda s: s.get("at", 0), reverse=True),
             "snoozeMinutes": list(SNOOZE_MINUTES), "days": list(DAYS),
+            "mutes": svc.mute_overview(cfg, st),
             "catalog": CATALOG, "lbLagMinutes": LB_LAG_MINUTES}
 
 
@@ -181,8 +186,9 @@ def preview(body: RuleBody, request: Request, rule_id: str | None = Query(None, 
         svc.explain(f)
     base = TYPES[rule["type"]].get("level")
     base = base if base in ("warning", "critical") else "warning"
-    findings.sort(key=lambda f: (not f.bad, f.subject))
+    findings.sort(key=lambda f: (not f.bad, not f.muted_by, f.subject))
     return {"findings": [{"subject": f.subject, "bad": f.bad, "level": f.level_now(base), "message": f.message,
+                          "mutedBy": f.muted_by, "mutedLevel": f.extra.get("mutedLevel"),
                           "value": f.value, "lines": f.lines, "link": f.link, "details": f.extra.get("details") or [],
                           "links": [list(x) for x in f.extra.get("links") or []]} for f in findings],
             "bad": sum(1 for f in findings if f.bad), "forMinutes": rule.get("forMinutes", 0),

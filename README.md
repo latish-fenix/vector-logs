@@ -24,7 +24,7 @@ A web console for the application logs that Vector ships from the Fenix app serv
 - **Export** up to 10,000 lines as CSV, JSON or NDJSON.
 - **Save searches** (per user) and **share links** (the URL holds cluster, time range, query and filters).
 - Times in your browser's time zone (IST) or UTC, with one click.
-- **Alerts to Slack**: the server keeps checking the viewer itself, the application logs, ECS and the load balancers, and posts to a Slack channel when something goes wrong (warning or critical, with lines you set per ECS cluster), when it changes level and when it's OK again; alerts can be snoozed, and a weekly summary is posted every Friday. Admins set the Slack webhook and the rules on the **Alerts** page (no restart); members see the alerts about their clusters there.
+- **Alerts to Slack**: the server keeps checking the viewer itself, the application logs, ECS and the load balancers, and posts to a Slack channel when something goes wrong (warning or critical, with lines you set per ECS cluster), when it changes level and when it's OK again; alerts can be snoozed, known errors are muted in `config/alert-mutes.yaml`, and a weekly summary is posted every Friday. Admins set the Slack webhook and the rules on the **Alerts** page (no restart); members see the alerts about their clusters there.
 
 Admins also see every cluster folder (new folders appear by themselves), add users, give each person access per cluster (or to all clusters, with exceptions), reset passwords and remove users.
 

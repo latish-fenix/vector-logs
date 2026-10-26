@@ -194,7 +194,7 @@ Cluster access is `{"<cluster>": "view", "*": "view", "<cluster>": "none"}`:
 
 | Method and path | Who | Does |
 | --- | --- | --- |
-| `GET /admin/alerts` | admins | Rules with their state (`firing`, `pending` with `level` and `snooze`, `lastError`), settings (with `thresholds`, `repeat`, `digest`), active `snoozes`, Slack status (`hint` only), the catalog of rule types (`level`: `warning`, `critical` or `two`; `every`; `confirm`) |
+| `GET /admin/alerts` | admins | Rules with their state (`firing`, `pending` with `level` and `snooze`, `lastError`), settings (with `thresholds`, `repeat`, `digest`), active `snoozes`, `mutes` (the mute file: path, error, paused, entries with `muted24h` / `muted7d`), each rule's muted subjects, Slack status (`hint` only), the catalog of rule types (`level`: `warning`, `critical` or `two`; `every`; `confirm`) |
 | `GET /admin/alerts/options` | admins | Names to pick: `logClusters`, `ecsClusters`, `lbs`, `targetGroups` |
 | `POST /admin/alerts/rules` | admins | `{type, name, enabled, params, forMinutes}` (types and params: the catalog; reminders are in the settings) |
 | `PUT /admin/alerts/rules/{id}` / `DELETE` | admins | Change (the type stays) / delete |
@@ -202,11 +202,11 @@ Cluster access is `{"<cluster>": "view", "*": "view", "<cluster>": "none"}`:
 | `PUT /admin/alerts/slack` | admins | `{webhookUrl}`: save or change the webhook (`https://hooks.slack.com/…`, kept in Secrets Manager) |
 | `DELETE /admin/alerts/slack` | admins | Remove it (alerts are then only kept in the history) |
 | `POST /admin/alerts/slack/_test` | admins | `{webhookUrl?}`: send a test message to that URL or the saved one |
-| `PUT /admin/alerts/settings` | admins | `{consoleUrl, timeZone, timeZone2, paused, thresholds, repeat, digest}`: `timeZone2` = a second zone for Slack times (default `America/Los_Angeles`, `""` = none), `thresholds` = `{cpu, memory, disk: {warning, critical}, clusters: {"<ECS cluster>": {cpu?, memory?}}}` (percent, critical above warning; `clusters` replaces the overrides), `repeat` = `{warning: 60, critical: 15}` minutes (0 = never), `digest` = `{enabled, day: "fri", time: "15:00"}` |
+| `PUT /admin/alerts/settings` | admins | `{consoleUrl, timeZone, timeZone2, paused, mutesPaused, thresholds, repeat, digest}`: `mutesPaused` = ignore `config/alert-mutes.yaml` (every alert posted), `timeZone2` = a second zone for Slack times (default `America/Los_Angeles`, `""` = none), `thresholds` = `{cpu, memory, disk: {warning, critical}, clusters: {"<ECS cluster>": {cpu?, memory?}}}` (percent, critical above warning; `clusters` replaces the overrides), `repeat` = `{warning: 60, critical: 15}` minutes (0 = never), `digest` = `{enabled, day: "fri", time: "15:00"}` |
 | `POST /admin/alerts/snooze` | admins | `{ruleId, subject, minutes}` or `{ruleId, subject, untilClear: true}`: post nothing about that alert until then |
 | `DELETE /admin/alerts/snooze?ruleId=&subject=` | admins | End a snooze |
 | `POST /admin/alerts/digest/_send` | admins | Post the weekly summary now |
-| `GET /alerts/history?limit=100` | everyone | Alerts sent (or not, with `error`): `event` `firing` / `escalated` / `lowered` / `repeat` / `resolved` / `digest`, `level`, `snoozed`; members only see those about their clusters |
+| `GET /alerts/history?limit=100` | everyone | Alerts sent (or not, with `error`): `event` `firing` / `escalated` / `lowered` / `repeat` / `resolved` / `muted` (with `mutedBy`) / `digest`, `level`, `snoozed`; members only see those about their clusters |
 
 ## Errors
 

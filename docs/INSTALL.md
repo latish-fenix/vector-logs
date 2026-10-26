@@ -195,6 +195,29 @@ Default rules (all on; change scope and limits per rule, or add more):
 | High CPU / High memory | 5 min | warning / critical | average of the last 10 min ≥ 70 % / ≥ 80 % (Thresholds, per cluster); CPU 2 checks in a row |
 | 5xx rate above 5 % | 5 min | warning / critical | a target group answers ≥ 5 % / ≥ 10 % 5xx (50+ requests) in 15 min |
 
+### Muting alerts: `config/alert-mutes.yaml`
+
+Known errors that shouldn't go to Slack are listed in `config/alert-mutes.yaml` (in the repo; started from the alert review sheet's "Slack alert? = No" rows, one entry per Alert ID). The folder is mounted into the container, and the server reads the file again whenever it changes, so to change what is muted:
+
+- edit the file on your PC → commit → push → on the server `cd ~/vector-logs && git pull` (no rebuild, no restart; used from the next check), or
+- edit `~/vector-logs/config/alert-mutes.yaml` on the server directly (then commit it so the next pull doesn't conflict).
+
+What an entry can match (all fields given must match; a list means any of them; `*` wildcards; `<store>`, `<uuid>`, `<id>`, `<n>` in a path match one part):
+
+| In `match:` | What it mutes |
+| --- | --- |
+| `targetGroups`, `clusters`, `subjects` (optionally `rules`, `codes`) | that alert for those names |
+| `paths` (`"POST /x/y"`, optionally with `targetGroups`, `codes`) | those requests aren't counted by the status-code and 5xx alerts |
+| `signatures` (text of the service's ERROR line, with `targetGroups`, `paths`, `codes`) | the status-code / 5xx alert of that target group isn't posted when **every** ERROR line the service wrote in those minutes is a muted error; any other error, or no error lines, and it is posted. The application-log rule doesn't count those lines. |
+| `healthReasons` | targets in these states don't count as unhealthy |
+| `converterErrors` | converter errors with this text don't alert |
+
+- **Turn one off:** `enabled: false` (it alerts again from the next check). **Turn all off:** *Pause all mutes* on the Alerts page (the file isn't changed).
+- Muted alerts aren't posted but are kept in *Recent alerts* ("muted by AL-001"); the *Muted alerts* card shows each entry and how often it muted something; the weekly summary lists them.
+- A mute added while an alert is firing stops it quietly (no "OK again").
+- A mistake in the file: the last good version stays in use, the Alerts page shows the error and one Slack message says what's wrong.
+- `ALERT_MUTES_FILE` changes the path (default `/app/config/alert-mutes.yaml`).
+
 Existing setups are moved to this model automatically on the first start (the old per-rule "remind every" and the CPU / memory / disk percentages are replaced by the Thresholds card; the rule "Instance left the cluster" is added).
 
 Also available: **Specific status codes** (e.g. 400, or 502,503,504, or 4xx: at least N requests, optionally at least X % of the requests, within N minutes, per target group), **Error lines in application logs** (a Logs-page search, e.g. `level:error`, finds N lines in a window), **Slow responses (p95)**, a 4xx rate. **Check now** in a rule's editor shows what it finds right now without sending anything.

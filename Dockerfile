@@ -16,6 +16,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY config ./config
 COPY --from=ui /src/app/static/ui ./app/static/ui
 # /app/cache holds downloaded Parquet files (a Docker volume; created here so the volume
 # belongs to the non-root user)

@@ -3,7 +3,7 @@ import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   get, request,
-  type AlertEvent, type AlertFinding, type AlertLevel, type AlertOptions, type AlertPair, type AlertParamSpec, type AlertRule,
+  type AlertEvent, type AlertFinding, type AlertLevel, type AlertMuteEntry, type AlertOptions, type AlertPair, type AlertParamSpec, type AlertRule,
   type AlertSettings, type AlertSubject, type AlertThresholds, type AlertsOverview, type AlertType,
 } from "../api";
 import { Icon } from "../components/icons";
@@ -49,6 +49,7 @@ function AdminAlerts() {
   const d = q.data!;
   const firing = d.rules.reduce((n, r) => n + r.status.firing.length, 0);
   const critical = d.rules.reduce((n, r) => n + r.status.firing.filter((s) => s.level !== "warning").length, 0);
+  const mutedNow = d.rules.reduce((n, r) => n + (r.status.muted?.length ?? 0), 0);
   return (
     <>
       {!d.slack.configured && (
@@ -56,13 +57,14 @@ function AdminAlerts() {
       )}
       {d.settings.paused && <Callout tone="warn" icon="warn" title="Notifications are paused">Rules are still checked; nothing is posted to Slack until you resume.</Callout>}
       <div className="stats" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
-        <div className="stat"><span className="stat-label">Failing now</span><span className="stat-value" style={{ color: critical ? "var(--danger)" : firing ? "var(--warn)" : undefined }}>{num(firing)}</span><span className="stat-note">{firing ? `${num(critical)} critical · ${num(firing - critical)} warning${d.snoozes.length ? ` · ${num(d.snoozes.length)} snoozed` : ""}` : "all clear"}</span></div>
+        <div className="stat"><span className="stat-label">Failing now</span><span className="stat-value" style={{ color: critical ? "var(--danger)" : firing ? "var(--warn)" : undefined }}>{num(firing)}</span><span className="stat-note">{firing ? `${num(critical)} critical · ${num(firing - critical)} warning${d.snoozes.length ? ` · ${num(d.snoozes.length)} snoozed` : ""}` : "all clear"}{mutedNow ? ` · ${num(mutedNow)} muted` : ""}</span></div>
         <div className="stat"><span className="stat-label">Rules on</span><span className="stat-value">{num(d.rules.filter((r) => r.enabled).length)}</span><span className="stat-note">of {num(d.rules.length)}</span></div>
         <div className="stat"><span className="stat-label">Slack</span><span className="stat-value" style={{ fontSize: 20 }}>{d.slack.configured ? (d.settings.paused ? "Paused" : "Connected") : "Not set"}</span><span className="stat-note">{d.slack.configured ? `set by ${d.slack.updatedBy ?? "?"} ${ago(d.slack.updatedAt)}` : "add a webhook below"}</span></div>
         <div className="stat"><span className="stat-label">Last check</span><span className="stat-value" style={{ fontSize: 20 }}>{d.checker.checkedAt ? ago(new Date(d.checker.checkedAt).toISOString()) : "not yet"}</span><span className="stat-note">{d.checker.background ? `every ${d.checker.intervalSeconds} s` : "the checker is off (ALERTS_BACKGROUND=false)"}</span></div>
       </div>
       <SlackCard d={d} />
       <ThresholdsCard d={d} />
+      <MutesCard d={d} />
       <section className="card" style={{ overflow: "hidden" }}>
         <div className="card-head">
           <div className="grow"><span className="card-title">Rules</span><span className="hint">Turn rules on or off, change their limits, or add more. A rule that can't run shows its error.</span></div>
@@ -293,6 +295,76 @@ function ThresholdsCard({ d }: { d: AlertsOverview }) {
   );
 }
 
+// ------------------------------------------------------------------ muted alerts (config/alert-mutes.yaml)
+
+const MUTE_KIND: Record<AlertMuteEntry["kind"], string> = {
+  subject: "names", path: "paths", signature: "error text", health: "target health", converter: "converter",
+};
+
+function MutesCard({ d }: { d: AlertsOverview }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [filter, setFilter] = useState("");
+  const m = d.mutes;
+  const pause = useMutation({
+    mutationFn: (paused: boolean) => request("/admin/alerts/settings", { method: "PUT", body: { mutesPaused: paused } }),
+    onSuccess: (_, paused) => { toast(paused ? "Mutes paused: every alert is posted" : "Mutes back on"); qc.invalidateQueries({ queryKey: ["alerts"] }); },
+    onError: (e) => toast(String((e as Error).message), "error"),
+  });
+  const f = filter.trim().toLowerCase();
+  const shown = m.entries.filter((x) => !f || [x.id, x.title, x.owner, x.reason, x.matches].join(" ").toLowerCase().includes(f));
+  const on = m.entries.filter((x) => x.enabled).length;
+  const file = m.file.replace(/^.*[\\/](config[\\/])/, "$1");
+  return (
+    <section className="card" style={{ overflow: "hidden" }}>
+      <div className="card-head">
+        <div className="grow">
+          <span className="card-title">Muted alerts</span>
+          <span className="hint">
+            From <span className="mono">{file}</span> in the repo: edit it (or git pull on the server) and it's used within a minute, no restart.
+            {" "}Muted alerts aren't posted to Slack; they stay in Recent alerts as “muted”. Turn one off with <span className="mono">enabled: false</span>.
+          </span>
+        </div>
+        <button type="button" className={`btn btn-sm${m.paused ? " btn-primary" : ""}`} disabled={pause.isPending} onClick={() => pause.mutate(!m.paused)}>
+          {m.paused ? "Turn mutes back on" : "Pause all mutes"}
+        </button>
+      </div>
+      <div className="card-body stack-sm">
+        {m.paused && <Callout tone="warn" icon="warn" title="All mutes are paused">Every alert is posted to Slack, including the ones in the file.</Callout>}
+        {m.error && <Callout tone="danger" icon="warn" title="The mute file has a mistake: the last good version is still used">{m.error}</Callout>}
+        {!m.exists && !m.error && <Callout tone="neutral" icon="info" title="No mute file">Nothing is muted: {m.file} doesn't exist on the server.</Callout>}
+        <div className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+          <span className="hint">{num(on)} of {num(m.entries.length)} entries on{m.loadedAt ? ` · read ${ago(new Date(m.loadedAt).toISOString())}` : ""}</span>
+          <div className="grow" />
+          {m.entries.length > 6 && <div style={{ flex: "0 1 280px" }}><SearchInput label="Search muted alerts" placeholder="Search id, text, owner" value={filter} onChange={setFilter} /></div>}
+        </div>
+      </div>
+      {m.entries.length ? (
+        <div className="table-scroll" style={{ maxHeight: 420 }}>
+          <table className="table" style={{ fontSize: 13 }}>
+            <thead><tr><th>Id</th><th>What is muted</th><th>Owner · reason</th><th>On</th><th title="Times it stopped an alert">Muted 24 h / 7 d</th></tr></thead>
+            <tbody>
+              {shown.map((x) => (
+                <tr key={x.id} style={x.enabled ? undefined : { opacity: 0.55 }}>
+                  <td className="mono nowrap">{x.id}</td>
+                  <td style={{ maxWidth: 520 }}>
+                    <div style={{ fontWeight: 600 }}>{x.title || x.id}</div>
+                    <div className="hint" style={{ overflowWrap: "anywhere" }}><Badge>{MUTE_KIND[x.kind]}</Badge> {x.matches}</div>
+                  </td>
+                  <td style={{ maxWidth: 260 }}><div>{x.owner || "—"}</div>{x.reason && <div className="hint">{x.reason}</div>}</td>
+                  <td>{x.enabled ? (m.paused ? <Badge tone="amber">paused</Badge> : <Badge tone="green">on</Badge>) : <Badge>off</Badge>}</td>
+                  <td className="nowrap">{num(x.muted24h)} / {num(x.muted7d)}</td>
+                </tr>
+              ))}
+              {!shown.length && <tr><td colSpan={5} className="hint">No entry matches the search.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 // ------------------------------------------------------------------ rules
 
 function scope(v: unknown, all: string): string {
@@ -365,6 +437,7 @@ function RuleState({ r }: { r: AlertRule }) {
     );
   }
   if (r.status.pending.length) return <Badge tone="blue" title="Bad, waiting for the checks in a row or the rule's 'for' time">Pending · {r.status.pending.length}</Badge>;
+  if (r.status.muted?.length) return <Badge title={`Muted by the mute file: ${r.status.muted.map((m) => m.subject).join(", ")}`}>OK · {r.status.muted.length} muted</Badge>;
   if (!r.status.lastRunAt) return <Badge>Not checked yet</Badge>;
   return <Badge tone="green">OK</Badge>;
 }
@@ -671,13 +744,13 @@ function Preview({ data }: { data: { findings: AlertFinding[]; bad: number } }) 
   if (!data.findings.length) return <Callout tone="neutral" icon="info" title="Nothing to check">The rule found nothing in its scope right now (no data, or no names match).</Callout>;
   return (
     <div className="stack-sm">
-      <span className="label">Right now: {data.bad ? <span className="danger-text">{data.bad} would alert</span> : "nothing would alert"} · {data.findings.length} checked</span>
+      <span className="label">Right now: {data.bad ? <span className="danger-text">{data.bad} would alert</span> : "nothing would alert"}{data.findings.some((f) => f.mutedBy?.length) ? ` · ${data.findings.filter((f) => f.mutedBy?.length).length} muted` : ""} · {data.findings.length} checked</span>
       <div style={{ border: "1px solid var(--border)", borderRadius: 10, maxHeight: 240, overflow: "auto" }}>
         <table className="table" style={{ fontSize: 13 }}>
           <tbody>
             {[...data.findings].sort((a, b) => Number(b.bad) - Number(a.bad)).map((f) => (
               <tr key={f.subject}>
-                <td className="nowrap" style={{ width: 1 }}>{f.bad ? <LevelBadge level={f.level} /> : <Badge tone="green">ok</Badge>}</td>
+                <td className="nowrap" style={{ width: 1 }}>{f.bad ? <LevelBadge level={f.level} /> : f.mutedBy?.length ? <Badge title={`Would be ${f.mutedLevel ?? "an alert"}; muted by ${f.mutedBy.join(", ")}`}>muted · {f.mutedBy.join(", ")}</Badge> : <Badge tone="green">ok</Badge>}</td>
                 <td className="mono nowrap">{f.subject}</td>
                 <td style={{ overflowWrap: "anywhere" }}><div style={{ whiteSpace: "pre-wrap" }}>{f.message}</div><Evidence details={f.details} links={f.links} /></td>
               </tr>
@@ -717,7 +790,7 @@ function History() {
                     <div style={{ whiteSpace: "pre-wrap" }}>{e.message}</div>
                     <Evidence details={e.details} links={e.links} />
                   </td>
-                  <td className="nowrap">{e.delivered ? <span className="hint">sent</span> : e.snoozed ? <span className="hint" title={e.error ?? ""}>snoozed</span> : <span className="warn-text" title={e.error ?? ""}>not sent</span>}{!e.delivered && e.error ? <Detail text={e.error} /> : null}</td>
+                  <td className="nowrap">{e.delivered ? <span className="hint">sent</span> : e.event === "muted" ? <span className="hint" title={e.error ?? ""}>muted by {(e.mutedBy ?? []).join(", ")}</span> : e.snoozed ? <span className="hint" title={e.error ?? ""}>snoozed</span> : <span className="warn-text" title={e.error ?? ""}>not sent</span>}{!e.delivered && e.error && e.event !== "muted" ? <Detail text={e.error} /> : null}</td>
                 </tr>
               ))}
             </tbody>
@@ -731,6 +804,7 @@ function History() {
 function EventBadge({ e }: { e: AlertEvent }) {
   if (e.event === "resolved") return <Badge tone="green">OK again</Badge>;
   if (e.event === "digest") return <Badge tone="blue">weekly summary</Badge>;
+  if (e.event === "muted") return <span title={`Would have been ${e.level ?? "an alert"}`}><Badge>muted · {e.level ?? "alert"}</Badge></span>;
   const level = e.level ?? "critical";
   const text = e.event === "escalated" ? `${level} ↑` : e.event === "lowered" ? `${level} ↓` : e.event === "repeat" ? `still ${level}` : level;
   const title = e.was ? `${e.event === "escalated" ? "up" : "down"} from ${e.was}` : undefined;

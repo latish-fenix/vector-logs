@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .errors import ApiError, bad_request, not_found
+from .mutes import MuteFile, code_in
 from .util import iso, iso_ms, new_id
 
 log = logging.getLogger("vector_logs.alerts")
@@ -277,7 +278,8 @@ def settings_of(cfg: dict) -> dict:
                        "clusters": dict(t.get("clusters") or {})}
     s["repeat"] = {**DEFAULT_REPEAT, **(s.get("repeat") or {})}
     s["digest"] = {**DEFAULT_DIGEST, **(s.get("digest") or {})}
-    return {"consoleUrl": "", "timeZone": "UTC", "timeZone2": DEFAULT_TIME_ZONE2, "paused": False, **s}
+    return {"consoleUrl": "", "timeZone": "UTC", "timeZone2": DEFAULT_TIME_ZONE2, "paused": False,
+            "mutesPaused": False, **s}
 
 
 def lines_for(cfg: dict, metric: str, cluster: str | None = None) -> dict:
@@ -480,6 +482,7 @@ class Finding:
     level: str | None = None         # warning / critical (None: the rule's level)
     lines: dict | None = None        # two lines {"warning", "critical", "h", "unit"}: the level follows value
     hold: int = 0                    # minutes it must be bad first (on top of the rule's forMinutes)
+    muted_by: list = field(default_factory=list)   # ids from the mute file that stopped this alert
 
     def level_now(self, rule_level: str = "warning") -> str | None:
         """The level without history (for previews); the checker adds hysteresis."""
@@ -501,6 +504,8 @@ class AlertService:
         self.sender = sender
         self.root = Path(settings.cache_dir) / "alerts"
         self.errors = ServerErrors(self.root / "server-errors.log")
+        self.mutes = MuteFile(getattr(settings, "alert_mutes_file", "") or "", set(TYPES))
+        self._mutes_paused = False
         self._stop = threading.Event()
         self._started = time.time()
         self._webhook_version = None
@@ -584,6 +589,8 @@ class AlertService:
             s["timeZone2"] = tz
         if "paused" in body:
             s["paused"] = bool(body["paused"])
+        if "mutesPaused" in body:
+            s["mutesPaused"] = bool(body["mutesPaused"])
         if body.get("thresholds") is not None:
             s["thresholds"] = _thresholds(body["thresholds"])
         if body.get("repeat") is not None:
@@ -756,17 +763,126 @@ class AlertService:
         return urlencode({k: v for k, v in kw.items() if v not in (None, "")})
 
     # ================================================================ checks
-    def evaluate(self, rule: dict, now: int | None = None, memo: dict | None = None) -> list[Finding]:
-        """What the rule finds now. `memo` is the rule's memory between checks (instances seen)."""
+    def evaluate(self, rule: dict, now: int | None = None, memo: dict | None = None,
+                 firing: set[str] | frozenset = frozenset()) -> list[Finding]:
+        """What the rule finds now, with the mute file applied. `memo` is the rule's memory between
+        checks (instances seen); `firing` the subjects alerting now (so a new mute stops them)."""
         now = now or now_ms()
         fn = getattr(self, f"_check_{rule['type']}", None)
         spec = TYPES.get(rule["type"])
         if fn is None or spec is None:
             raise bad_request("UNKNOWN_ALERT_TYPE", f"Unknown alert type '{rule['type']}'")
         params = {**_defaults(spec), **(rule.get("params") or {})}
-        if spec.get("memo"):
-            return fn(params, now, memo if memo is not None else {})
-        return fn(params, now)
+        self._mutes_paused = bool(settings_of(self.config()).get("mutesPaused"))
+        self._rtype, self._firing = rule["type"], firing
+        findings = fn(params, now, memo if memo is not None else {}) if spec.get("memo") else fn(params, now)
+        self._mute_subjects(rule["type"], params, findings, firing)
+        return findings
+
+    # ================================================================ muted alerts (config/alert-mutes.yaml)
+    def _mutes_for(self, rtype: str, kind: str | None = None) -> list:
+        if self._mutes_paused:
+            return []
+        return [m for m in self.mutes.get() if m.enabled and m.for_rule(rtype) and (kind is None or m.kind == kind)]
+
+    @staticmethod
+    def _rule_codes(rtype: str, p: dict) -> list[str]:
+        if rtype == "lb_errors":
+            return [p.get("statusClass", "5xx")]
+        if rtype == "lb_status":
+            return parse_codes(p.get("codes", "400"))
+        return []
+
+    def _mute(self, f: Finding, ids: list[str], level: str | None = None) -> None:
+        """Stop this finding from alerting; the checker records it as muted."""
+        spec = TYPES.get(getattr(self, "_rtype", ""), {})
+        base = spec.get("level") if spec.get("level") in LEVELS else "warning"
+        f.extra["mutedLevel"] = level or f.level_now(base) or base
+        f.muted_by = sorted(set(f.muted_by) | set(ids))
+        f.bad, f.lines = False, None
+
+    def _mute_subjects(self, rtype: str, p: dict, findings: list[Finding], firing) -> None:
+        """Entries that name target groups / clusters / subjects only: that alert isn't posted."""
+        ms = self._mutes_for(rtype, "subject")
+        if not ms:
+            return
+        codes = self._rule_codes(rtype, p)
+        for f in findings:
+            if f.muted_by or not (f.bad or f.subject in firing):
+                continue
+            hit = [m.id for m in ms if m.subject_ok(rtype, f.subject, f.cluster) and m.codes_ok(codes)]
+            if hit:
+                self._mute(f, hit)
+
+    def _lb_path_mutes(self, rtype: str, rule_codes: list[str], start: int, end: int,
+                       tgs: list[str]) -> tuple[dict, dict, list]:
+        """Requests on muted paths, per target group: ({tg: (matching requests, all requests)},
+        {tg: mute ids}, the per-path rows for later)."""
+        ms = [m for m in self._mutes_for(rtype, "path") if m.codes_ok(rule_codes)]
+        if not ms or not tgs:
+            return {}, {}, []
+        from .lb_logs import LbQuery
+        try:
+            rows = self._need("lb").path_code_counts(LbQuery(start=start, end=end, target_groups=tgs))
+        except Exception as e:  # noqa: BLE001 - without the breakdown nothing is taken out (it is posted)
+            log.warning("alert mutes: can't read the paths of %s: %s", ", ".join(tgs[:5]), _err(e))
+            return {}, {}, []
+        removed: dict[str, list[int]] = {}
+        ids: dict[str, set[str]] = {}
+        for tg, method, pg, code, n in rows:
+            for m in ms:
+                if not m.tg_ok(tg) or not m.path_ok(method, pg) or (m.codes and (code is None or not code_in(code, m.codes))):
+                    continue
+                r = removed.setdefault(tg, [0, 0])
+                r[1] += n
+                if code is not None and code_in(code, rule_codes):
+                    r[0] += n
+                ids.setdefault(tg, set()).add(m.id)
+                break
+        return {k: tuple(v) for k, v in removed.items()}, {k: sorted(v) for k, v in ids.items()}, rows
+
+    def _lb_sig_mutes(self, rtype: str, rule_codes: list[str], tg: str, cluster: str | None, start: int, end: int,
+                      rows: list | None = None) -> list[str] | None:
+        """Mute ids when every ERROR line the service wrote in these minutes is a muted error (and the
+        failing requests are on the paths those entries name). None = post it."""
+        ms = [m for m in self._mutes_for(rtype, "signature") if m.tg_ok(tg) and m.codes_ok(rule_codes)]
+        if not ms or self.logs is None:
+            return None
+        if any(m.paths for m in ms):
+            from .lb_logs import LbQuery
+            if rows is None:
+                rows = self._need("lb").path_code_counts(LbQuery(start=start, end=end, target_groups=[tg]))
+            path_ms = [m for m in self._mutes_for(rtype, "path") if m.codes_ok(rule_codes) and m.tg_ok(tg)]
+            failing = {(meth, pg) for t, meth, pg, code, n in rows
+                       if t == tg and n and code is not None and code_in(code, rule_codes)
+                       and not any(m.path_ok(meth, pg) and (not m.codes or code_in(code, m.codes)) for m in path_ms)}
+            if not all(any(not m.paths or m.path_ok(meth, pg) for m in ms) for meth, pg in failing):
+                return None                  # requests failing on a path no entry names
+        cluster = cluster or (tg[3:] if tg.startswith("tg-") else tg)
+        return self._only_muted_errors(cluster, ms, start - 2 * MINUTE, end + 2 * MINUTE)
+
+    def _only_muted_errors(self, cluster: str, ms: list, start: int, end: int) -> list[str] | None:
+        """The ids of the entries whose errors the service wrote, when it wrote no other ERROR line."""
+        from .logs import SearchSpec
+        if cluster not in self.logs.clusters():
+            return None                      # no application logs: can't tell which error it was
+        sigs = list(dict.fromkeys(s for m in ms for s in m.signatures))
+        total = self.logs.search(cluster, SearchSpec(start=start, end=end, query="level:error"), size=1,
+                                 with_aggs=False)["total"]
+        if not total:
+            return None                      # no error lines at all: not one of the known errors
+        rest = self.logs.search(cluster, SearchSpec(start=start, end=end, query="level:error " + " ".join(
+            f'-"{x}"' for x in sigs)), size=1, with_aggs=False)["total"]
+        if rest:
+            return None
+        hit = []
+        for m in ms[:10]:
+            for sig in m.signatures:
+                if self.logs.search(cluster, SearchSpec(start=start, end=end, query=f'level:error "{sig}"'), size=1,
+                                    with_aggs=False)["total"]:
+                    hit.append(m.id)
+                    break
+        return hit or [m.id for m in ms]
 
     def _need(self, name: str):
         svc = getattr(self, name)
@@ -822,7 +938,12 @@ class AlertService:
                             value=round(age))]
         err = st.get("lastError")
         if err:
-            return [Finding(subject, True, f"{err.get('code')}: {err.get('message')}")]
+            f = Finding(subject, True, f"{err.get('code')}: {err.get('message')}")
+            hit = [m.id for m in self._mutes_for("app_converter", "converter")
+                   if any(x.lower() in f.message.lower() for x in m.converter_errors)]
+            if hit:
+                self._mute(f, hit)
+            return [f]
         return [Finding(subject, False, "running")]
 
     def _check_app_disk(self, p: dict, now: int) -> list[Finding]:
@@ -892,15 +1013,26 @@ class AlertService:
         start, out = now - p["minutes"] * MINUTE, []
         for c in self._log_clusters(p["clusters"]):
             res = logs.search(c, SearchSpec(start=start, end=now, query=p["query"]), size=1, with_aggs=False)
-            n = res["total"]
+            n0 = n = res["total"]
+            ms = [m for m in self._mutes_for("log_errors", "signature") if m.cluster_ok(c)]
+            if n and ms:                     # the muted errors don't count
+                sigs = list(dict.fromkeys(x for m in ms for x in m.signatures))
+                res = logs.search(c, SearchSpec(start=start, end=now, query=(p["query"] + " " + " ".join(
+                    f'-"{x}"' for x in sigs)).strip()), size=1, with_aggs=False)
+                n = res["total"]
             msg = f"{n:,} lines matching {p['query'] or 'anything'} in {p['minutes']} min"
+            if n0 != n:
+                msg += f" ({n0 - n:,} muted lines not counted)"
             if n and p.get("includeSample") and res["hits"]:
                 h = res["hits"][0]
                 sample = str(h.get("msg") or h.get("body") or h.get("raw") or "").replace("\n", " ")[:200]
                 if sample:
                     msg += f"\nnewest: {('[' + str(h['service']) + '] ') if h.get('service') else ''}{sample}"
             link = f"/ui/logs/{c}?" + self._q(q=p["query"], start=iso_ms(start), end=iso_ms(now))
-            out.append(Finding(c, n >= p["threshold"], msg, value=n, link=link, cluster=c))
+            f = Finding(c, n >= p["threshold"], msg, value=n, link=link, cluster=c)
+            if n0 >= p["threshold"] > n:
+                self._mute(f, [m.id for m in ms])
+            out.append(f)
         return out
 
     # -- load balancers
@@ -971,28 +1103,60 @@ class AlertService:
             return "–"
         return f"{x:.0f}%" if x >= 10 else f"{x:.1f}%" if x >= 0.1 or x == 0 else f"{x:.2f}%"
 
+    def _lb_finish(self, rtype: str, rule_codes: list[str], start: int, end: int, raw: dict, cand: list[str],
+                   judge) -> dict:
+        """Apply the mute file to load balancer numbers. raw = {tg: (n, total, cluster)}; judge(tg, n, total)
+        → (watch, bad). Returns {tg: (n, total, watch, bad, muted ids, muted level, requests taken out)}."""
+        removed, path_ids, rows = self._lb_path_mutes(rtype, rule_codes, start, end, cand)
+        out = {}
+        for tg, (n, total, cluster) in raw.items():
+            dn, dt = removed.get(tg, (0, 0))
+            n2, t2 = max(0, n - dn), max(0, total - dt)
+            watch0, bad0 = judge(tg, n, total)
+            watch, bad = judge(tg, n2, t2) if (dn or dt) else (watch0, bad0)
+            ids: list[str] = []
+            if bad0 and not bad and tg in path_ids:
+                ids = path_ids[tg]
+            elif bad or (watch and tg in self._firing):
+                try:
+                    ids = self._lb_sig_mutes(rtype, rule_codes, tg, cluster, start, end, rows or None) or []
+                except Exception as e:  # noqa: BLE001 - can't tell: post it
+                    log.warning("alert mutes: can't check the errors of %s: %s", tg, _err(e))
+            out[tg] = (n2, t2, watch, bad, ids, bad0 or bad, dn)
+        return out
+
     def _check_lb_errors(self, p: dict, now: int) -> list[Finding]:
         start, end, rows = self._lb_rows(p, now)
         cfg, cls, out = self.config(), p["statusClass"], []
         span = self._span(cfg, start, end)
         lines = _lb_lines(p["thresholdPercent"], p.get("criticalPercent"), pct=True)
         floor = lines["warning"] - lines["h"]          # firing ones stay until they are below this
-        candidates = [r for r in rows if r["requests"] >= p["minRequests"] and
-                      (r["s5xx"] if cls == "5xx" else r["s4xx"]) / r["requests"] * 100 > floor]
-        usual = self._usual(start, [r["tg"] for r in candidates], [cls], []) if candidates else {}
-        for r in rows:
-            n = r["s5xx"] if cls == "5xx" else r["s4xx"]
-            pct = n / r["requests"] * 100 if r["requests"] else 0
-            u = usual.get(r["tg"])
-            watch = r in candidates and self._unusual(pct, u, p.get("vsUsual", 0))
-            msg = f"{self._pct(pct)} {cls} · {n:,} of {r['requests']:,} requests"
-            if r["tg"] in usual:
+        raw = {r["tg"]: ((r["s5xx"] if cls == "5xx" else r["s4xx"]), r["requests"], r.get("cluster")) for r in rows}
+        cand = [tg for tg, (n, t, _) in raw.items() if t >= p["minRequests"] and n / t * 100 > floor]
+        usual = self._usual(start, cand, [cls], []) if cand else {}
+
+        def judge(tg, n, t):
+            pct = n / t * 100 if t else 0
+            watch = tg in cand and t >= p["minRequests"] and pct > floor and \
+                self._unusual(pct, usual.get(tg), p.get("vsUsual", 0))
+            return watch, watch and pct >= lines["warning"]
+        done = self._lb_finish("lb_errors", [cls], start, end, raw, cand, judge)
+        for tg, (n, total, watch, bad, ids, was_bad, taken) in done.items():
+            pct = n / total * 100 if total else 0
+            u = usual.get(tg)
+            msg = f"{self._pct(pct)} {cls} · {n:,} of {total:,} requests"
+            if tg in usual:
                 msg += f" · usual {self._pct(u)}"
-            out.append(Finding(r["tg"], watch and pct >= lines["warning"], msg, value=round(pct, 2),
-                               lines=lines if watch else None, cluster=r.get("cluster"),
-                               link="/ui/lb?" + self._q(tg=r["tg"], st=cls, start=iso_ms(start), end=iso_ms(end)),
-                               extra={"span": span, "lb": {"start": start, "end": end, "classes": [cls], "codes": [],
-                                                           "pct": pct, "usual": u, "logs": p.get("includeLogs", True)}}))
+            if taken:
+                msg += f" · {taken:,} on muted paths not counted"
+            f = Finding(tg, bad, msg, value=round(pct, 2), lines=lines if watch else None, cluster=raw[tg][2],
+                        link="/ui/lb?" + self._q(tg=tg, st=cls, start=iso_ms(start), end=iso_ms(end)),
+                        extra={"span": span, "lb": {"start": start, "end": end, "classes": [cls], "codes": [],
+                                                    "pct": pct, "usual": u, "logs": p.get("includeLogs", True)}})
+            if ids:
+                n0, t0, _ = raw[tg]
+                self._mute(f, ids, level_of(n0 / t0 * 100 if t0 else 0, lines) or "warning")
+            out.append(f)
         return out
 
     def _check_lb_status(self, p: dict, now: int) -> list[Finding]:
@@ -1007,24 +1171,33 @@ class AlertService:
         label = ", ".join(codes)
         link_code = {"code": codes[0]} if len(codes) == 1 and not classes else \
             {"st": codes[0]} if codes == classes and len(classes) == 1 else {}
-        pcts = {tg: (n / total * 100 if total else 0) for tg, (n, total, _) in rates.items()}
         lines = _lb_lines(p["threshold"], p.get("criticalThreshold"), pct=False)
         floor = lines["warning"] - lines["h"]
-        candidates = [tg for tg, (n, total, _) in rates.items()
-                      if n > floor and pcts[tg] >= p["thresholdPercent"]]
-        usual = self._usual(start, candidates, classes, singles) if candidates else {}
-        for tg, (n, total, cluster) in rates.items():
-            pct, u = pcts[tg], usual.get(tg)
-            watch = tg in candidates and self._unusual(pct, u, p.get("vsUsual", 0))
+        cand = [tg for tg, (n, total, _) in rates.items()
+                if n > floor and (n / total * 100 if total else 0) >= p["thresholdPercent"]]
+        usual = self._usual(start, cand, classes, singles) if cand else {}
+
+        def judge(tg, n, t):
+            pct = n / t * 100 if t else 0
+            watch = tg in cand and n > floor and pct >= p["thresholdPercent"] and \
+                self._unusual(pct, usual.get(tg), p.get("vsUsual", 0))
+            return watch, watch and n >= lines["warning"]
+        done = self._lb_finish("lb_status", codes, start, end, rates, cand, judge)
+        for tg, (n, total, watch, bad, ids, was_bad, taken) in done.items():
+            pct, u = (n / total * 100 if total else 0), usual.get(tg)
             msg = f"{n:,} × {label} · {self._pct(pct)} of {total:,} requests"
             if tg in usual:
                 msg += f" · usual {self._pct(u)}"
-            out.append(Finding(tg, watch and n >= lines["warning"], msg, value=n, lines=lines if watch else None,
-                               cluster=cluster,
-                               link="/ui/lb?" + self._q(tg=tg, start=iso_ms(start), end=iso_ms(end), **link_code),
-                               extra={"span": span, "lb": {"start": start, "end": end, "classes": classes,
-                                                           "codes": singles, "pct": pct, "usual": u,
-                                                           "logs": p.get("includeLogs", True)}}))
+            if taken:
+                msg += f" · {taken:,} on muted paths not counted"
+            f = Finding(tg, bad, msg, value=n, lines=lines if watch else None, cluster=rates[tg][2],
+                        link="/ui/lb?" + self._q(tg=tg, start=iso_ms(start), end=iso_ms(end), **link_code),
+                        extra={"span": span, "lb": {"start": start, "end": end, "classes": classes,
+                                                    "codes": singles, "pct": pct, "usual": u,
+                                                    "logs": p.get("includeLogs", True)}})
+            if ids:
+                self._mute(f, ids, level_of(rates[tg][0], lines) or "warning")
+            out.append(f)
         return out
 
     def _check_lb_latency(self, p: dict, now: int) -> list[Finding]:
@@ -1047,25 +1220,51 @@ class AlertService:
         return [c for c in snap["clusters"] if not wanted or c["name"] in wanted]
 
     def _check_ecs_targets(self, p: dict, now: int) -> list[Finding]:
+        from .ecs_health import BAD_STATES
+        from .mutes import _glob
         out = []
+        all_ms = self._mutes_for("ecs_targets", "health")
         for c in self._ecs_clusters(p["clusters"]):
             if not c["targetGroups"]:
                 continue
-            bad_n = c["targets"]["bad"]
-            parts, empty = [], []
-            for tg in c["targetGroups"]:
-                if tg["total"] and not tg["counts"].get("healthy"):
-                    empty.append(tg["name"])
-                if tg["counts"].get("bad"):
-                    reasons = sorted({t.get("reason") or t["state"] for t in tg["targets"] if t["state"] != "healthy"})
-                    parts.append(f"{tg['name']}: {tg['counts']['bad']} of {tg['total']} not healthy"
-                                 + (f" ({', '.join(reasons[:3])})" if reasons else ""))
+            ms = [m for m in all_ms if m.cluster_ok(c["name"])]
+            pats = [(m.id, _glob(r)) for m in ms for r in m.health_reasons]
+
+            def muted_by(t):
+                return [mid for mid, rx in pats if rx.match(t.get("reason") or t["state"] or "")]
+
+            def judge(skip: bool):
+                bad_n, parts, empty, ids = 0, [], [], set()
+                for tg in c["targetGroups"]:
+                    bad_t = []
+                    for t in tg["targets"]:
+                        if t["state"] not in BAD_STATES:
+                            continue
+                        hit = muted_by(t) if skip else []
+                        if hit:
+                            ids.update(hit)
+                        else:
+                            bad_t.append(t)
+                    bad_n += len(bad_t)
+                    if tg["total"] and not tg["counts"].get("healthy") and (bad_t or not tg["counts"].get("bad")):
+                        empty.append(tg["name"])
+                    if bad_t:
+                        reasons = sorted({t.get("reason") or t["state"] for t in bad_t})
+                        parts.append(f"{tg['name']}: {len(bad_t)} of {tg['total']} not healthy"
+                                     + (f" ({', '.join(reasons[:3])})" if reasons else ""))
+                return bad_n, parts, empty, sorted(ids)
+            bad0, _, empty0, _ = judge(False)
+            bad_n, parts, empty, ids = judge(True) if pats else (bad0, *judge(False)[1:3], [])
             msg = "; ".join(parts) if parts else f"{c['targets']['healthy']} of {c['targets']['total']} targets healthy"
             if empty:
                 msg = f"no healthy target left in {', '.join(empty[:3])} · " + msg
             level = "critical" if empty else "warning"
-            out.append(Finding(c["name"], bool(empty) or bad_n >= p["minUnhealthy"], msg, value=bad_n, cluster=c["name"],
-                               level=level, link="/ui/health?" + self._q(q=c["name"])))
+            f = Finding(c["name"], bool(empty) or bad_n >= p["minUnhealthy"], msg, value=bad_n, cluster=c["name"],
+                        level=level, link="/ui/health?" + self._q(q=c["name"]))
+            was_bad = bool(empty0) or bad0 >= p["minUnhealthy"]
+            if was_bad and not f.bad and ids:
+                self._mute(f, ids, "critical" if empty0 else "warning")
+            out.append(f)
         return out
 
     def _check_ecs_tasks(self, p: dict, now: int) -> list[Finding]:
@@ -1324,7 +1523,8 @@ class AlertService:
             t0 = time.monotonic()
             try:
                 memo = rs.setdefault("memo", {}) if spec.get("memo") else None
-                findings = self.evaluate(rule, now, memo)
+                firing = {k for k, v in (rs.get("subjects") or {}).items() if v.get("state") == "firing"}
+                findings = self.evaluate(rule, now, memo, firing)
                 rs["lastError"] = None
             except Exception as e:  # noqa: BLE001 - one rule failing must not stop the others
                 if rs.get("lastError") != _err(e):      # log once per new error, not every check
@@ -1342,6 +1542,12 @@ class AlertService:
                     if sn.get("until") is None:          # "until it clears": cleared, so say so
                         drop.add(key)
                         snoozed = False
+                if kind == "muted":
+                    stats = st.setdefault("muteStats", {})
+                    for mid in f.muted_by:
+                        stats.setdefault(mid, []).append(now)
+                    changes.setdefault((rule["id"], kind, level, False), []).append((f, cur))
+                    continue
                 if snoozed and kind == "repeat":
                     continue                             # nothing to record either
                 if snoozed:
@@ -1365,6 +1571,13 @@ class AlertService:
                 self._update_snoozes(mutate)
             except Exception:  # noqa: BLE001
                 log.warning("could not tidy the snoozes", exc_info=True)
+        week = now - 7 * 1440 * MINUTE
+        stats = st.setdefault("muteStats", {})
+        for mid in list(stats):
+            stats[mid] = [t for t in stats[mid] if t >= week]
+            if not stats[mid]:
+                stats.pop(mid)
+        self._mute_file_warning(cfg, st, now)
         st.update(checkedAt=now, checker={"pid": os.getpid(), "since": int(self._started * 1000)})
         digest = self._maybe_digest(cfg, st, now)
         if digest:
@@ -1390,12 +1603,34 @@ class AlertService:
         confirm = confirm_of(rule)
         wait = rule.get("forMinutes", 0) * MINUTE
         subs = rs.setdefault("subjects", {})
+        muted = rs.setdefault("muted", {})
         events: list[tuple[str, str, Finding, dict]] = []
         seen = set()
         for f in findings:
             seen.add(f.subject)
             cur = subs.get(f.subject)
             firing = cur is not None and cur["state"] == "firing"
+            if f.muted_by:                       # the mute file stops it: kept in the history, never posted
+                level = cur.get("level") if firing and cur.get("level") in LEVELS else \
+                    f.extra.get("mutedLevel") if f.extra.get("mutedLevel") in LEVELS else base
+                m = muted.get(f.subject)
+                if firing:                       # it was alerting: stop it quietly (no OK message)
+                    subs.pop(f.subject)
+                    muted[f.subject] = {"state": "muted", "since": now, "count": confirm, "ids": f.muted_by,
+                                        "level": level, "checkedAt": now}
+                    events.append(("muted", level, f, {**cur, "mutedIds": f.muted_by, "wasFiring": True}))
+                    continue
+                if m is None:                    # it would have been pending: the same checks in a row first
+                    old = subs.pop(f.subject, None) or {}
+                    m = muted[f.subject] = {"state": "pending", "since": old.get("since", now),
+                                            "count": old.get("count", 0)}
+                m.update(count=m.get("count", 0) + 1, ids=f.muted_by, level=level, checkedAt=now,
+                         message=f.message)
+                if m["state"] == "pending" and m["count"] >= confirm and now - m["since"] >= max(wait, f.hold * MINUTE):
+                    m["state"] = "muted"
+                    events.append(("muted", level, f, {"mutedIds": f.muted_by}))
+                continue
+            muted.pop(f.subject, None)
             if firing and cur.get("level") not in LEVELS:     # fired before levels existed
                 cur["level"] = (f.level_now(base) or base) if f.bad or f.lines is not None else base
             if f.lines is not None:
@@ -1435,6 +1670,8 @@ class AlertService:
                                               now - cur.get("notifiedAt", now) >= repeat[old] * MINUTE - 5000):
                 cur["notifiedAt"] = now
                 events.append(("repeat", old, f, dict(cur)))
+        for subj in [s for s in muted if s not in seen]:
+            muted.pop(subj)
         for subj in [s for s in subs if s not in seen]:
             cur = subs.pop(subj)
             if cur["state"] == "firing":
@@ -1561,9 +1798,22 @@ class AlertService:
     def _notify(self, cfg: dict, batches, now: int) -> list[dict]:
         url, why = self._delivery(cfg)
         entries = []
-        order = {"resolved": 0, "lowered": 1, "repeat": 2, "firing": 3, "escalated": 4}
+        order = {"muted": -1, "resolved": 0, "lowered": 1, "repeat": 2, "firing": 3, "escalated": 4}
         for rule, kind, level, items, snoozed in sorted(batches, key=lambda b: (order[b[1]], RANK[b[2]])):
             error = why
+            if kind == "muted":
+                for f, cur in items:
+                    entries.append({"id": new_id()[:12], "at": now, "ruleId": rule["id"], "ruleName": rule["name"],
+                                    "type": rule["type"], "event": "muted", "level": level, "subject": f.subject,
+                                    "message": f.message, "details": [], "links": [], "cluster": f.cluster,
+                                    "link": f.link, "since": cur.get("firedAt"), "delivered": False,
+                                    "error": f"Muted by {', '.join(f.muted_by)} (alert-mutes.yaml)"
+                                             + (" — it was alerting; stopped without an OK message"
+                                                if cur.get("wasFiring") else ""),
+                                    "snoozed": False, "mutedBy": f.muted_by})
+                log.info("alert %s muted by %s: %s", rule["name"], ",".join(sorted({i for f, _ in items for i in f.muted_by})),
+                         ", ".join(f.subject for f, _ in items))
+                continue
             if snoozed:
                 until = next((cur.get("snoozedUntil") for _, cur in items), None)
                 error = "Snoozed " + (f"until {self._fmt(cfg, until, True)}" if until else "until it clears")
@@ -1583,6 +1833,42 @@ class AlertService:
             log.info("alert %s %s %s: %s%s", rule["name"], kind, level, ", ".join(f.subject for f, _ in items),
                      f" (not sent: {error})" if error else "")
         return entries
+
+    # -- the mute file on the page and in Slack
+    def mute_overview(self, cfg: dict | None = None, st: dict | None = None) -> dict:
+        cfg = cfg or self.config()
+        entries = self.mutes.get()
+        stats = (st if st is not None else self.state()).get("muteStats") or {}
+        day = now_ms() - 1440 * MINUTE
+        return {"file": self.mutes.path, "exists": self.mutes.exists, "error": self.mutes.error,
+                "loadedAt": int(self.mutes.loaded_at * 1000) if self.mutes.loaded_at else None,
+                "paused": bool(settings_of(cfg).get("mutesPaused")),
+                "entries": [{"id": m.id, "enabled": m.enabled, "title": m.title, "owner": m.owner, "reason": m.reason,
+                             "kind": m.kind, "rules": m.rules, "matches": m.describe(), "match": m.match,
+                             "muted24h": sum(1 for t in stats.get(m.id, []) if t >= day),
+                             "muted7d": len(stats.get(m.id, []))} for m in entries]}
+
+    def _mute_file_warning(self, cfg: dict, st: dict, now: int) -> None:
+        """Post once when the mute file gets a mistake (the last good version stays in use)."""
+        self.mutes.get()
+        err = self.mutes.error
+        if not err:
+            st.pop("muteFileError", None)
+            return
+        if st.get("muteFileError") == err:
+            return
+        st["muteFileError"] = err
+        url, _ = self._delivery(cfg)
+        if not url:
+            return
+        text = (f":warning: *The alert mute file has a mistake* — the last good version is still used.\n"
+                f"`{_esc(os.path.basename(self.mutes.path))}`: {_esc(err)}")
+        try:
+            self.sender(url, {"text": "The alert mute file has a mistake", "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": text[:2900]}},
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": self._footer(cfg, now, None)}]}]})
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not post the mute file warning: %s", _err(e))
 
     # -- the weekly summary
     def _local(self, cfg: dict, ms: int) -> datetime:
@@ -1613,7 +1899,7 @@ class AlertService:
         snoozed, and whether the checker itself is well."""
         st = st if st is not None else self.state()
         week = now - 7 * 1440 * MINUTE
-        items = [i for i in self.history(HISTORY_MAX) if i.get("at", 0) >= week and i.get("event") != "digest"]
+        items = [i for i in self.history(HISTORY_MAX) if i.get("at", 0) >= week and i.get("event") not in ("digest", "muted")]
         per: dict[str, dict] = {}
         for i in items:
             r = per.setdefault(i["ruleName"], {"started": 0, "critical": 0, "subjects": {}})
@@ -1656,6 +1942,16 @@ class AlertService:
             for s in snoozed[:10]:
                 until = f"until {self._fmt(cfg, s['until'], True)}" if s.get("until") else "until it clears"
                 parts.append(f"• {_esc(s.get('ruleName', ''))} — {_esc(s['subject'])} {until} (by {_esc(s.get('by', ''))})")
+        stats = st.get("muteStats") or {}
+        counts = sorted(((mid, sum(1 for t in ts if t >= week)) for mid, ts in stats.items()), key=lambda x: -x[1])
+        counts = [(mid, n) for mid, n in counts if n]
+        mo = self.mute_overview(cfg, st)
+        on = sum(1 for m in mo["entries"] if m["enabled"])
+        parts.append(f"*Muted this week:* {sum(n for _, n in counts) or 'nothing'}"
+                     + (" — " + ", ".join(f"{_esc(mid)} ×{n}" for mid, n in counts[:15]) if counts else "")
+                     + f" · mute file: {on} of {len(mo['entries'])} entries on"
+                     + (" · *mutes paused*" if mo["paused"] else "")
+                     + (f" · *file has a mistake:* {_esc(mo['error'][:150])}" if mo["error"] else ""))
         broken = [(rules[rid]["name"], rs["lastError"]) for rid, rs in (st.get("rules") or {}).items()
                   if rs.get("lastError") and rid in rules]
         parts.append("*Checker:* " + ("all rules can check" if not broken else

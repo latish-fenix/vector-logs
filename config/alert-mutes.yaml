@@ -1,0 +1,261 @@
+# Alerts that are NOT posted to Slack.
+#
+# - The server reads this file again whenever it changes: no restart, no rebuild.
+#   On the server: edit it (or git pull) and the next check (within a minute) uses it.
+# - Muted alerts are still kept in "Recent alerts" on the Alerts page as "muted by AL-…".
+# - Turn one entry off:     enabled: false      (that alert is posted again)
+# - Turn ALL mutes off:     the "Pause all mutes" switch on the Alerts page (this file is not changed)
+# - A mistake in this file: the last good version stays in use; the Alerts page and Slack say what's wrong.
+#
+# Each entry: id, enabled, title, owner, reason, and "match" = what to mute. Every field given in
+# match must match; a list means "any of these". * matches anything; <store>, <uuid>, <id>, <n> in a
+# path match any one part.
+#
+#   rules:           alert types (leave out for all): lb_status (status codes), lb_errors (5xx rate),
+#                    lb_latency, log_errors, ecs_targets, ecs_tasks, ecs_instances, ecs_usage,
+#                    app_converter, app_disk, app_aws, app_errors, logs_stale, lb_logs_stale
+#   targetGroups:    e.g. [tg-alpha-edds-1, bigcom-*]
+#   clusters:        ECS / log clusters, e.g. [bigcom-*]
+#   subjects:        the name shown in the alert, e.g. ["post-tp-01 / service-post-tp-01"]
+#   paths:           "METHOD /path" or "/path": those requests are not counted
+#   codes:           e.g. [400] or [5xx]
+#   signatures:      text of the service's ERROR log line. The status-code / 5xx alert of that target
+#                    group is not posted when EVERY error line the service wrote in those minutes is one
+#                    of the muted errors. Any other error (or no error line at all) and it is posted.
+#   healthReasons:   target health reasons that don't count as unhealthy
+#   converterErrors: text of load balancer converter errors that don't alert
+#
+# Started from the alert review sheet (rows with "Slack Alert? = No"), 26 Oct 2026.
+
+mutes:
+
+  # ---------------------------------------------------------------- Delivery estimates: known errors (400)
+  - id: AL-001
+    enabled: true
+    title: Delivery Estimates – missing per-store ES index (conversion_guided_transit_time_info)
+    reason: No need to capture this error as part of the alerting
+    match:
+      targetGroups: [tg-alpha-edds-1, tg-alpha-edds-2, tg-alpha-edds-11]
+      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
+      codes: [400]
+      signatures: ["conversion_guided_transit_time_info"]
+
+  - id: AL-002
+    enabled: true
+    title: Delivery Estimates – missing ES index cart_discount_cache
+    reason: No need to capture this error as part of the alerting
+    match:
+      targetGroups: [tg-alpha-edds-1, tg-alpha-edds-2]
+      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
+      codes: [400]
+      signatures: ["cart_discount_cache"]
+
+  - id: AL-006
+    enabled: true
+    title: Delivery Estimates – PropertyConfigBusinessServiceImpl.getPropertyValue error
+    reason: Check for which property this error is coming
+    match:
+      targetGroups: [tg-alpha-edds-2]
+      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
+      codes: [400]
+      signatures: ["getPropertyValue"]
+
+  - id: AL-007
+    enabled: true
+    title: Delivery Estimates – searchDeliveryEstimateConfig error
+    reason: The delivery estimate config is empty for almost all the retailers
+    match:
+      targetGroups: [tg-alpha-edds-11]
+      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
+      codes: [400]
+      signatures: ["searchDeliveryEstimateConfig"]
+
+  - id: AL-009
+    enabled: true
+    title: Delivery Estimates – RateTableChargesInjector::injectRates null (no rate card for a carrier)
+    reason: No rate card configured for a carrier; no cause of concern
+    match:
+      targetGroups: [tg-alpha-edds-11]
+      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
+      codes: [400]
+      signatures: ["RateTableChargesInjector"]
+
+  - id: AL-014
+    enabled: true
+    title: Delivery Estimates – Invalid Buyer Zipcode
+    reason: Comes when the input zip code is incorrect
+    match:
+      targetGroups: [tg-alpha-edds-1, tg-alpha-edds-2]
+      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
+      codes: [400]
+      signatures: ["Invalid Buyer Zipcode"]
+
+  - id: AL-015
+    enabled: true
+    title: Delivery Estimates – inventory in the given location(s) is below threshold
+    reason: Business rule, mainly on the PDP and Cart
+    match:
+      targetGroups: [tg-alpha-edds-1, tg-alpha-edds-2]
+      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
+      codes: [400]
+      signatures: ["is below threshold"]
+
+  # ---------------------------------------------------------------- Bombas rate shopping: known errors (400)
+  - id: AL-020
+    enabled: true
+    title: Bombas Rate Shopping – RateTableChargesInjector::injectRates null
+    reason: No rate card configured for a carrier; no cause of concern
+    match:
+      targetGroups: [tg-bombas-crs-1]
+      paths: ["POST /fenix/oms/crs/v1/rateshopping/unified/get-rateshopping-info"]
+      codes: [400]
+      signatures: ["RateTableChargesInjector"]
+
+  - id: AL-022
+    enabled: true
+    title: Bombas Rate Shopping – error while sending CRS failed email
+    match:
+      targetGroups: [tg-bombas-crs-1]
+      paths: ["POST /fenix/oms/crs/v1/rateshopping/unified/get-rateshopping-info"]
+      codes: [400]
+      signatures: ["Error while sending CRS failed email"]
+
+  # ---------------------------------------------------------------- OMS routing / delivery estimates: known code errors (5xx)
+  # Only the code error is muted: "no healthy target" outages on these target groups still alert.
+  - id: AL-033
+    enabled: true
+    title: OMS Routing – NPE productInfos is null (orders without products, e.g. e-gift)
+    reason: Orders without a product (e-gift, e-cart); to be ignored in EDD, OR and CRS
+    match:
+      targetGroups: [tg-alpha-oms-routing-11]
+      paths: ["POST /fenixomsorderrouting/v2/order-route/get-routing-info"]
+      codes: [5xx]
+      signatures: ["productInfos"]
+
+  - id: AL-035
+    enabled: true
+    title: OMS Routing – validation error for test AllocationRequest (requestId=test)
+    reason: Test traffic; monitoring data to be updated
+    match:
+      targetGroups: [tg-alpha-oms-routing-11]
+      paths: ["POST /fenixomsorderrouting/v2/order-route/get-routing-info"]
+      codes: [5xx]
+      signatures: ["requestId=test"]
+
+  - id: AL-041
+    enabled: true
+    title: Delivery Estimates – NPE String.equalsIgnoreCase
+    reason: Rahul to verify (could be the vuori cluster)
+    match:
+      targetGroups: [tg-uswt2-alpha-1, tg-alpha-edds-2, tg-alpha-edds-11]
+      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
+      codes: [5xx]
+      signatures: ["equalsIgnoreCase"]
+
+  # ---------------------------------------------------------------- bots and scanners
+  - id: AL-025
+    enabled: true
+    title: Scanners probing for AWS credentials (/.aws/credentials, /.aws/config)
+    reason: Bot traffic (block with WAF)
+    match:
+      paths: ["GET /.aws/*"]
+
+  - id: AL-026
+    enabled: true
+    title: Scanner traffic on tg-alpha-dp-11 (GET /)
+    reason: Bot traffic
+    match:
+      targetGroups: [tg-alpha-dp-11]
+      paths: ["GET /"]
+      codes: [400]
+
+  - id: AL-027
+    enabled: true
+    title: Scanner traffic on tg-ppd-watchdog (//, /index.php, /notify)
+    reason: Bot traffic (block with WAF)
+    match:
+      targetGroups: [tg-ppd-watchdog]
+      paths: ["GET //", "GET /index.php", "GET /notify"]
+
+  # ---------------------------------------------------------------- internal / health-check paths
+  - id: AL-042
+    enabled: true
+    title: Notification Processor – internal audit search
+    reason: Used for internal audit
+    match:
+      targetGroups: [tg-post-np-01]
+      paths: ["POST /fenixppdnotificationprocessor/api/v1/notification-audit/search"]
+
+  - id: AL-043
+    enabled: true
+    title: Config API internal health endpoint (Patrol)
+    reason: Monitoring tooling
+    match:
+      targetGroups: [tg-config-api-internal-80]
+      paths: ["GET /api/v1/clusters/*/health"]
+
+  - id: AL-044
+    enabled: true
+    title: Bombas Rate Shopping – actuator health check
+    reason: Deployment
+    match:
+      targetGroups: [tg-bombas-crs-1]
+      paths: ["GET /fenix/oms/crs/actuator/health"]
+
+  # ---------------------------------------------------------------- target groups not wanted in the load balancer alerts
+  - id: AL-038
+    enabled: true
+    title: BigCommerce delivery estimates (to be shut down)
+    reason: We need to shut down
+    match:
+      rules: [lb_errors, lb_status, lb_latency]
+      targetGroups: [bigcom-edds-1]
+
+  - id: AL-039
+    enabled: true
+    title: BigCommerce data processor (to be shut down)
+    reason: We need to shut down
+    match:
+      rules: [lb_errors, lb_status, lb_latency]
+      targetGroups: [bigcom-dp-1]
+
+  - id: AL-040
+    enabled: true
+    title: BigCommerce portal and prod monitoring (to be shut down)
+    reason: We need to shut down
+    match:
+      rules: [lb_errors, lb_status, lb_latency]
+      targetGroups: [bigcom-portal-1, tg-prod-monitoring]
+
+  - id: AL-045
+    enabled: true
+    title: Alpha monitoring target group
+    reason: Monitoring
+    match:
+      rules: [lb_errors, lb_status, lb_latency]
+      targetGroups: [tg-alpha-monitoring]
+
+  - id: AL-046
+    enabled: true
+    title: Old returns target group (cluster removed)
+    reason: Delete the old target group after the returns migration
+    match:
+      rules: [lb_errors, lb_status, lb_latency]
+      targetGroups: [tg-fenix-returns-01]
+
+  # ---------------------------------------------------------------- deployments
+  - id: AL-051
+    enabled: true
+    title: Targets registering / deregistering during deployments
+    reason: Deployment
+    match:
+      rules: [ecs_targets]
+      healthReasons: [Elb.RegistrationInProgress, Elb.DeregistrationInProgress]
+
+  # ---------------------------------------------------------------- the viewer itself
+  - id: AL-063
+    enabled: true
+    title: Load balancer log converter out of memory (retried with more memory)
+    match:
+      rules: [app_converter]
+      converterErrors: [OutOfMemory]

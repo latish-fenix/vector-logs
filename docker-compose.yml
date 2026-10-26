@@ -16,6 +16,9 @@ services:
       # Parquet files already downloaded from S3 and the converted load balancer logs. Safe to
       # delete any time (they are rebuilt from S3).
       - log-cache:/app/cache
+      # Alerts that are not posted to Slack (edit it, or git pull: read again within a minute, no
+      # restart). The folder is mounted (not the file) so a git pull that replaces the file is seen.
+      - ./config:/app/config:ro
     # On EC2 the instance IAM role provides AWS credentials; no keys needed here.
 
 volumes:
