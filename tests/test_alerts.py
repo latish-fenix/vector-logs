@@ -671,3 +671,22 @@ def test_error_list_leaves_out_muted_errors_and_reminders_are_short(env, tmp_pat
     svc._notify(svc.config(), [({"name": "400s", "id": "x", "type": "lb_status"}, "firing", "critical",
                                 [(finding("tg-a-1"), {}), (finding("tg-a-2"), {})], False)], now_ms())
     assert len(slack.sent) == n + 2 and "tg-a-1" in slack.texts()[-2] and "tg-a-2" in slack.texts()[-1]
+
+
+def test_tenants_and_where_are_shown(env):
+    import re
+    from app.alerts import Finding
+    from app.logs import LogService
+    rx = re.compile(LogService._TENANT_RX.replace("(?i)", ""), re.I)
+    assert rx.search("No CriteriaTag Configured for the tenantId: 6123abc9f0").group(1) == "6123abc9f0"
+    assert rx.search('{"tenantId":"ab12cd"}').group(1) == "ab12cd" and rx.search("tenant configuration") is None
+    _, svc, _ = env
+    groups = [{"n": 27, "exception": "java.lang.NullPointerException", "error": "", "example": "", "stores": [],
+               "tenants": [], "where": "RateShoppingServiceImpl.processOrder:212"},
+              {"n": 2, "exception": "x.FenixException", "error": "No CriteriaTag Configured for the tenantId: <*>",
+               "example": "", "stores": [], "tenants": ["6123abc9f0", "77aa01"], "where": "CriteriaService.get:40"}]
+    f = Finding("tg-x", True, "1 × 400", extra={"facts": {"app": {"n": 29, "kinds": 2, "cluster": "x", "groups": groups}}})
+    text = "\n".join(b["text"]["text"] for b in svc.message(svc.config(), {"name": "400s", "id": "x"}, "firing",
+                                                             [(f, {})], now_ms())["blocks"] if b["type"] == "section")
+    assert "27 × NullPointerException  (at RateShoppingServiceImpl.processOrder:212)" in text
+    assert "tenants (2): 6123abc9f0, 77aa01" in text and "CriteriaService.get" not in text   # a clear message: no "at"

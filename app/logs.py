@@ -816,11 +816,13 @@ class LogService:
                   (r"<\*>(?:[\s,|]*<\*>)+", "<*>"),
                   (r"§([1-5][0-9][0-9])§", r"\1")]
     KEY_WORDS = 8          # lines whose first 8 words (after that) are the same are one kind of error
+    # the tenant a line is about: "tenantId: abc", "tenant_id=abc", "\"tenantId\":\"abc\"", "tenant: abc"
+    _TENANT_RX = r"(?i)tenant(?:[ _]?id)?[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9][A-Za-z0-9._-]{2,63})"
 
     def error_groups(self, cluster: str, spec: SearchSpec, limit: int = 200) -> dict:
         """The matching lines grouped by kind of error. {"total", "kinds", "groups": [{"n", "exception",
-        "error" (the error with what varies shown as <*>), "example", "stores", "service"}]}, the most
-        frequent first."""
+        "error" (the error with what varies shown as <*>), "example", "stores", "tenants", "where" (the
+        code that logged it, Class.method:line), "service"}]}, the most frequent first."""
         start_ms, end_ms, files = self._prepare(cluster, spec)
         if not files:
             return {"total": 0, "kinds": 0, "groups": []}
@@ -833,6 +835,14 @@ class LogService:
             text = f"coalesce({', '.join(parts)}, '')" if parts else "''"
             exc = "nullif(trim(CAST(\"exception\" AS VARCHAR)), '')" if "exception" in cols else "NULL::VARCHAR"
             svc = "CAST(\"service\" AS VARCHAR)" if "service" in cols else "NULL::VARCHAR"
+            col_tenant = (f"nullif(trim(CAST({quote_ident('tenant_id')} AS VARCHAR)), '')"
+                          if "tenant_id" in cols else "NULL::VARCHAR")
+            wparts = [f"nullif(trim(CAST({quote_ident(c)} AS VARCHAR)), '')" for c in ("class", "method", "line")
+                      if c in cols]
+            where_expr = ("nullif(concat_ws('', " + ", ".join(
+                [f"regexp_replace({wparts[0]}, '^.*[.$]', '')"] + [f"'.' || {x}" if i == 0 else f"':' || {x}"
+                                                                  for i, x in enumerate(wparts[1:])]) + "), '')"
+                          if "class" in cols else "NULL::VARCHAR")
             norm = "line"
             params: list[Any] = []
             for rx, rep in self._NORMALIZE:
@@ -840,23 +850,25 @@ class LogService:
                 params += [rx, rep]
             sql = f"""
               WITH t AS (SELECT {exc} AS exc, trim(regexp_replace(left(split_part({text}, chr(10), 1), 1000), '\\s+', ' ', 'g')) AS line,
-                                {svc} AS svc FROM {self._src()} WHERE {wb.where()}),
-                   s AS (SELECT exc, line, svc, left({norm}, 600) AS d, regexp_extract(line, ?, 0) AS store FROM t),
+                                {svc} AS svc, {col_tenant} AS ct, {where_expr} AS loc FROM {self._src()} WHERE {wb.where()}),
+                   s AS (SELECT exc, line, svc, loc, left({norm}, 600) AS d, regexp_extract(line, ?, 0) AS store,
+                                coalesce(ct, nullif(regexp_extract(line, ?, 1), '')) AS tenant FROM t),
                    k AS (SELECT *, array_to_string(string_split(d, ' ')[1:{int(self.KEY_WORDS)}], ' ') AS key FROM s)
               SELECT coalesce(exc, '') AS exc, key, count(*) AS n, any_value(line) AS example,
                      list(DISTINCT replace(store, '.myshopify.com', '')) FILTER (WHERE store <> '') AS stores,
                      any_value(svc) AS svc, list(DISTINCT d)[1:40] AS variants,
+                     list(DISTINCT tenant) FILTER (WHERE tenant IS NOT NULL) AS tenants, mode(loc) AS loc,
                      count(*) OVER () AS kinds, sum(count(*)) OVER () AS total
               FROM k GROUP BY 1, 2 ORDER BY n DESC, key LIMIT ?"""
-            rows = con.execute(sql, [paths, *wb.params, *params, self._STORE_RX, int(limit)]).fetchall()
+            rows = con.execute(sql, [paths, *wb.params, *params, self._STORE_RX, self._TENANT_RX, int(limit)]).fetchall()
         except duckdb.Error as e:
             raise self._db_error(e) from e
         finally:
             con.close()
         groups = [{"n": int(n), "exception": exc or None, "error": error_template(variants or [key]), "example": ex,
-                   "stores": sorted(st or []), "service": sv}
-                  for exc, key, n, ex, st, sv, variants, _, _ in rows]
-        return {"total": int(rows[0][8]) if rows else 0, "kinds": int(rows[0][7]) if rows else 0, "groups": groups}
+                   "stores": sorted(st or []), "tenants": sorted(tn or []), "where": loc, "service": sv}
+                  for exc, key, n, ex, st, sv, variants, tn, loc, _, _ in rows]
+        return {"total": int(rows[0][10]) if rows else 0, "kinds": int(rows[0][9]) if rows else 0, "groups": groups}
 
     # -- export
     def export(self, cluster: str, spec: SearchSpec, fmt: str, columns: list[str] | None,

@@ -1504,7 +1504,9 @@ class AlertService:
                 facts["app"]["known"] = {"n": known_n, "ids": sorted(known_ids)} if known_n else None
                 for g in rest[:100]:
                     details.append(f"{g['n']:,} × {_error_label(g)}"
-                                   + (f" · stores: {', '.join(g['stores'][:30])}" if g["stores"] else ""))
+                                   + (f" (at {g['where']})" if g.get("where") else "")
+                                   + (f" · stores: {', '.join(g['stores'][:30])}" if g["stores"] else "")
+                                   + (f" · tenants: {', '.join(g['tenants'][:30])}" if g.get("tenants") else ""))
             except Exception as ex:  # noqa: BLE001 - the newest error above still shows
                 log.info("alert details (error kinds) for %s: %s", tg, _err(ex))
         for name, fn in (("codes", codes), ("paths", paths), ("usual", usual), ("health", health), ("logs", app_logs)):
@@ -1772,11 +1774,15 @@ class AlertService:
         more = kinds - len(shown)
         width = len(f"{shown[0]['n']:,}")
         entries = []
+        pad = " " * (width + 3)
         for g in shown:
-            e = f"{g['n']:>{width},} × {_cap(_error_label(g))}"
-            if g.get("stores"):
-                st = g["stores"]
-                e += f"\n{' ' * (width + 3)}stores ({len(st)}): {', '.join(st[:20])}" + (" …" if len(st) > 20 else "")
+            label = _error_label(g)
+            if g.get("where") and len(re.sub(r"[^A-Za-z]", "", label)) < 40:    # little to go on: where it came from
+                label += f"  (at {g['where']})"
+            e = f"{g['n']:>{width},} × {_cap(label)}"
+            for name, xs in (("stores", g.get("stores")), ("tenants", g.get("tenants"))):
+                if xs:
+                    e += f"\n{pad}{name} ({len(xs)}): {', '.join(xs[:20])}" + (" …" if len(xs) > 20 else "")
             entries.append(_esc(e).replace("```", "'''"))
         if more > 0:
             entries.append(_esc(f"{'':>{width}}   … {more:,} more kind{'s' if more != 1 else ''}: see App errors"))
