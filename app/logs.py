@@ -806,14 +806,21 @@ class LogService:
 
     # -- errors grouped by kind (for alerts)
     _STORE_RX = r"[A-Za-z0-9-]+\.myshopify\.com"
+    # what varies from one line of the same error to the next: store names, times, and any word with a
+    # digit in it (ids, zip codes, zones, hosts, order numbers); runs of them become one <*>
+    _D = r"\s,;:=()\[\]{}\"'|/"          # what separates words
     _NORMALIZE = [(_STORE_RX, "<store>"),
-                  (r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}", "<uuid>"),
-                  (r"[0-9A-Fa-f]{16,}", "<id>"), (r"[0-9]{4,}", "<n>")]
+                  (r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d)?(\.\d+)?Z?", "<time>"),
+                  (r"(^|[\s/\[(\"'])([1-5][0-9][0-9])( [A-Z][a-z])", r"\1§\2§\3"),   # keep "404 Not Found", "422 Unprocessable"
+                  (rf"(^|[{_D}])([^{_D}§]*[0-9][^{_D}]*)", r"\1<*>"),
+                  (r"<\*>(?:[\s,|]*<\*>)+", "<*>"),
+                  (r"§([1-5][0-9][0-9])§", r"\1")]
+    KEY_WORDS = 8          # lines whose first 8 words (after that) are the same are one kind of error
 
     def error_groups(self, cluster: str, spec: SearchSpec, limit: int = 200) -> dict:
-        """The matching lines grouped by kind of error: the first line of the message with store names,
-        ids and numbers taken out. {"total", "kinds", "groups": [{"n", "exception", "error", "example",
-        "stores", "service"}]}, the most frequent first."""
+        """The matching lines grouped by kind of error. {"total", "kinds", "groups": [{"n", "exception",
+        "error" (the error with what varies shown as <*>), "example", "stores", "service"}]}, the most
+        frequent first."""
         start_ms, end_ms, files = self._prepare(cluster, spec)
         if not files:
             return {"total": 0, "kinds": 0, "groups": []}
@@ -826,28 +833,30 @@ class LogService:
             text = f"coalesce({', '.join(parts)}, '')" if parts else "''"
             exc = "nullif(trim(CAST(\"exception\" AS VARCHAR)), '')" if "exception" in cols else "NULL::VARCHAR"
             svc = "CAST(\"service\" AS VARCHAR)" if "service" in cols else "NULL::VARCHAR"
-            sig = "line"
+            norm = "line"
             params: list[Any] = []
             for rx, rep in self._NORMALIZE:
-                sig = f"regexp_replace({sig}, ?, ?, 'g')"
+                norm = f"regexp_replace({norm}, ?, ?, 'g')"
                 params += [rx, rep]
             sql = f"""
-              WITH t AS (SELECT {exc} AS exc, left(split_part({text}, chr(10), 1), 1000) AS line, {svc} AS svc
-                         FROM {self._src()} WHERE {wb.where()}),
-                   s AS (SELECT exc, line, svc, left({sig}, 400) AS sig,
-                                regexp_extract(line, ?, 0) AS store FROM t)
-              SELECT coalesce(exc, '') AS exc, sig, count(*) AS n, any_value(line) AS example,
+              WITH t AS (SELECT {exc} AS exc, trim(regexp_replace(left(split_part({text}, chr(10), 1), 1000), '\\s+', ' ', 'g')) AS line,
+                                {svc} AS svc FROM {self._src()} WHERE {wb.where()}),
+                   s AS (SELECT exc, line, svc, left({norm}, 600) AS d, regexp_extract(line, ?, 0) AS store FROM t),
+                   k AS (SELECT *, array_to_string(string_split(d, ' ')[1:{int(self.KEY_WORDS)}], ' ') AS key FROM s)
+              SELECT coalesce(exc, '') AS exc, key, count(*) AS n, any_value(line) AS example,
                      list(DISTINCT replace(store, '.myshopify.com', '')) FILTER (WHERE store <> '') AS stores,
-                     any_value(svc) AS svc, count(*) OVER () AS kinds, sum(count(*)) OVER () AS total
-              FROM s GROUP BY 1, 2 ORDER BY n DESC, sig LIMIT ?"""
+                     any_value(svc) AS svc, list(DISTINCT d)[1:40] AS variants,
+                     count(*) OVER () AS kinds, sum(count(*)) OVER () AS total
+              FROM k GROUP BY 1, 2 ORDER BY n DESC, key LIMIT ?"""
             rows = con.execute(sql, [paths, *wb.params, *params, self._STORE_RX, int(limit)]).fetchall()
         except duckdb.Error as e:
             raise self._db_error(e) from e
         finally:
             con.close()
-        groups = [{"n": int(n), "exception": exc or None, "error": sig, "example": ex, "stores": sorted(st or []),
-                   "service": sv} for exc, sig, n, ex, st, sv, _, _ in rows]
-        return {"total": int(rows[0][7]) if rows else 0, "kinds": int(rows[0][6]) if rows else 0, "groups": groups}
+        groups = [{"n": int(n), "exception": exc or None, "error": error_template(variants or [key]), "example": ex,
+                   "stores": sorted(st or []), "service": sv}
+                  for exc, key, n, ex, st, sv, variants, _, _ in rows]
+        return {"total": int(rows[0][8]) if rows else 0, "kinds": int(rows[0][7]) if rows else 0, "groups": groups}
 
     # -- export
     def export(self, cluster: str, spec: SearchSpec, fmt: str, columns: list[str] | None,
@@ -885,6 +894,32 @@ class LogService:
         finally:
             con.close()
         return Export(_encode(fmt, names, rows), len(rows), fmt, start_ms, end_ms, total, first, last, zone)
+
+
+def error_template(variants: list[str]) -> str:
+    """One text for the lines of one kind of error: what differs between them becomes <*> (same
+    number of words), or the words they start and end with around " … "."""
+    vs = list(dict.fromkeys(v for v in variants if v is not None))
+    if not vs:
+        return ""
+    if len(vs) == 1:
+        return vs[0]
+    toks = [v.split(" ") for v in vs]
+    if len({len(t) for t in toks}) == 1:
+        out = [col[0] if all(x == col[0] for x in col) else "<*>" for col in zip(*toks)]
+        return re.sub(r"<\*>(?:[\s,|]*<\*>)+", "<*>", " ".join(out))
+    pre = []
+    for col in zip(*toks):
+        if not all(x == col[0] for x in col):
+            break
+        pre.append(col[0])
+    room = min(len(t) for t in toks) - len(pre)
+    suf = []
+    for col in zip(*(t[::-1] for t in toks)):
+        if len(suf) >= room or not all(x == col[0] for x in col):
+            break
+        suf.append(col[0])
+    return (" ".join(pre) + " …" + (" " + " ".join(reversed(suf)) if suf else "")).strip()
 
 
 @dataclass

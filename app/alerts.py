@@ -1484,9 +1484,25 @@ class AlertService:
                     facts["app"]["service"] = h.get("service")
                     details.append(f"Newest: {('[' + str(h['service']) + '] ') if h.get('service') else ''}{text}")
             try:                             # every kind of error, with how often and for which stores
-                eg = self.logs.error_groups(cluster, SearchSpec(start=s, end=e, query="level:error"), limit=200)
-                facts["app"]["groups"], facts["app"]["kinds"] = eg["groups"], eg["kinds"]
-                for g in eg["groups"][:100]:
+                eg = self.logs.error_groups(cluster, SearchSpec(start=s, end=e, query="level:error"), limit=300)
+                groups = eg["groups"]
+                # errors in the mute file for this target group are not listed (one line says how many)
+                rule_codes = list(info.get("classes") or []) + [str(c) for c in info.get("codes") or []]
+                ms = [m for m in self._mutes_for(getattr(self, "_rtype", "") or "lb_status", "signature")
+                      if m.tg_ok(tg) and m.codes_ok(rule_codes)]
+                known_n, known_ids, rest = 0, set(), []
+                for g in groups:
+                    text = f"{g.get('example') or ''} {g.get('error') or ''}".lower()
+                    hit = [m.id for m in ms if any(x.lower() in text for x in m.signatures)]
+                    if hit:
+                        known_n += g["n"]
+                        known_ids.update(hit)
+                    else:
+                        rest.append(g)
+                facts["app"]["groups"] = rest
+                facts["app"]["kinds"] = max(0, eg["kinds"] - (len(groups) - len(rest)))
+                facts["app"]["known"] = {"n": known_n, "ids": sorted(known_ids)} if known_n else None
+                for g in rest[:100]:
                     details.append(f"{g['n']:,} × {_error_label(g)}"
                                    + (f" · stores: {', '.join(g['stores'][:30])}" if g["stores"] else ""))
             except Exception as ex:  # noqa: BLE001 - the newest error above still shows
@@ -1730,31 +1746,40 @@ class AlertService:
             bits.append("no ERROR lines in its logs")
         return " — ".join(bits) if bits else None
 
-    def _error_lines(self, f: Finding) -> tuple[list[str], list[str]]:
-        """Every kind of error the service logged in those minutes, with how often and for which
-        stores: (lines for the item, code blocks of at most 2,800 characters each)."""
+    def _error_lines(self, f: Finding, compact: bool = False) -> tuple[list[str], list[str]]:
+        """Every kind of error the service logged in those minutes (not the ones in the mute file), with
+        how often and for which stores: (lines for the item, code blocks of at most 2,800 characters).
+        compact: the 5 most frequent only (reminders)."""
         app = (f.extra.get("facts") or {}).get("app") or {}
         if not app.get("n"):
             return [], []
         groups = app.get("groups")
-        if not groups:                       # older details: just the newest error
+        known = app.get("known") or {}
+        known_txt = (f" · {known['n']:,} known ({', '.join(known['ids'])} in the mute file) not listed"
+                     if known.get("n") else "")
+        if groups is None:                   # older details: just the newest error
             if not app.get("newest"):
                 return [], []
             return [f"      Newest error ({app['n']:,} ERROR lines):"], \
-                ["```" + _esc(app["newest"]).replace("```", "'''") + "```"]
-        kinds = app.get("kinds") or len(groups)
+                ["```" + _esc(_cap(app["newest"])).replace("```", "'''") + "```"]
         who = f"{_esc(app['cluster'])}'s" if app.get("cluster") else "the service's"
-        head = f"      Errors in {who} logs, same minutes: {app['n']:,} ERROR lines, {kinds:,} kind{'s' if kinds != 1 else ''}"
-        if kinds > len(groups):
-            head += f" (the {len(groups)} most frequent below; all in App errors)"
-        width = len(f"{groups[0]['n']:,}")
+        if not groups:
+            return [f"      Errors in {who} logs, same minutes: {app['n']:,} ERROR lines, all known{known_txt}"], []
+        kinds = app.get("kinds") or len(groups)
+        head = (f"      Errors in {who} logs, same minutes: {app['n']:,} ERROR lines, "
+                f"{kinds:,} kind{'s' if kinds != 1 else ''}{known_txt}")
+        shown = groups[:5] if compact else groups
+        more = kinds - len(shown)
+        width = len(f"{shown[0]['n']:,}")
         entries = []
-        for g in groups:
-            e = f"{g['n']:>{width},} × {_error_label(g)}"
+        for g in shown:
+            e = f"{g['n']:>{width},} × {_cap(_error_label(g))}"
             if g.get("stores"):
                 st = g["stores"]
-                e += f"\n{' ' * (width + 3)}stores ({len(st)}): {', '.join(st[:40])}" + (" …" if len(st) > 40 else "")
+                e += f"\n{' ' * (width + 3)}stores ({len(st)}): {', '.join(st[:20])}" + (" …" if len(st) > 20 else "")
             entries.append(_esc(e).replace("```", "'''"))
+        if more > 0:
+            entries.append(_esc(f"{'':>{width}}   … {more:,} more kind{'s' if more != 1 else ''}: see App errors"))
         blocks, cur = [], []
         for e in entries:
             if cur and sum(len(x) + 1 for x in cur) + len(e) > 2780:
@@ -1805,7 +1830,7 @@ class AlertService:
                 h = (f.extra.get("facts") or {}).get("health")
                 if h and h[0] < h[1]:
                     lines.append(f"      ⚠ only {h[0]} of {h[1]} targets healthy (ECS cluster {_esc(h[2])})")
-                err_head, err_blocks = self._error_lines(f)
+                err_head, err_blocks = self._error_lines(f, compact=kind in ("repeat", "lowered"))
                 lines += err_head
                 keep = {"Failed requests", "App errors"} | ({"ECS health"} if h and h[0] < h[1] else set())
                 ls = [f"<{u}|{_esc(label)}>" for label, p in f.extra.get("links") or []
@@ -1892,8 +1917,12 @@ class AlertService:
                 error = "Snoozed " + (f"until {self._fmt(cfg, until, True)}" if until else "until it clears")
             elif url:
                 try:
-                    for payload in self._payloads(self.message(cfg, rule, kind, items, now, level)):
-                        self.sender(url, payload)
+                    # target groups with their error lists: one Slack message each
+                    split = len(items) > 1 and any(((f.extra.get("facts") or {}).get("app") or {}).get("groups")
+                                                   for f, _ in items)
+                    for part in ([[it] for it in items] if split else [items]):
+                        for payload in self._payloads(self.message(cfg, rule, kind, part, now, level)):
+                            self.sender(url, payload)
                 except Exception as e:  # noqa: BLE001
                     error = _err(e)
                     log.warning("alert %s: Slack message failed: %s", rule["name"], error)
@@ -2166,14 +2195,22 @@ def _alb_end(text: str) -> int | None:
         return None
 
 
+def _cap(text: str, n: int = 250) -> str:
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+
+
 def _error_label(g: dict) -> str:
-    """One kind of error for Slack: the short exception name and the message."""
+    """One kind of error for Slack: the short exception name and the message, without Java package
+    names (com.fenix.commerce.delest.….RequestValidatorAndBuilderServiceImpl → RequestValidatorAndBuilderServiceImpl)
+    and without a prefix written twice ("Delivery Estimates:Delivery Estimates:")."""
     text, exc = g.get("error") or "", g.get("exception") or ""
     short = exc.rsplit(".", 1)[-1]
     if exc and text.startswith(exc):
         text = short + text[len(exc):]
     elif exc and exc not in text:
         text = f"{short}: {text}" if text else short
+    text = re.sub(r"\b(?:[a-z_][a-z0-9_]*\.){2,}([A-Z][\w$]*)", r"\1", text)
+    text = re.sub(r"^([^:]{3,60}:)\1+", r"\1", text)
     return text
 
 

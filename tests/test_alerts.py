@@ -632,3 +632,42 @@ def test_long_alerts_are_split_into_several_messages(env):
     parts = svc._payloads(msg)
     assert len(parts) > 1 and all(len(p["blocks"]) <= 50 for p in parts)
     assert parts[0]["text"].endswith(f"(1/{len(parts)})") and "Vector Logs viewer" in parts[-1]["blocks"][-1]["elements"][0]["text"]
+
+
+def test_errors_that_differ_only_in_values_are_one_kind():
+    from app.logs import error_template
+    assert error_template(["ML call failed zone=<*> at <time>", "ML call failed zone=<*> at <time>"]) == \
+        "ML call failed zone=<*> at <time>"
+    assert error_template(["Customer: a b c|x number: <*>", "Customer: d|y number: null"]) == "Customer: …"
+    assert error_template(["Zip: K<*>", "Zip: D<*>"]) == "Zip: <*>"
+
+
+def test_error_list_leaves_out_muted_errors_and_reminders_are_short(env, tmp_path):
+    from app.alerts import Finding
+    client, svc, slack = env
+    groups = [{"n": 900, "exception": "x.ElasticsearchException", "error": "no such index [<store>-conversion_guided_transit_time_info]",
+               "example": "no such index [vuori.myshopify.com-conversion_guided_transit_time_info]", "stores": ["vuori"]},
+              {"n": 50, "exception": None, "error": "Invalid Buyer Zipcode: <*>", "example": "Invalid Buyer Zipcode: D01.",
+               "stores": []}] + [{"n": 10 - i, "exception": None, "error": f"other {i}", "example": f"other {i}", "stores": []}
+                                 for i in range(8)]
+
+    def finding(tg):
+        return Finding(tg, True, "100 × 400", extra={"lb": {"start": 0, "end": 1, "classes": [], "codes": [400]},
+                       "facts": {"app": {"n": 1000, "kinds": len(groups), "cluster": tg[3:], "groups": list(groups)}}})
+    # the mute file (AL-001) is applied when the details are worked out; here the same filter by hand
+    f = finding("tg-alpha-edds-1")
+    app = f.extra["facts"]["app"]
+    app["groups"], app["known"], app["kinds"] = groups[1:], {"n": 900, "ids": ["AL-001"]}, len(groups) - 1
+    msg = svc.message(svc.config(), {"name": "400s", "id": "x"}, "firing", [(f, {})], now_ms())
+    text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
+    assert "900 known (AL-001 in the mute file) not listed" in text and "conversion_guided" not in text
+    assert all(f"other {i}" in text for i in range(8))                        # all the others
+    msg = svc.message(svc.config(), {"name": "400s", "id": "x"}, "repeat", [(f, {})], now_ms())
+    text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
+    assert "other 3" in text and "other 4" not in text and "4 more kinds: see App errors" in text
+    # two target groups with error lists: one Slack message each
+    svc.set_webhook(HOOK, "root")
+    n = len(slack.sent)
+    svc._notify(svc.config(), [({"name": "400s", "id": "x", "type": "lb_status"}, "firing", "critical",
+                                [(finding("tg-a-1"), {}), (finding("tg-a-2"), {})], False)], now_ms())
+    assert len(slack.sent) == n + 2 and "tg-a-1" in slack.texts()[-2] and "tg-a-2" in slack.texts()[-1]
