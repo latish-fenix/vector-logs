@@ -642,7 +642,7 @@ def test_errors_that_differ_only_in_values_are_one_kind():
     assert error_template(["Zip: K<*>", "Zip: D<*>"]) == "Zip: <*>"
 
 
-def test_error_list_leaves_out_muted_errors_and_reminders_are_short(env, tmp_path):
+def test_error_list_leaves_out_muted_errors_and_reminders_list_all(env, tmp_path):
     from app.alerts import Finding
     client, svc, slack = env
     groups = [{"n": 900, "exception": "x.ElasticsearchException", "error": "no such index [<store>-conversion_guided_transit_time_info]",
@@ -664,7 +664,7 @@ def test_error_list_leaves_out_muted_errors_and_reminders_are_short(env, tmp_pat
     assert all(f"other {i}" in text for i in range(8))                        # all the others
     msg = svc.message(svc.config(), {"name": "400s", "id": "x"}, "repeat", [(f, {})], now_ms())
     text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
-    assert "other 3" in text and "other 4" not in text and "4 more kinds: see App errors" in text
+    assert all(f"other {i}" in text for i in range(8)) and "more kinds" not in text   # reminders list them all too
     # two target groups with error lists: one Slack message each
     svc.set_webhook(HOOK, "root")
     n = len(slack.sent)

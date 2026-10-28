@@ -1837,7 +1837,7 @@ class AlertService:
                 h = (f.extra.get("facts") or {}).get("health")
                 if h and h[0] < h[1]:
                     lines.append(f"      ⚠ only {h[0]} of {h[1]} targets healthy (ECS cluster {_esc(h[2])})")
-                err_head, err_blocks = self._error_lines(f, compact=kind in ("repeat", "lowered"))
+                err_head, err_blocks = self._error_lines(f)          # every kind, reminders too
                 lines += err_head
                 keep = {"Failed requests", "App errors"} | ({"ECS health"} if h and h[0] < h[1] else set())
                 ls = [f"<{u}|{_esc(label)}>" for label, p in f.extra.get("links") or []
