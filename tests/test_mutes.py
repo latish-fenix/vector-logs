@@ -65,6 +65,11 @@ def test_the_repo_file_is_valid():
     assert {"AL-001", "AL-025", "AL-038", "AL-051", "AL-063"} <= set(ids)
     al33 = next(m for m in ms if m.id == "AL-033")
     assert al33.kind == "signature" and al33.signatures == ["productInfos"]      # the code error only
+    # AL-003 (searchByWebId :: Empty elastic search index name: null) must keep alerting: no entry matches it
+    al003 = "searchByWebId :: Empty elastic search index name: null"
+    assert not [m.id for m in ms if any(x.lower() in al003.lower() for x in m.signatures)]
+    assert [m.id for m in ms if any(x.lower() in "no such index [x.myshopify.com-conversion_guided_transit_time_info]"
+                                    for x in m.signatures)] == ["AL-001"]
 
 
 def test_mistakes_are_explained():
@@ -246,3 +251,21 @@ def test_load_balancer_path_mutes(tmp_path, logs_dir):
     os.utime(svc.mutes.path, (time.time() + 10, time.time() + 10))
     f = next(x for x in svc.evaluate(validate_rule({"type": "lb_errors", "params": params})) if x.subject == hit.subject)
     assert not f.bad and f.muted_by == ["TG"]
+
+
+def test_muted_errors_are_never_listed(env):
+    """An error in the file is left out of every alert's list, for any target group and status code."""
+    from app.alerts import Finding
+    _, svc, _, path = env
+    write(path, "mutes:\n  - id: AL-001\n    match:\n      signatures: [\"value cannot be null\"]\n")
+    t = int(NOW.timestamp() * 1000)
+    f = Finding("tg-post-btp-01", True, "50 × 500", cluster="post-btp-01",
+                extra={"lb": {"start": t - 4 * 3600_000, "end": t, "classes": ["5xx"], "codes": [], "logs": True}})
+    svc._rtype = "lb_errors"
+    svc.explain(f, t)
+    app = f.extra["facts"]["app"]
+    assert app["known"]["ids"] == ["AL-001"] and app["known"]["n"] > 0
+    assert not any("value cannot be null" in (g["error"] + (g.get("example") or "")) for g in app["groups"])
+    text = "\n".join(b["text"]["text"] for b in svc.message(svc.config(), {"name": "5xx", "id": "x"}, "firing",
+                                                             [(f, {})], t)["blocks"] if b["type"] == "section")
+    assert "known (AL-001 in the mute file) not listed" in text and "value cannot be null" not in text

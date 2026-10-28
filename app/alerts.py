@@ -1488,8 +1488,9 @@ class AlertService:
                 groups = eg["groups"]
                 # errors in the mute file for this target group are not listed (one line says how many)
                 rule_codes = list(info.get("classes") or []) + [str(c) for c in info.get("codes") or []]
+                # (any status code: an error in the file is never listed, whichever alert it shows up in)
                 ms = [m for m in self._mutes_for(getattr(self, "_rtype", "") or "lb_status", "signature")
-                      if m.tg_ok(tg) and m.codes_ok(rule_codes)]
+                      if m.tg_ok(tg)]
                 known_n, known_ids, rest = 0, set(), []
                 for g in groups:
                     text = f"{g.get('example') or ''} {g.get('error') or ''}".lower()

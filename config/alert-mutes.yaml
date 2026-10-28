@@ -30,14 +30,13 @@
 mutes:
 
   # ---------------------------------------------------------------- Delivery estimates: known errors (400)
+  # AL-001 and AL-002: every target group and status code (the same missing index shows up on all the
+  # delivery estimate target groups, e.g. tg-uswt2-alpha-1 too)
   - id: AL-001
     enabled: true
     title: Delivery Estimates – missing per-store ES index (conversion_guided_transit_time_info)
     reason: No need to capture this error as part of the alerting
     match:
-      targetGroups: [tg-alpha-edds-1, tg-alpha-edds-2, tg-alpha-edds-11]
-      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
-      codes: [400]
       signatures: ["conversion_guided_transit_time_info"]
 
   - id: AL-002
@@ -45,9 +44,6 @@ mutes:
     title: Delivery Estimates – missing ES index cart_discount_cache
     reason: No need to capture this error as part of the alerting
     match:
-      targetGroups: [tg-alpha-edds-1, tg-alpha-edds-2]
-      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
-      codes: [400]
       signatures: ["cart_discount_cache"]
 
   - id: AL-006
