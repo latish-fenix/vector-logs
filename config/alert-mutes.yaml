@@ -76,25 +76,42 @@ mutes:
       codes: [400]
       signatures: ["RateTableChargesInjector"]
 
+  # AL-014 and AL-015: every target group (29 Oct: they also come from tg-alpha-edds-11 and others)
   - id: AL-014
     enabled: true
-    title: Delivery Estimates – Invalid Buyer Zipcode
+    title: Delivery Estimates – Invalid Buyer Zipcode (also "Buyer Zipcode should not be null")
     reason: Comes when the input zip code is incorrect
     match:
-      targetGroups: [tg-alpha-edds-1, tg-alpha-edds-2]
-      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
-      codes: [400]
-      signatures: ["Invalid Buyer Zipcode"]
+      signatures: ["Invalid Buyer Zipcode", "Buyer Zipcode should not be null"]
 
   - id: AL-015
     enabled: true
-    title: Delivery Estimates – inventory in the given location(s) is below threshold
+    title: Delivery Estimates – inventory in the given location(s) is below 'item quantity/threshold'
     reason: Business rule, mainly on the PDP and Cart
     match:
-      targetGroups: [tg-alpha-edds-1, tg-alpha-edds-2]
-      paths: ["POST /fenixdelest/api/v3/deliveryestimates"]
-      codes: [400]
-      signatures: ["is below threshold"]
+      signatures: ["Inventory in the given location(s) is below"]
+
+  # ---------------------------------------------------------------- added 29 Oct 2026 (ignore these too)
+  - id: AL-010
+    enabled: true
+    title: Elasticsearch – search_phase_execution_exception, all shards failed
+    reason: Very generic error; ignored for now (turn off this entry to see it again if ES health is in doubt)
+    match:
+      signatures: ["all shards failed"]
+
+  - id: AL-064
+    enabled: true
+    title: Customer of tenant … is not found for address (ShopifyCustomerDetailsBusinessServiceImpl.getCustomerTags)
+    reason: Ignore
+    match:
+      signatures: ["is not found for address"]
+
+  - id: AL-065
+    enabled: true
+    title: Delivery Estimates – Inventory is not found for these items (applyInvalidInventoryConfiguration)
+    reason: Ignore
+    match:
+      signatures: ["Inventory is not found for these items"]
 
   # ---------------------------------------------------------------- Bombas rate shopping: known errors (400)
   - id: AL-020

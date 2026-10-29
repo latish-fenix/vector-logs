@@ -65,6 +65,15 @@ def test_the_repo_file_is_valid():
     assert {"AL-001", "AL-025", "AL-038", "AL-051", "AL-063"} <= set(ids)
     al33 = next(m for m in ms if m.id == "AL-033")
     assert al33.kind == "signature" and al33.signatures == ["productInfos"]      # the code error only
+    def ids(text):
+        return [m.id for m in ms if any(x.lower() in text.lower() for x in m.signatures)]
+    # 29 Oct: ignored too, on every target group
+    assert ids("ElasticsearchException: [es/search] failed: [search_phase_execution_exception] all shards failed") == ["AL-010"]
+    assert ids("Customer of tenant: ad56 is not found for address: x|ca|us number: +1") == ["AL-064"]
+    assert ids(":: Buyer Zipcode should not be null. Invalid Buyer Zipcode: .") == ["AL-014"]
+    assert ids(":: Inventory is not found for these items: SCORN") == ["AL-065"]
+    assert ids("Inventory in the given location(s) is below 'item quantity/threshold' 0") == ["AL-015"]
+    assert not ids(":: Product Info should not be null/empty") and not ids("Inventory is not exists in an oragnization's")
     # AL-003 (searchByWebId :: Empty elastic search index name: null) must keep alerting: no entry matches it
     al003 = "searchByWebId :: Empty elastic search index name: null"
     assert not [m.id for m in ms if any(x.lower() in al003.lower() for x in m.signatures)]
