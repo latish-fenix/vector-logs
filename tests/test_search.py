@@ -208,6 +208,10 @@ def test_too_many_files(tmp_path, logs_dir):
     c = TestClient(create_app(make_settings(tmp_path, logs_dir, max_files_per_search=3)))
     r = c.post(f"{URL}/_search", json={"start": "now-7h", "end": "now"}, headers=ROOT_H)
     assert r.status_code == 400 and r.json()["error"]["code"] == "TOO_MANY_FILES"
+    # it says how busy the cluster is and how much time fits, instead of the search running out of memory
+    m = r.json()["error"]["message"]
+    assert m.startswith("post-btp-01 writes about ") and " log files an hour" in m and "or less." in m, m
+    assert "Pick about " in m and r.json()["error"]["details"]["suggestedMinutes"] >= 5
 
 
 def test_cluster_access(client):

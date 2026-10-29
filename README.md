@@ -119,7 +119,7 @@ All settings are environment variables in `.env` (see [.env.example](.env.exampl
 | `API_PORT` | `443` | Host port |
 | `LOGS_BUCKET` / `LOGS_PREFIX` / `LOGS_REGION` | `fenix-vector-ecs-logs` / `logs/` / `us-west-2` | Where Vector writes |
 | `MAX_SEARCH_HOURS` | `168` | Longest window per search |
-| `MAX_FILES_PER_SEARCH` | `30000` | Refuse searches that would read more files |
+| `MAX_FILES_PER_SEARCH` | `3000` | Refuse searches that would read more files (more would need more memory than the 2 GB container; the message says how much time fits) |
 | `MAX_EXPORT_ROWS` | `10000` | Export cap |
 | `CACHE_MAX_MB` | `8192` | Size of the local file cache (Vector logs) |
 | `WORKERS`, `DUCKDB_THREADS`, `DUCKDB_MEMORY_MB`, `DOWNLOAD_THREADS` | `2`, `2`, `768`, `32` | Capacity (the container is capped at 2 GB in `docker-compose.yml`) |

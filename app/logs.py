@@ -455,11 +455,20 @@ class LogService:
         hours = [h for h in hours_between(start_ms, end_ms) if h <= now]
         lists = list(self._list_pool.map(lambda h: self._list_hour(cluster, h, now), hours))
         files = [f for items in lists for f in items]
-        if len(files) > self.settings.max_files_per_search:
+        limit = self.settings.max_files_per_search
+        if limit and len(files) > limit:
+            # a busy cluster (bombas-invp-1: ~2,500 files and 11 M lines an hour) would need more memory
+            # than the container has: say how much time fits instead of the worker being killed (502)
+            span_h = max((end_ms - start_ms) / HOUR, 1 / 60)
+            per_hour = len(files) / span_h
+            fit = limit / per_hour
+            fit_txt = (f"{int(fit)} hour{'s' if int(fit) != 1 else ''}" if fit >= 1
+                       else f"{max(5, int(fit * 60) // 5 * 5)} minutes")
             raise bad_request("TOO_MANY_FILES",
-                              f"This time range has {len(files):,} log files; one search reads at most "
-                              f"{self.settings.max_files_per_search:,}. Pick a shorter range.",
-                              {"files": len(files), "max": self.settings.max_files_per_search})
+                              f"{cluster} writes about {per_hour:,.0f} log files an hour, so this range has "
+                              f"{len(files):,}; one search reads at most {limit:,}. Pick about {fit_txt} or less.",
+                              {"files": len(files), "max": limit, "filesPerHour": round(per_hour),
+                               "suggestedMinutes": max(5, int(fit * 60))})
         return files
 
     def materialize(self, keys: list[str]) -> tuple[list[str], dict]:

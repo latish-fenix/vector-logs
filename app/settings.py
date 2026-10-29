@@ -32,7 +32,7 @@ class Settings:
 
     # ---- search limits
     max_search_hours: int = 168               # one search may span at most this many hours (7 days)
-    max_files_per_search: int = 30000
+    max_files_per_search: int = 3000          # more needs more memory than the 2 GB container has
     max_export_rows: int = 10000
     download_threads: int = 32
     cache_dir: str = "/app/cache"             # downloaded Parquet files (immutable, so safe to keep)
@@ -114,7 +114,7 @@ class Settings:
             logs_endpoint_url=env("LOGS_ENDPOINT_URL") or None,
             logs_local_dir=env("LOGS_LOCAL_DIR", "./local-test/logs"),
             max_search_hours=int(env("MAX_SEARCH_HOURS", "168")),
-            max_files_per_search=int(env("MAX_FILES_PER_SEARCH", "30000")),
+            max_files_per_search=int(env("MAX_FILES_PER_SEARCH", "3000")),
             max_export_rows=int(env("MAX_EXPORT_ROWS", "10000")),
             download_threads=int(env("DOWNLOAD_THREADS", "32")),
             cache_dir=env("CACHE_DIR", "/app/cache"),
