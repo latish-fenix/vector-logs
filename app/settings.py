@@ -75,6 +75,14 @@ class Settings:
     alerts_interval_seconds: int = 60         # how often the checker wakes up
     alert_mutes_file: str = str(Path(__file__).resolve().parent.parent / "config" / "alert-mutes.yaml")
 
+    # ---- ops dashboard (API Gateway calls per stage + orders counted from the logs)
+    ops_enabled: bool = True
+    ops_background: bool = True               # run the order counter thread (off in tests)
+    ops_metrics_prefix: str = "apigw-metrics/"  # in LOGS_BUCKET: dt=YYYY-MM-DD/part-HH.csv.gz (6 a day)
+    ops_config_file: str = str(Path(__file__).resolve().parent.parent / "config" / "ops-dashboard.yaml")
+    ops_interval_seconds: int = 300           # how often new log files are counted for orders
+    ops_backfill_days: int = 8                # days counted back on start (last week's comparison needs 7)
+
     # ---- app state (users, saved searches): S3 or a local folder
     storage_backend: str = "s3"               # "s3" or "local" (local = dev only)
     s3_bucket: str = ""
@@ -151,6 +159,13 @@ class Settings:
             alerts_interval_seconds=int(env("ALERTS_INTERVAL_SECONDS", "60")),
             alert_mutes_file=env("ALERT_MUTES_FILE", "") or str(Path(__file__).resolve().parent.parent / "config"
                                                                 / "alert-mutes.yaml"),
+            ops_enabled=_bool(env("OPS_ENABLED"), True),
+            ops_background=_bool(env("OPS_BACKGROUND"), True),
+            ops_metrics_prefix=_slash(env("OPS_METRICS_PREFIX", "apigw-metrics/").lstrip("/")),
+            ops_config_file=env("OPS_CONFIG_FILE", "") or str(Path(__file__).resolve().parent.parent / "config"
+                                                              / "ops-dashboard.yaml"),
+            ops_interval_seconds=int(env("OPS_INTERVAL_SECONDS", "300")),
+            ops_backfill_days=int(env("OPS_BACKFILL_DAYS", "8")),
             storage_backend=storage,
             s3_bucket=env("S3_BUCKET", ""),
             s3_prefix=_slash(env("S3_PREFIX", "vector-logs/")),

@@ -10,6 +10,7 @@ import { Health } from "./pages/Health";
 import { LbLogs } from "./pages/LbLogs";
 import { LoadBalancers } from "./pages/LoadBalancers";
 import { LogView } from "./pages/LogView";
+import { Ops } from "./pages/Ops";
 import { Overview } from "./pages/Overview";
 import { Saved } from "./pages/Saved";
 import { lastCluster, RequireAdmin, RequireAuth, useClusters, useMe } from "./session";
@@ -56,6 +57,7 @@ export function App() {
         <Route path="lb" element={<LoadBalancers />} />
         <Route path="lb-logs" element={<LbLogs />} />
         <Route path="alerts" element={<Alerts />} />
+        <Route path="ops" element={<Ops />} />
         <Route path="account/password" element={<ChangePassword />} />
         <Route path="admin/clusters" element={<RequireAdmin><Clusters /></RequireAdmin>} />
         <Route path="admin/users" element={<RequireAdmin><Users /></RequireAdmin>} />

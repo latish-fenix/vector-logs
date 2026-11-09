@@ -208,6 +208,20 @@ Cluster access is `{"<cluster>": "view", "*": "view", "<cluster>": "none"}`:
 | `POST /admin/alerts/digest/_send` | admins | Post the weekly summary now |
 | `GET /alerts/history?limit=100` | everyone | Alerts sent (or not, with `error`): `event` `firing` / `escalated` / `lowered` / `repeat` / `resolved` / `muted` (with `mutedBy`) / `digest`, `level`, `snoozed`; members only see those about their clusters |
 
+## Ops dashboard
+
+API Gateway calls per stage and orders processed (OMS / CRS) for a UTC day, against the same day
+last week. Any signed-in user. "Last week" totals for today stop at the same minute.
+
+| Method | Path | What it returns |
+| --- | --- | --- |
+| GET | `/api/v1/ops/summary?day=&window=60` | Calls and orders today (or `day`, YYYY-MM-DD): totals, per minute, per stage (status from the last `window` minutes), per service and store |
+| GET | `/api/v1/ops/health?minutes=60` | Each stage's last N minutes (5–1440) against the same minutes last week: calls, 4xx %, 5xx %, p50 / p95, backend p95, gateway time, green / amber / red with reasons; worst first |
+| GET | `/api/v1/ops/history?day=&stage=&service=&store=` | Per-minute calls, 4xx, 5xx, p95, backend p95 and orders of one day (and last week), for all or one stage (`<api>/<stage>`), order service and store |
+| GET | `/api/v1/ops/status` | Where the numbers come from, the order counter's last run and any config mistake |
+
+`OPS_DISABLED` (404) when `OPS_ENABLED=false`; `INVALID_DAY`, `UNKNOWN_SERVICE` (400).
+
 ## Errors
 
 Every error is `{"error": {"code", "message", "details"}}`. The common codes:

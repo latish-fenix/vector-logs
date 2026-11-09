@@ -450,6 +450,10 @@ class LogService:
         self._lists.set(prefix, items)
         return items
 
+    def hour_files(self, cluster: str, hour: datetime) -> list[tuple[str, int]]:
+        """The log files of one hour folder (listing cached like a search's)."""
+        return self._list_hour(cluster, hour, datetime.now(timezone.utc))
+
     def files_for(self, cluster: str, start_ms: int, end_ms: int) -> list[tuple[str, int]]:
         now = datetime.now(timezone.utc)
         hours = [h for h in hours_between(start_ms, end_ms) if h <= now]
@@ -518,7 +522,7 @@ class LogService:
             self._evict_lock.release()
 
     # folders in CACHE_DIR that are not downloaded log files
-    NOT_LOG_CACHE = {"lb", "alerts", ".duckdb-tmp", ".results"}
+    NOT_LOG_CACHE = {"lb", "alerts", "ops", ".duckdb-tmp", ".results"}
 
     def expire_cache(self, now: float | None = None) -> tuple[int, int]:
         """Delete downloaded log files not used for CACHE_MAX_AGE_HOURS (they are read from S3 again

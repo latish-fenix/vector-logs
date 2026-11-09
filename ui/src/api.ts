@@ -468,3 +468,54 @@ export interface AlertEvent {
   subject: string; message: string; cluster: string | null; link: string | null; since: number | null; delivered: boolean; error: string | null;
   details?: string[]; links?: [string, string][];
 }
+
+// ------------------------------------------------------------------ ops dashboard
+export type OpsStatus = "red" | "amber" | "green" | "idle";
+export interface OpsMinutes { start: number; step: number }
+export interface OpsFreshness { asOf: number | null; ageMs: number | null; stale: boolean; error: string | null }
+export interface OpsStageDay {
+  id: string; api: string; stage: string; name: string;
+  calls: number; callsLastWeek: number | null; change: number | null;
+  err4xx: number; err5xx: number; err4xxPct: number | null; err5xxPct: number | null;
+  recent: { calls: number; p95: number | null; p95LastWeek: number | null; err5xxPct: number | null; err4xxPct: number | null };
+  status: OpsStatus; reasons: string[];
+}
+export interface OpsOrderRow { service: string; count: number; lastWeek: number | null; change: number | null }
+export interface OpsOrders {
+  lastRun: string | null; lastOk: string | null; running: boolean; error: string | null; configError: string | null;
+  ready: boolean; lastWeekReady: boolean; asOf: number | null;
+  total: number | null; totalLastWeek: number | null; change: number | null;
+  services: (OpsOrderRow & { cluster: string })[];
+  stores: (OpsOrderRow & { store: string; name: string })[];
+  minutes: (OpsMinutes & { counts: (number | null)[]; lastWeek: number[] | null }) | null;
+}
+export interface OpsSummary {
+  day: string; today: boolean; generatedAt: string;
+  api: OpsFreshness & {
+    source: string; windowMinutes: number;
+    calls: number; callsLastWeek: number | null; change: number | null; err4xx: number; err5xx: number;
+    minutes: OpsMinutes & { calls: (number | null)[]; err4xx: (number | null)[]; err5xx: (number | null)[]; lastWeek: number[] | null };
+    stages: OpsStageDay[];
+    statusCounts: Record<OpsStatus, number>;
+  };
+  orders: OpsOrders;
+}
+export interface OpsWindow { calls: number; err4xx: number; err5xx: number; err4xxPct: number | null; err5xxPct: number | null; p50: number | null; p95: number | null; integrationP95: number | null; gatewayMs: number | null }
+export interface OpsHealth {
+  minutes: number; from: number; to: number; generatedAt: string; lastWeekAvailable: boolean;
+  api: OpsFreshness;
+  stages: { id: string; api: string; stage: string; name: string; now: OpsWindow; lastWeek: OpsWindow | null; change: number | null; status: OpsStatus; reasons: string[] }[];
+  orders: { lastRun: string | null; lastOk: string | null; error: string | null; running: boolean; configError: string | null; newestMs: number | null };
+  thresholds: Record<string, number>;
+}
+export interface OpsHistory {
+  day: string; stage: string | null; service: string | null; store: string | null;
+  api: OpsMinutes & {
+    calls: (number | null)[]; err4xx: (number | null)[]; err5xx: (number | null)[]; p95: (number | null)[]; integrationP95: (number | null)[]; hasData: boolean; shownMinutes: number;
+    lastWeek: { calls: number[]; err4xx: number[]; err5xx: number[]; p95: (number | null)[] } | null;
+  };
+  orders: { counted: boolean; minutes: (number | null)[] | null; total: number | null; lastWeek: number[] | null; totalLastWeek: number | null };
+  stages: { id: string; api: string; stage: string; name: string; calls: number }[];
+  services: { service: string; cluster: string }[];
+  stores: { service: string; store: string; name: string; count: number }[];
+}

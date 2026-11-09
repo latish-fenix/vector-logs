@@ -24,6 +24,7 @@ A web console for the application logs that Vector ships from the Fenix app serv
 - **Export** up to 10,000 lines as CSV, JSON or NDJSON.
 - **Save searches** (per user) and **share links** (the URL holds cluster, time range, query and filters).
 - Times in your browser's time zone (IST) or UTC, with one click.
+- **Ops dashboard**: API Gateway calls per stage (from CloudWatch, copied to S3 every 5 minutes by `scripts/apigw_metrics_to_s3.py` on another server) and orders processed by OMS and CRS (counted from their logs here: one unique store + order id per service per UTC day), each against the same time last week. **Live** (counters, calls and orders over the day, stages busiest first, orders by store), **Health** (every stage's last 15 min / 1 h / 3 h against last week: 4xx, 5xx, p95, backend time, green / amber / red) and **History** (any day, one stage / service / store, CSV per minute). Which log lines count as orders, display names and the colour rules are in `config/ops-dashboard.yaml`. Times are UTC.
 - **Alerts to Slack**: the server keeps checking the viewer itself, the application logs, ECS and the load balancers, and posts to a Slack channel when something goes wrong (warning or critical, with lines you set per ECS cluster), when it changes level and when it's OK again; alerts can be snoozed, known errors are muted in `config/alert-mutes.yaml`, and a weekly summary is posted every Friday. Admins set the Slack webhook and the rules on the **Alerts** page (no restart); members see the alerts about their clusters there.
 
 Admins also see every cluster folder (new folders appear by themselves), add users, give each person access per cluster (or to all clusters, with exceptions), reset passwords and remove users.
@@ -130,6 +131,8 @@ All settings are environment variables in `.env` (see [.env.example](.env.exampl
 | `LB_WARM_DAYS`, `LB_RETENTION_DAYS`, `LB_POLL_SECONDS`, `LB_CONVERTER_MEMORY_MB` | `30`, `30`, `300`, `256` | Load balancer converter |
 | `CACHE_MAX_AGE_HOURS` | `24` | Downloaded log files and converted load balancer copies unused this long are deleted (read from S3 again when needed) |
 | `ALERTS_ENABLED`, `ALERTS_INTERVAL_SECONDS` | `true`, `60` | Alert checker (rules and the Slack webhook are set on the Alerts page) |
+| `OPS_ENABLED`, `OPS_METRICS_PREFIX`, `OPS_INTERVAL_SECONDS`, `OPS_BACKFILL_DAYS` | `true`, `apigw-metrics/`, `300`, `8` | Ops dashboard: where the API Gateway copies are (in `LOGS_BUCKET`), how often orders are counted, how many days are counted back on start |
+| `OPS_CONFIG_FILE` | `/app/config/ops-dashboard.yaml` | Order lines, names, colour rules (read again when it changes) |
 | `S3_BUCKET` / `S3_PREFIX` / `AWS_REGION` | `fenix-es-config-api` / `vector-logs/` / `us-east-1` | App state |
 | `SECRETS_PREFIX` | `vector-logs/` | Secrets Manager names |
 | `BOOTSTRAP_ADMINS` | your email | Always admins |

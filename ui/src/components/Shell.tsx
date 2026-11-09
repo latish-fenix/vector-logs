@@ -131,6 +131,7 @@ export function Shell() {
         </div>
         <div className="nav-group">
           <span className="nav-label">Infrastructure</span>
+          <NavItem to="/ops" icon="trend" label="Ops dashboard" />
           <NavItem to="/health" icon="activity" label="ECS health" />
           <NavItem to="/lb" icon="pipeline" label="Load balancer dashboard" />
           <NavItem to="/lb-logs" icon="terminal" label="Load balancer logs" />

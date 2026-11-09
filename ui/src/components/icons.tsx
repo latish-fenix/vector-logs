@@ -4,6 +4,7 @@ import type { SVGProps } from "react";
 const P: Record<string, string> = {
   logo: "M4 7h2M9 7h11M4 12h2M9 12h7M4 17h2M9 17h11",
   overview: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  trend: "M3 17l6-6 4 4 8-8M15 7h6v6",
   sliders: "M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4",
   table: "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14",
   template: "M8 8h12v12H8zM4 16V4h12",

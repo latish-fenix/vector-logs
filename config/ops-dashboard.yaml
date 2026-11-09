@@ -1,0 +1,73 @@
+# Ops dashboard (the "Ops dashboard" page): which log lines count as orders, display names, and
+# when a stage turns amber or red. Read again within a minute of a change (git pull); no restart.
+# A broken file keeps the last good version and the page says what is wrong.
+#
+# ---------------------------------------------------------------- orders
+# One order = one unique (store, order id) per service per UTC day, counted at the minute it is
+# first seen. Repeats, retries and duplicate lines are not counted again. An order seen by two
+# services (OMS and CRS) counts once in each, and the total adds the services up.
+#
+#   service   name shown on the page
+#   cluster   the vector-logs cluster (folder in the logs bucket)
+#   lines     the log lines that mean "an order"; the first one that matches a line is used
+#     contains  text the line must contain (a fast filter before the pattern)
+#     pattern   regular expression with named groups: order (required) and store or tenant
+#     skip      group values that mean "not a real order" (health checks); "null" and "" orders
+#               are always skipped
+#
+# Changing a service's lines recounts the days already counted (from the logs in S3).
+orders:
+  - service: OMS
+    cluster: alpha-oms-routing
+    lines:
+      # START :: ...routeOrder() ==> StoreName: dermalogica-us.myshopify.com , Create : false, OrderId : 19011630792856
+      - contains: "routeOrder() ==> StoreName"
+        pattern: 'StoreName:\s*(?P<store>[^\s,]+)\s*,.*?OrderId\s*:\s*(?P<order>[^\s,]+)'
+
+  - service: OMS-11
+    cluster: alpha-oms-routing-11
+    lines:
+      # getOrderRoutingInfo::Begin with tenantId: ad5643..., requestId: 53166f77-..., orderId: 6334048174213
+      - contains: "getOrderRoutingInfo::Begin"
+        pattern: 'tenantId:\s*(?P<tenant>\w+),\s*requestId:\s*(?P<request>[^,]*?),\s*orderId:\s*(?P<order>[^\s,]+)'
+        skip:
+          request: [test]          # health check: requestId: test, orderId: null
+
+  - service: CRS
+    cluster: bombas-crs-1
+    lines:
+      # ...RateShoppingBusinessServiceImpl.rateShop() ==> StoreName: bombas.myshopify.com , OrderId : 10091104764258
+      - contains: "rateShop() ==> StoreName"
+        pattern: 'StoreName:\s*(?P<store>[^\s,]+)\s*,\s*OrderId\s*:\s*(?P<order>[^\s,]+)'
+      # InstantRateShoppingBusinessService::processOrder for Store: felinagroup.myshopify.com, order: 18964761772120
+      - contains: "InstantRateShoppingBusinessService::processOrder"
+        pattern: 'for Store:\s*(?P<store>[^\s,]+),\s*order:\s*(?P<order>[^\s,]+)'
+
+# Lines that name a tenant id instead of a store.
+tenants:
+  ad5643d2f6db419abd35178d12762b54: stevemadden
+
+# ---------------------------------------------------------------- names
+# Display names for API Gateway stages and stores. Anything not listed is shown as it is
+# (".myshopify.com" is dropped from store names).
+names:
+  stevemadden: Steve Madden
+  dermalogica-us.myshopify.com: Dermalogica
+  bombas.myshopify.com: Bombas
+  felinagroup.myshopify.com: Felina
+  aquiskhairpep.myshopify.com: Aquis
+  k18-stylist-collective.myshopify.com: K18 Stylist Collective
+
+# ---------------------------------------------------------------- status colours
+# Each stage gets green / amber / red on the Live and Health pages, from its last N minutes
+# compared with the same minutes one week earlier. Nothing is sent anywhere; it is only shown.
+status:
+  minCalls: 100            # fewer calls than this (now and last week) is "too quiet to judge"
+  err5xxRedPct: 1.0        # 5xx share of calls
+  err5xxAmberPct: 0.5
+  err4xxTimesLastWeek: 2.0 # amber when the 4xx share is this many times last week's ...
+  err4xxMinPct: 5.0        # ... and at least this high
+  p95RedTimes: 2.0         # p95 latency compared with last week
+  p95AmberTimes: 1.5
+  p95MinMs: 300            # latency below this is never flagged
+  quietPct: 50             # amber when calls fall below this % of last week

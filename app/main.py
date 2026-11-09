@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from . import routes_admin, routes_alerts, routes_auth, routes_health, routes_lb, routes_logs
+from . import routes_admin, routes_alerts, routes_auth, routes_health, routes_lb, routes_logs, routes_ops
 from .alerts import AlertService
 from .auth import generate_password, hash_password, password_problems
 from .errors import ApiError
@@ -20,6 +20,7 @@ from .ecs_health import HealthService
 from .ecs_metrics import MetricsService
 from .lb_logs import Converter, LbService
 from .logs import LogService
+from .ops import OpsService
 from .repos import EventLog, LockRepo, SavedSearchRepo, UsersRepo
 from .secret_store import SecretStore, build_secret_store, resolve_app_secrets
 from .settings import Settings
@@ -104,6 +105,12 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
         if settings.alerts_background:
             # Every API worker starts one; a file lock lets only one of them check.
             app.state.alerts.start()
+    app.state.ops = None
+    if settings.ops_enabled:
+        app.state.ops = OpsService(settings, app.state.logs)
+        if settings.ops_background:
+            # Every API worker starts one; a file lock lets only one of them count orders.
+            app.state.ops.start()
     if settings.auth_mode == "password":
         _bootstrap_passwords(settings, app.state.users, bootstrap_pw, secrets)
 
@@ -151,6 +158,7 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
     app.include_router(routes_admin.router)
     app.include_router(routes_alerts.admin)
     app.include_router(routes_alerts.public)
+    app.include_router(routes_ops.router)
     _mount_ui(app)
     return app
 
