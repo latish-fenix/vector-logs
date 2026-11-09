@@ -479,12 +479,13 @@ export interface OpsStageDay {
   err4xx: number; err5xx: number; err4xxPct: number | null; err5xxPct: number | null;
   recent: { calls: number; p95: number | null; p95LastWeek: number | null; err5xxPct: number | null; err4xxPct: number | null };
   status: OpsStatus; reasons: string[];
+  spark: { now: (number | null)[]; lastWeek: number[] | null }; share: number | null;
 }
-export interface OpsOrderRow { service: string; count: number; lastWeek: number | null; change: number | null }
+export interface OpsOrderRow { service: string; count: number; lastWeek: number | null; change: number | null; hours: (number | null)[] | null; lastWeekHours: number[] | null }
 export interface OpsOrders {
   lastRun: string | null; lastOk: string | null; running: boolean; error: string | null; configError: string | null;
   ready: boolean; lastWeekReady: boolean; asOf: number | null;
-  total: number | null; totalLastWeek: number | null; change: number | null;
+  total: number | null; totalLastWeek: number | null; totalLastWeekDay: number | null; change: number | null;
   services: (OpsOrderRow & { cluster: string })[];
   stores: (OpsOrderRow & { store: string; name: string })[];
   minutes: (OpsMinutes & { counts: (number | null)[]; lastWeek: number[] | null }) | null;
@@ -493,7 +494,8 @@ export interface OpsSummary {
   day: string; today: boolean; generatedAt: string;
   api: OpsFreshness & {
     source: string; windowMinutes: number;
-    calls: number; callsLastWeek: number | null; change: number | null; err4xx: number; err5xx: number;
+    calls: number; callsLastWeek: number | null; callsLastWeekDay: number | null; change: number | null; err4xx: number; err5xx: number;
+    peak: { t: number; calls: number } | null;
     minutes: OpsMinutes & { calls: (number | null)[]; err4xx: (number | null)[]; err5xx: (number | null)[]; lastWeek: number[] | null };
     stages: OpsStageDay[];
     statusCounts: Record<OpsStatus, number>;

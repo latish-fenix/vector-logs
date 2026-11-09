@@ -244,3 +244,20 @@ def test_routes(tmp_path, data):
     assert c.get("/api/v1/ops/history?service=NOPE", headers=ROOT_H).json()["error"]["code"] == "UNKNOWN_SERVICE"
     assert c.get("/api/v1/ops/status", headers=ROOT_H).json()["config"]["exists"]
     assert c.get("/api/v1/ops/summary").status_code == 401
+
+
+def test_new_shapes_for_the_ui(ops):
+    s = ops.summary()
+    st = {x["id"]: x for x in s["api"]["stages"]}
+    v = st["Vuori/vuori"]
+    # 00:00 … 10:25 known: 41 full 15-minute buckets (10:15–10:30 is still running)
+    assert len(v["spark"]["now"]) == 96 and v["spark"]["now"][0] == 1500 and v["spark"]["now"][40] == 1500
+    assert v["spark"]["now"][41] is None and v["spark"]["lastWeek"][95] == 1500
+    assert round(sum(x["share"] for x in st.values())) == 100
+    assert s["api"]["peak"]["calls"] == 110 and s["api"]["callsLastWeekDay"] == 110 * 1440
+    o = s["orders"]
+    crs = next(x for x in o["services"] if x["service"] == "CRS")
+    assert crs["hours"][:9] == [0] * 9 and crs["hours"][9] is None   # counted to 09:30: the hour in progress is left out
+    assert o["totalLastWeekDay"] == 2
+    bombas = next(x for x in o["stores"] if x["name"] == "Bombas")
+    assert bombas["hours"][9] is None and len(bombas["lastWeekHours"]) == 24

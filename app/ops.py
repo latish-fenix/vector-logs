@@ -617,27 +617,35 @@ class OpsService:
         start = day_start_ms(d)
         minutes = [0] * 1440
         services, stores = {}, {}
+        svc_hours: dict[str, list[int]] = {}
+        store_hours: dict[tuple[str, str], list[int]] = {}
         for name in [s.name for s in cfg.services]:
             svc = st["services"].get(name)
             if svc is None or (service and name != service):
                 continue
             n = 0
+            sh = svc_hours[name] = [0] * 24
             for s, ids in svc["orders"].items():
                 if store and s != store:
                     continue
                 c = 0
+                hh = [0] * 24
                 for ms in ids.values():
                     if cutoff_ms is not None and ms >= cutoff_ms:
                         continue
                     i = (ms - start) // MIN
                     if 0 <= i < 1440:
                         minutes[i] += 1
+                        hh[i // 60] += 1
+                        sh[i // 60] += 1
                     c += 1
                 if c:
                     stores[(name, s)] = c
+                    store_hours[(name, s)] = hh
                 n += c
             services[name] = n
         return {"minutes": minutes, "services": services, "stores": stores, "total": sum(services.values()),
+                "serviceHours": svc_hours, "storeHours": store_hours,
                 "newestMs": st.get("newestMs"), "final": st.get("final"), "updated": st.get("updated")}
 
     # -- API metrics (read side)
@@ -687,9 +695,26 @@ class OpsService:
             win = self._stage_rows(con, w0, upto)
             lw_win = self._stage_rows(con, w0 - WEEK, upto - WEEK)
             lw_have = con.execute("SELECT count(*) FROM m WHERE t >= ? AND t < ?", [start - WEEK, start - WEEK + DAY]).fetchone()[0]
+            q15 = 15 * MIN
+            spark_rows = con.execute("SELECT api, stage, (t - ?) // ?, sum(calls) FROM m WHERE t >= ? AND t < ? GROUP BY 1, 2, 3",
+                                     [start, q15, start, start + DAY]).fetchall()
+            spark_lw = con.execute("SELECT api, stage, (t - ?) // ?, sum(calls) FROM m WHERE t >= ? AND t < ? GROUP BY 1, 2, 3",
+                                   [start - WEEK, q15, start - WEEK, start - WEEK + DAY]).fetchall()
         finally:
             con.close()
         n_shown = 1440 if not is_today else (0 if as_of is None else (as_of - start) // MIN + 1)
+        # 15-minute buckets for the small charts; today's bucket in progress is left out
+        b_done = 96 if not is_today else (0 if as_of is None else (as_of + MIN - start) // q15)
+        sparks: dict[tuple[str, str], list] = {}
+        for api_n, st_n, b, c in spark_rows:
+            arr = sparks.setdefault((api_n, st_n), [0] * 96)
+            if 0 <= b < 96:
+                arr[int(b)] = int(c or 0)
+        sparks_lw: dict[tuple[str, str], list] = {}
+        for api_n, st_n, b, c in spark_lw:
+            arr = sparks_lw.setdefault((api_n, st_n), [0] * 96)
+            if 0 <= b < 96:
+                arr[int(b)] = int(c or 0)
         calls = _minute_array([(t, c) for t, c, _, _ in per_min], start)
         e4 = _minute_array([(t, v) for t, _, v, _ in per_min], start)
         e5 = _minute_array([(t, v) for t, _, _, v in per_min], start)
@@ -712,14 +737,22 @@ class OpsService:
                 "recent": {"calls": w["calls"], "p95": w.get("p95"), "p95LastWeek": (lww or {}).get("p95"),
                            "err5xxPct": _pct(w["err5xx"], w["calls"]), "err4xxPct": _pct(w["err4xx"], w["calls"])},
                 "status": status, "reasons": reasons,
+                "spark": {"now": [v if i < b_done else None for i, v in enumerate(sparks.get(key) or [0] * 96)],
+                          "lastWeek": (sparks_lw.get(key) or [0] * 96) if lw_have else None},
             })
         stages.sort(key=lambda s: -s["calls"])
         total = sum(s["calls"] for s in stages)
+        for st_row in stages:
+            st_row["share"] = round(100.0 * st_row["calls"] / total, 2) if total else None
+        peak_i = max(range(n_shown), key=lambda i: calls[i]) if n_shown else None
+        lw_total_day = sum(lastweek) if lastweek else None
         total_lw = sum(r["calls"] for r in lw_rows.values()) if lw_have else None
         api = {
             **self._freshness(as_of, now_ms, is_today), "source": self.metrics.describe(),
             "windowMinutes": window_minutes,
             "calls": total, "callsLastWeek": total_lw, "change": _change(total, total_lw),
+            "callsLastWeekDay": lw_total_day,
+            "peak": {"t": start + peak_i * MIN, "calls": calls[peak_i]} if peak_i is not None and calls[peak_i] else None,
             "err4xx": sum(s["err4xx"] for s in stages), "err5xx": sum(s["err5xx"] for s in stages),
             "minutes": {"start": start, "step": MIN, "calls": cut(calls), "err4xx": cut(e4), "err5xx": cut(e5),
                         "lastWeek": lastweek},
@@ -746,18 +779,27 @@ class OpsService:
         lw_full = self._orders_view(d - timedelta(days=7), None, cfg)
         start = day_start_ms(d)
         n_shown = 1440 if not is_today else (0 if as_of is None else (as_of - start) // MIN + 1)
+        # whole hours only: the hour in progress would look like a drop at the end of the small charts
+        h_shown = 24 if not is_today else (0 if as_of is None else (as_of + MIN - start) // 3600_000)
+        hours = lambda arr: [v if i < h_shown else None for i, v in enumerate(arr)] if arr else None  # noqa: E731
         services = [{"service": s.name, "cluster": s.cluster, "count": cur["services"].get(s.name, 0),
-                     "lastWeek": lw["services"].get(s.name, 0) if lw else None} for s in cfg.services]
+                     "lastWeek": lw["services"].get(s.name, 0) if lw else None,
+                     "hours": hours(cur["serviceHours"].get(s.name) or [0] * 24),
+                     "lastWeekHours": (lw_full["serviceHours"].get(s.name) or [0] * 24) if lw_full else None}
+                    for s in cfg.services]
         for s in services:
             s["change"] = _change(s["count"], s["lastWeek"])
         keys = set(cur["stores"]) | (set(lw["stores"]) if lw else set())
         stores = [{"service": k[0], "store": k[1], "name": cfg.name(k[1]), "count": cur["stores"].get(k, 0),
-                   "lastWeek": lw["stores"].get(k, 0) if lw else None} for k in keys]
+                   "lastWeek": lw["stores"].get(k, 0) if lw else None,
+                   "hours": hours(cur["storeHours"].get(k) or [0] * 24),
+                   "lastWeekHours": (lw_full["storeHours"].get(k) or [0] * 24) if lw_full else None} for k in keys]
         for s in stores:
             s["change"] = _change(s["count"], s["lastWeek"])
         stores.sort(key=lambda s: (-s["count"], s["name"]))
         return {**base, "ready": True, "lastWeekReady": lw is not None, "asOf": as_of,
                 "total": cur["total"], "totalLastWeek": lw["total"] if lw else None,
+                "totalLastWeekDay": lw_full["total"] if lw_full else None,
                 "change": _change(cur["total"], lw["total"] if lw else None),
                 "services": services, "stores": stores,
                 "minutes": {"start": start, "step": MIN,

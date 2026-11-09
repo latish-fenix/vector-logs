@@ -610,9 +610,3 @@ button.htile:hover { border-color: var(--border-strong); }
 .usage-limit { stroke: var(--danger); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.5; }
 .usage-dot { fill: var(--lv-info); stroke: var(--surface); stroke-width: 2; }
 .swatch.dashed { background: none; border-top: 2px dashed var(--text-2); height: 0; width: 12px; border-radius: 0; }
-
-/* ---------------------------------------------------------------- ops dashboard */
-.ops-chg { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); }
-.ops-chg.up { color: var(--success-text); }
-.ops-chg.down { color: var(--text-2); }
-.ops-chg.bad { color: var(--danger-text); }
