@@ -1,9 +1,9 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { get, type OpsHealth, type OpsHistory, type OpsStatus, type OpsSummary } from "../api";
 import { Icon } from "../components/icons";
-import { bucket, clock, clockZ, cumulative, dayIn, Legend, LineChart, localStamp, Spark, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
+import { bucket, clock, clockZ, cumulative, dayIn, Legend, LineChart, localStamp, offsetMs, Spark, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
 import { Callout, Empty, ErrorCallout, Loading, SearchSelect, downloadFile } from "../components/ui";
 import { ago, num } from "../format";
@@ -109,18 +109,68 @@ function CardHead({ title, sub, right }: { title: string; sub?: ReactNode; right
   );
 }
 
-function LiveBadge({ fresh }: { fresh: Fresh | null }) {
-  const z = useZone();
-  if (!fresh) return null;
-  const late = fresh.stale || !!fresh.error;
-  const none = fresh.asOf === null;
-  const cls = none ? "down" : late ? "late" : "";
-  const mins = fresh.ageMs === null ? null : Math.round(fresh.ageMs / 60_000);
+const ZONE_PLACE: Record<ClockZone, string> = { ist: "India", pst: "US Pacific", est: "US Eastern" };
+function utcOffset(ms: number, z: ClockZone): string {
+  const m = offsetMs(ms, z) / 60_000;
+  const a = Math.abs(m);
+  return `UTC ${m < 0 ? "−" : "+"}${Math.floor(a / 60)}${a % 60 ? `:${String(a % 60).padStart(2, "0")}` : ""}`;
+}
+
+/** Freshness + time zone in one control: "● Live 12:14 IST ⌄"; the menu switches the zone. */
+function LiveClock({ fresh, zone, onZone }: { fresh: Fresh | null; zone: ClockZone; onZone: (z: ClockZone) => void }) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  const items = useRef<(HTMLButtonElement | null)[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => { if (!wrap.current?.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", away);
+    items.current[ZONES.indexOf(zone)]?.focus();
+    return () => document.removeEventListener("mousedown", away);
+  }, [open, zone]);
+  const at = fresh?.asOf ?? null;
+  const ref = at ?? Date.now();
+  const late = !!fresh && (fresh.stale || !!fresh.error);
+  const state = !fresh ? "wait" : at === null ? "down" : late ? "late" : "ok";
+  const mins = fresh?.ageMs === null || fresh?.ageMs === undefined ? null : Math.round(fresh.ageMs / 60_000);
+  const word = { wait: "Loading", down: "No data yet", late: mins !== null ? `Delayed ${mins} min` : "Delayed", ok: "Live" }[state];
+  const pick = (z: ClockZone) => { onZone(z); setOpen(false); };
+  const onKey = (e: ReactKeyboardEvent) => {
+    const i = items.current.findIndex((el) => el === document.activeElement);
+    if (e.key === "Escape") { setOpen(false); (wrap.current?.querySelector(".ops-clock") as HTMLElement | null)?.focus(); }
+    else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const n = (i + (e.key === "ArrowDown" ? 1 : ZONES.length - 1)) % ZONES.length;
+      items.current[n]?.focus();
+    }
+  };
   return (
-    <span className={`ops-live ${cls}`} role="status" title={fresh.error ?? `${fresh.asOf !== null ? clockZ(fresh.asOf, z, true) + ". " : ""}API Gateway numbers are copied from CloudWatch every 5 minutes; the page refreshes every minute`}>
-      <span className="pulse" />
-      {none ? "No data yet today" : late ? <>Delayed · data to <strong>{fresh.asOf !== null ? clock(fresh.asOf, z) : "—"}</strong> {zoneName(fresh.asOf ?? Date.now(), z)} ({mins} min)</> : <>Live · data to <strong>{fresh.asOf !== null ? clock(fresh.asOf, z) : "—"}</strong> {zoneName(fresh.asOf ?? Date.now(), z)}</>}
-    </span>
+    <div className="ops-clock-wrap" ref={wrap} onKeyDown={onKey}>
+      <button type="button" className={`ops-clock ${state}`} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}
+        title={fresh?.error ?? (at !== null ? `Data to ${clockZ(at, zone, true)}. Copied from CloudWatch every 5 minutes; the page refreshes every minute.` : "Change the time zone")}>
+        <span className="pulse" aria-hidden="true" />
+        <span className="word">{word}</span>
+        <span className="sep" aria-hidden="true" />
+        <span className="time">{at !== null ? clock(at, zone) : "--:--"}</span>
+        <span className="zn">{zoneName(ref, zone)}</span>
+        <Icon name="caret" size={15} className="caret" />
+      </button>
+      {open && (
+        <div className="ops-zone-menu" role="listbox" aria-label="Time zone">
+          <div className="ops-zone-menu-head">Time zone</div>
+          {ZONES.map((z, i) => (
+            <button key={z} ref={(el) => { items.current[i] = el; }} type="button" role="option" aria-selected={z === zone}
+              className="ops-zone-item" onClick={() => pick(z)}>
+              <span className="code">{ZONE_LABEL[z]}</span>
+              <span className="what"><span className="place">{ZONE_PLACE[z]}</span><span className="off">{zoneName(ref, z)} · {utcOffset(ref, z)}</span></span>
+              <span className="now">{clock(ref, z)}</span>
+              <span className="tick" aria-hidden="true">{z === zone && <Icon name="check" size={16} strokeWidth={2.4} />}</span>
+            </button>
+          ))}
+          <div className="ops-zone-menu-foot">Days run midnight to midnight in this zone, and last week is the same date 7 days back.</div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -146,12 +196,8 @@ export function Ops() {
           <p className="sub">API Gateway calls and orders processed, against the same time last week. A day runs midnight to midnight {zone === "ist" ? "India time" : zone === "pst" ? "US Pacific time" : "US Eastern time"} ({ZONE_LABEL[zone]}).</p>
         </div>
         <div className="ops-head-right">
-          <LiveBadge fresh={fresh} />
-          <select className="select ops-zone" aria-label="Time zone" value={zone} title={`Days and times in ${ZONE_TITLE[zone]}`}
-            onChange={(e) => setZone(e.target.value as ClockZone)}>
-            {ZONES.map((z) => <option key={z} value={z}>{ZONE_LABEL[z]} · {ZONE_TITLE[z].split(" (")[0]}</option>)}
-          </select>
-          <div className="tabs" role="tablist" aria-label="View">
+          <LiveClock fresh={fresh} zone={zone} onZone={setZone} />
+          <div className="tabs ops-views" role="tablist" aria-label="View">
             {([["live", "Live"], ["health", "Health"], ["history", "History"]] as [Tab, string][]).map(([v, l]) => (
               <button key={v} type="button" role="tab" className="tab" aria-selected={tab === v}
                 onClick={() => set({ tab: v === "live" ? null : v, view: null })}>{l}</button>

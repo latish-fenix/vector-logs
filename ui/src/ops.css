@@ -4,16 +4,55 @@
 .ops-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
 .ops-head .grow { display: flex; flex-direction: column; gap: 4px; min-width: 240px; }
 .ops-head .sub { font-size: 13.5px; }
-.ops-head-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.ops-live { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-radius: 999px;
-  border: 1px solid var(--border); background: var(--surface); font-size: 12.5px; color: var(--text-2); white-space: nowrap; }
-.ops-live strong { font-variant-numeric: tabular-nums; color: var(--text); }
-.ops-live .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); position: relative; flex-shrink: 0; }
-.ops-live .pulse::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--green); opacity: 0; animation: ops-pulse 2s ease-out infinite; }
-.ops-live.late .pulse { background: var(--yellow); } .ops-live.late .pulse::after { border-color: var(--yellow); }
-.ops-live.down .pulse { background: var(--red); } .ops-live.down .pulse::after { display: none; }
+.ops-head-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* live clock + time zone (one control) */
+.ops-clock-wrap { position: relative; }
+.ops-clock { display: inline-flex; align-items: center; gap: 9px; height: 42px; padding: 0 12px 0 14px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2); font: 500 13px var(--font-sans);
+  cursor: pointer; white-space: nowrap; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); transition: border-color .15s, box-shadow .15s; }
+.ops-clock:hover { border-color: var(--border-strong); box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08); }
+.ops-clock:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+.ops-clock[aria-expanded="true"] { border-color: var(--accent-soft-border); box-shadow: 0 0 0 3px var(--accent-soft); }
+.ops-clock .word { font-weight: 600; color: var(--green-text, var(--green)); letter-spacing: .01em; }
+.ops-clock.late .word { color: var(--yellow-text, var(--yellow)); }
+.ops-clock.down .word { color: var(--red-text, var(--red)); }
+.ops-clock.wait .word { color: var(--muted); }
+.ops-clock .sep { width: 1px; height: 18px; background: var(--border); }
+.ops-clock .time { font: 700 16px var(--font-sans); color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.ops-clock .zn { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: var(--accent-text); background: var(--accent-soft);
+  border: 1px solid var(--accent-soft-border); border-radius: 6px; padding: 2px 6px; }
+.ops-clock .caret { color: var(--muted); transition: transform .15s; }
+.ops-clock[aria-expanded="true"] .caret { transform: rotate(180deg); }
+.ops-clock .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); position: relative; flex-shrink: 0; }
+.ops-clock .pulse::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--green); opacity: 0; animation: ops-pulse 2s ease-out infinite; }
+.ops-clock.late .pulse { background: var(--yellow); } .ops-clock.late .pulse::after { border-color: var(--yellow); }
+.ops-clock.down .pulse { background: var(--red); } .ops-clock.down .pulse::after, .ops-clock.wait .pulse::after { display: none; }
+.ops-clock.wait .pulse { background: var(--faint); }
+
+.ops-zone-menu { position: absolute; right: 0; top: calc(100% + 8px); z-index: 30; width: 300px; padding: 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16), 0 2px 6px rgba(15, 23, 42, 0.06); animation: ops-menu-in .12s ease-out; }
+@keyframes ops-menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.ops-zone-menu-head { padding: 8px 10px 6px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.ops-zone-item { display: grid; grid-template-columns: 44px 1fr auto 18px; align-items: center; gap: 10px; width: 100%; padding: 9px 10px;
+  border: 0; border-radius: 10px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.ops-zone-item:hover, .ops-zone-item:focus-visible { background: var(--surface-3); outline: none; }
+.ops-zone-item[aria-selected="true"] { background: var(--accent-soft); }
+.ops-zone-item .code { display: inline-flex; justify-content: center; padding: 4px 0; border-radius: 7px; font-size: 12px; font-weight: 700;
+  letter-spacing: .05em; background: var(--surface-3); color: var(--text-2); }
+.ops-zone-item[aria-selected="true"] .code { background: var(--accent); color: #fff; }
+.ops-zone-item .what { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ops-zone-item .place { font-size: 14px; font-weight: 600; }
+.ops-zone-item .off { font-size: 12px; color: var(--muted); }
+.ops-zone-item .now { font: 600 14px var(--font-sans); font-variant-numeric: tabular-nums; color: var(--text-2); }
+.ops-zone-item .tick { color: var(--accent); display: inline-flex; }
+.ops-zone-menu-foot { margin: 6px 4px 2px; padding: 9px 8px 4px; border-top: 1px solid var(--border); font-size: 12px; line-height: 1.45; color: var(--muted); }
+
+.ops-views { height: 42px; align-items: center; border-radius: 12px; }
+.ops-views .tab { min-height: 34px; border-radius: 9px; }
 @keyframes ops-pulse { 0% { transform: scale(0.6); opacity: 0.7; } 100% { transform: scale(1.6); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .ops-live .pulse::after { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .ops-clock .pulse::after, .ops-zone-menu { animation: none; } }
 
 /* ---- hero cards */
 .ops-hero-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
@@ -122,7 +161,6 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .ops-now-label { fill: var(--faint); font: 600 10.5px var(--font-sans); text-transform: uppercase; letter-spacing: 0.05em; }
 
 /* ---- IST / UTC switch */
-.ops-zone { width: auto; min-width: 0; font-weight: 600; }
 
 /* ---- top stages inside the API hero (same rows as the order services) */
 .ops-hero-fill { flex: 1; }
@@ -140,4 +178,7 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
   .ops-big { font-size: 32px; }
   .ops-attn-row { grid-template-columns: 14px minmax(0, 1fr) auto; }
   .ops-attn-row .why { grid-column: 2 / 4; }
+}
+@media (max-width: 720px) {
+  .ops-zone-menu { left: 0; right: auto; width: min(300px, calc(100vw - 32px)); }
 }
