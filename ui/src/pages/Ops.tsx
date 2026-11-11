@@ -1,9 +1,9 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
-import { get, type OpsHealth, type OpsHistory, type OpsStatus, type OpsSummary } from "../api";
+import { get, type OpsHealth, type OpsRange, type OpsStatus, type OpsSummary } from "../api";
 import { Icon } from "../components/icons";
-import { bucket, clock, clockZ, cumulative, dayIn, Legend, LineChart, localStamp, offsetMs, Spark, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
+import { bucket, clock, clockZ, cumulative, dateLabel, dayIn, Legend, LineChart, localStamp, offsetMs, Spark, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
 import { Callout, Empty, ErrorCallout, Loading, SearchSelect, downloadFile } from "../components/ui";
 import { ago, num } from "../format";
@@ -15,7 +15,7 @@ import "../ops.css";
 // switch in the header (IST, PST or EST, remembered per browser): a day runs midnight to midnight there.
 
 type Tab = "live" | "health" | "history";
-interface Fresh { asOf: number | null; ageMs: number | null; stale: boolean; error: string | null }
+interface Fresh { asOf: number | null; ageMs: number | null; stale: boolean; error: string | null; past?: boolean }
 
 const C_NOW = "var(--accent)";
 const C_LW = "var(--faint)";
@@ -131,9 +131,9 @@ function LiveClock({ fresh, zone, onZone }: { fresh: Fresh | null; zone: ClockZo
   const at = fresh?.asOf ?? null;
   const ref = at ?? Date.now();
   const late = !!fresh && (fresh.stale || !!fresh.error);
-  const state = !fresh ? "wait" : at === null ? "down" : late ? "late" : "ok";
+  const state = !fresh ? "wait" : fresh.past ? "past" : at === null ? "down" : late ? "late" : "ok";
   const mins = fresh?.ageMs === null || fresh?.ageMs === undefined ? null : Math.round(fresh.ageMs / 60_000);
-  const word = { wait: "Loading", down: "No data yet", late: mins !== null ? `Delayed ${mins} min` : "Delayed", ok: "Live" }[state];
+  const word = { wait: "Loading", past: "Past range", down: "No data yet", late: mins !== null ? `Delayed ${mins} min` : "Delayed", ok: "Live" }[state];
   const pick = (z: ClockZone) => { onZone(z); setOpen(false); };
   const onKey = (e: ReactKeyboardEvent) => {
     const i = items.current.findIndex((el) => el === document.activeElement);
@@ -147,7 +147,7 @@ function LiveClock({ fresh, zone, onZone }: { fresh: Fresh | null; zone: ClockZo
   return (
     <div className="ops-clock-wrap" ref={wrap} onKeyDown={onKey}>
       <button type="button" className={`ops-clock ${state}`} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}
-        title={fresh?.error ?? (at !== null ? `Data to ${clockZ(at, zone, true)}. Copied from CloudWatch every 5 minutes; the page refreshes every minute.` : "Change the time zone")}>
+        title={fresh?.error ?? (fresh?.past ? "A past range: the numbers don't change. Click to change the time zone." : at !== null ? `Data to ${clockZ(at, zone, true)}. Copied from CloudWatch every 5 minutes; the page refreshes every minute.` : "Change the time zone")}>
         <span className="pulse" aria-hidden="true" />
         <span className="word">{word}</span>
         <span className="sep" aria-hidden="true" />
@@ -186,7 +186,7 @@ export function Ops() {
     for (const [k, v] of Object.entries(patch)) (v ? n.set(k, v) : n.delete(k));
     setParams(n, { replace: false });
   };
-  const openStage = (id: string) => set({ tab: "history", stage: id, day: null, minutes: null, view: null });
+  const openStage = (id: string) => set({ tab: "history", stage: id, minutes: null, view: null });
   return (
     <ZoneCtx.Provider value={zone}>
     <Page crumbs={[{ label: "Ops dashboard" }]} title="Ops dashboard" wide>
@@ -207,7 +207,7 @@ export function Ops() {
       </div>
       {tab === "live" && <Live onStage={openStage} onHealth={() => set({ tab: "health", view: "problems" })} onFresh={setFresh} />}
       {tab === "health" && <HealthTab params={params} set={set} onStage={openStage} onFresh={setFresh} />}
-      {tab === "history" && <History params={params} set={set} />}
+      {tab === "history" && <History params={params} set={set} onFresh={setFresh} />}
     </Page>
     </ZoneCtx.Provider>
   );
@@ -560,59 +560,162 @@ function ChartCard({ title, sub, series, ...rest }: { title: string; sub: string
   );
 }
 
-function History({ params, set }: { params: URLSearchParams; set: (p: Record<string, string | null>) => void }) {
+type Preset = "1h" | "6h" | "24h" | "today" | "yesterday" | "7d" | "30d" | "custom";
+const PRESETS: [Preset, string][] = [["1h", "1 h"], ["6h", "6 h"], ["24h", "24 h"], ["today", "Today"], ["yesterday", "Yesterday"], ["7d", "7 days"], ["30d", "30 days"]];
+const MAX_DAYS = 31;
+const H = 3600_000;
+
+/** Epoch ms of a wall-clock time in the zone. */
+function zonedMs(y: number, mo: number, d: number, h: number, mi: number, zone: ClockZone): number {
+  const guess = Date.UTC(y, mo - 1, d, h, mi);
+  const first = guess - offsetMs(guess, zone);
+  return guess - offsetMs(first, zone);
+}
+function midnight(day: string, zone: ClockZone): number {
+  const [y, mo, d] = day.split("-").map(Number);
+  return zonedMs(y, mo, d, 0, 0, zone);
+}
+/** "2026-11-11T09:30" for <input type="datetime-local">, in the zone. */
+function toInput(ms: number, zone: ClockZone): string {
+  return localStamp(ms, zone).slice(0, 16);
+}
+function fromInput(v: string, zone: ClockZone): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(v);
+  return m ? zonedMs(+m[1], +m[2], +m[3], +m[4], +m[5], zone) : null;
+}
+function presetRange(p: Preset, zone: ClockZone, now: number): [number, number] {
+  const today = midnight(dayIn(zone, now), zone);
+  switch (p) {
+    case "1h": return [now - H, now];
+    case "6h": return [now - 6 * H, now];
+    case "24h": return [now - 24 * H, now];
+    case "yesterday": return [midnight(dayIn(zone, today - 1), zone), today];
+    case "7d": return [now - 7 * 24 * H, now];
+    case "30d": return [now - 30 * 24 * H, now];
+    default: return [today, now];
+  }
+}
+const spanText = (ms: number) => {
+  const m = Math.round(ms / 60_000);
+  if (m < 60) return `${m} min`;
+  if (m < 48 * 60) return `${+(m / 60).toFixed(1)} h`;
+  return `${+(m / 1440).toFixed(1)} days`;
+};
+const stepText = (step: number) => (step === 60_000 ? "per minute" : step < H ? `per ${step / 60_000} minutes` : "per hour");
+
+type SortKey = "name" | "calls" | "share" | "err4xxPct" | "err5xxPct" | "p50" | "p95" | "integrationP95" | "gatewayMs";
+
+function History({ params, set, onFresh }: { params: URLSearchParams; set: (p: Record<string, string | null>) => void; onFresh: (f: Fresh) => void }) {
   const zone = useZone();
-  const today = dayIn(zone);
-  const day = params.get("day") || today;
+  const preset = (params.get("range") as Preset) || "today";
   const stage = params.get("stage") || "";
   const service = params.get("service") || "";
   const store = params.get("store") || "";
-  const isToday = day === today;
+  // presets that end "now" move forward every minute
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 60_000) * 60_000);
+  const live = preset !== "custom" && preset !== "yesterday";
+  useEffect(() => {
+    if (!live) return;
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 60_000) * 60_000), 60_000);
+    return () => clearInterval(t);
+  }, [live]);
+  const [from, to] = preset === "custom"
+    ? [Number(params.get("from")) || now - 24 * H, Number(params.get("to")) || now]
+    : presetRange(preset, zone, now);
+  const [fromText, setFromText] = useState(toInput(from, zone));
+  const [toText, setToText] = useState(toInput(to, zone));
+  useEffect(() => { setFromText(toInput(from, zone)); setToText(toInput(to, zone)); }, [from, to, zone]);
+  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "calls", desc: true });
+  const [all, setAll] = useState(false);
+
   const q = useQuery({
-    queryKey: ["ops-history", day, stage, service, store, zone],
-    queryFn: () => get<OpsHistory>("/ops/history", { day, stage, service, store, zone: zone.toUpperCase() }),
-    refetchInterval: isToday ? 60_000 : false, retry: false, placeholderData: keepPreviousData,
+    queryKey: ["ops-range", from, to, stage, service, store, zone],
+    queryFn: () => get<OpsRange>("/ops/range", { from, to, stage, service, store, zone: zone.toUpperCase() }),
+    retry: false, placeholderData: keepPreviousData, staleTime: 30_000,
   });
   const d = q.data;
+  useEffect(() => {
+    if (!d) return;
+    const at = d.api.asOf;
+    const age = at === null ? null : Math.max(0, Date.now() - at - 60_000);
+    onFresh(live ? { asOf: at, ageMs: age, stale: age === null || age > 15 * 60_000, error: null } : { asOf: at, ageMs: null, stale: false, error: null, past: true });
+  }, [d, live, onFresh]);
+
+  const fFrom = fromInput(fromText, zone), fTo = fromInput(toText, zone);
+  const customErr = fFrom === null || fTo === null ? "Pick both times" : fTo <= fFrom ? "The end must be after the start"
+    : fTo - fFrom > MAX_DAYS * 24 * H ? `Pick at most ${MAX_DAYS} days` : null;
+  const dirty = fFrom !== from || fTo !== to;
+  const apply = () => { if (!customErr && fFrom !== null && fTo !== null) set({ range: "custom", from: String(fFrom), to: String(fTo) }); };
+
   const stageOpts = useMemo(() => (d?.stages ?? []).map((s) => ({ value: s.id, label: `${s.name} · ${s.api}` })), [d]);
   const storeOpts = useMemo(() => {
     const seen = new Map<string, string>();
-    for (const s of d?.stores ?? []) if (!service || s.service === service) seen.set(s.store, s.name);
+    for (const s of d?.orders.stores ?? []) if (!service || s.service === service) seen.set(s.store, s.name);
     return [...seen].map(([value, label]) => ({ value, label: label === value ? value : `${label} · ${value}` }));
   }, [d, service]);
+  const rows = useMemo(() => {
+    const list = [...(d?.stages ?? [])];
+    const k = sort.key;
+    list.sort((x, y) => {
+      const a = x[k], b = y[k];
+      if (a === b) return y.calls - x.calls;
+      if (a === null || a === undefined) return 1;
+      if (b === null || b === undefined) return -1;
+      const c = typeof a === "string" ? a.localeCompare(b as string) : (a as number) - (b as number);
+      return sort.desc ? -c : c;
+    });
+    return list;
+  }, [d, sort]);
 
   const exportCsv = () => {
     if (!d) return;
-    const a = d.api, o = d.orders;
-    const head = [`minute_${zone}`, "minute_utc", "calls", "err_4xx", "err_5xx", "p95_ms", "integration_p95_ms", "calls_last_week", "p95_ms_last_week", "orders", "orders_last_week"];
-    const lines = [head.join(",")];
-    for (let i = 0; i < a.calls.length; i++) {
-      const t = new Date(a.start + i * 60_000).toISOString().slice(0, 16) + "Z";
-      lines.push([localStamp(a.start + i * 60_000, zone), t, a.calls[i] ?? "", a.err4xx[i] ?? "", a.err5xx[i] ?? "", a.p95[i] ?? "", a.integrationP95[i] ?? "", a.lastWeek?.calls[i] ?? "", a.lastWeek?.p95[i] ?? "",
-        o.minutes?.[i] ?? "", o.lastWeek?.[i] ?? ""].join(","));
-    }
-    const name = ["ops", day, zone, stage.replace(/[^\w.-]+/g, "_"), service, store.replace(/[^\w.-]+/g, "_")].filter(Boolean).join("-");
-    downloadFile(`${name}.csv`, lines.join("\n") + "\n", "text/csv");
+    const head = ["from", "to", "stage_id", "api", "stage", "name", "calls", "share_pct", "err_4xx", "err_4xx_pct", "err_5xx", "err_5xx_pct", "p50_ms", "p95_ms", "backend_p95_ms", "gateway_ms"];
+    const esc = (v: unknown) => { const t = v === null || v === undefined ? "" : String(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+    const f = localStamp(d.from, zone), t = localStamp(d.to, zone);
+    const lines = [head.join(","), ...rows.map((r) => [f, t, r.id, r.api, r.stage, r.name, r.calls, r.share, r.err4xx, r.err4xxPct, r.err5xx, r.err5xxPct, r.p50, r.p95, r.integrationP95, r.gatewayMs].map(esc).join(","))];
+    downloadFile(`ops-stages-${toInput(d.from, zone).replace(/[:T]/g, "")}-${toInput(d.to, zone).replace(/[:T]/g, "")}-${zone}.csv`, lines.join("\n") + "\n", "text/csv");
   };
 
   const a = d?.api;
-  const sum = (v: (number | null)[] | null | undefined, upto = Infinity) => (v ?? []).slice(0, upto).reduce<number>((x, y) => x + (y ?? 0), 0);
-  const known = (v: (number | null)[] | null | undefined) => { const arr = v ?? []; let n = arr.length; while (n > 0 && arr[n - 1] === null) n--; return n; };
-  const apiUpto = a ? a.shownMinutes : Infinity;
-  const ordUpto = d?.orders.minutes && isToday ? known(d.orders.minutes) : Infinity;
-  const calls = a ? sum(a.calls) : 0, callsLw = a?.lastWeek ? sum(a.lastWeek.calls, apiUpto) : null;
-  const orders = d?.orders.total ?? null, ordersLw = d?.orders.lastWeek ? sum(d.orders.lastWeek, ordUpto) : null;
-  const chg = (x: number | null, y: number | null) => (x === null || !y ? null : (100 * (x - y)) / y);
-  const nowAt = isToday && a ? a.start + Math.max(0, apiUpto - 1) * 60_000 : null;
-  const by = isToday ? "by this time last week" : "same day last week";
+  const sel = stage ? stageOpts.find((s) => s.value === stage)?.label.split(" · ")[0] ?? stage : null;
+  const longWait = to - from > 3 * 24 * H;
+  const shown = all ? rows : rows.slice(0, 25);
+  const nowAt = d && live ? a?.asOf ?? null : null;
+  const Th = ({ k, children, num: isNum = true, title }: { k: SortKey; children: ReactNode; num?: boolean; title?: string }) => (
+    <th className={isNum ? "num" : undefined} aria-sort={sort.key === k ? (sort.desc ? "descending" : "ascending") : "none"} title={title}>
+      <button type="button" className={`ops-sort ${sort.key === k ? "on" : ""}`} onClick={() => setSort({ key: k, desc: sort.key === k ? !sort.desc : k !== "name" })}>
+        {children}<span className="ar" aria-hidden="true">{sort.key === k ? (sort.desc ? "↓" : "↑") : "↕"}</span>
+      </button>
+    </th>
+  );
 
   return (
     <>
-      <section className="card">
+      <section className="card ops-range-card">
+        <div className="ops-range-top">
+          <div className="tabs ops-presets" role="group" aria-label="Time range">
+            {PRESETS.map(([k, l]) => (
+              <button key={k} type="button" className="tab" aria-pressed={preset === k} aria-selected={preset === k}
+                onClick={() => set({ range: k === "today" ? null : k, from: null, to: null })}>{l}</button>
+            ))}
+            <button type="button" className="tab" aria-pressed={preset === "custom"} aria-selected={preset === "custom"} onClick={apply} disabled={!!customErr}>Custom</button>
+          </div>
+          <div className="ops-range-pick">
+            <label className="ops-dt"><span>From</span>
+              <input type="datetime-local" className="input" value={fromText} max={toText} onChange={(e) => setFromText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") apply(); }} />
+            </label>
+            <span className="ops-dt-arrow" aria-hidden="true">→</span>
+            <label className="ops-dt"><span>To</span>
+              <input type="datetime-local" className="input" value={toText} min={fromText} onChange={(e) => setToText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") apply(); }} />
+            </label>
+            <span className="ops-dt-zone" title={ZONE_TITLE[zone]}>{zoneName(from, zone)}</span>
+            {dirty && <button type="button" className="btn btn-primary btn-sm" onClick={apply} disabled={!!customErr} title={customErr ?? "Show this range"}>Apply</button>}
+          </div>
+        </div>
+        {dirty && customErr && <div className="ops-range-err">{customErr}</div>}
         <div className="ops-toolbar">
-          <label className="field" title={`Midnight to midnight, ${ZONE_TITLE[zone]}`}>Day ({ZONE_LABEL[zone]})
-            <input type="date" className="input" value={day} max={today} onChange={(e) => set({ day: e.target.value && e.target.value !== today ? e.target.value : null })} />
-          </label>
           <SearchSelect id="ops-stage" label="Stage" value={stage} options={stageOpts} allLabel="All stages" onChange={(v) => set({ stage: v || null })} maxWidth={340} />
           <select aria-label="Order service" className="select" value={service} onChange={(e) => set({ service: e.target.value || null, store: null })}>
             <option value="">All order services</option>
@@ -620,42 +723,79 @@ function History({ params, set }: { params: URLSearchParams; set: (p: Record<str
           </select>
           <SearchSelect id="ops-store" label="Store" value={store} options={storeOpts} allLabel="All stores" onChange={(v) => set({ store: v || null })} maxWidth={300} />
           <div className="grow" />
-          <button type="button" className="btn btn-sm" onClick={exportCsv} disabled={!d}><Icon name="download" size={15} /> Download CSV</button>
+          <span className="hint ops-range-span">{dateLabel(from, zone)} {clock(from, zone)} – {dateLabel(to, zone)} {clock(to, zone)} {zoneName(to, zone)} · {spanText(to - from)}</span>
+          <button type="button" className="btn btn-sm" onClick={exportCsv} disabled={!d || !d.stages.length} title="Every stage's numbers for this range"><Icon name="download" size={15} /> Download CSV</button>
         </div>
         {d && a && (
-          <div className="ops-stats">
-            <Mini label={stage ? `Calls · ${stageOpts.find((s) => s.value === stage)?.label.split(" · ")[0] ?? stage}` : "Calls · all stages"} value={num(calls)}
-              note={callsLw !== null ? `${num(callsLw)} ${by}` : "no last week"} />
-            <Mini label="Calls vs last week" value={<Delta value={chg(calls, callsLw)} />} note={isToday ? <>to <T ms={nowAt} /></> : "whole day"} />
+          <div className="ops-stats ops-stats-5">
+            <Mini label={sel ? `Calls · ${sel}` : "Calls · all stages"} value={num(a.calls)} note={a.asOf ? <>data to <T ms={a.asOf} /></> : "no data in this range"} />
+            <Mini label="4xx rate" value={pct(share(a.err4xx, a.calls), 2)} note={`${num(a.err4xx)} client errors`} />
+            <Mini label="5xx rate" value={pct(share(a.err5xx, a.calls), 2)} note={`${num(a.err5xx)} server errors`} />
+            <Mini label="p95 latency" value={ms(a.p95)} note="weighted by calls" />
             <Mini label={`Orders · ${store ? storeOpts.find((s) => s.value === store)?.label.split(" · ")[0] ?? store : service || "all services"}`}
-              value={d.orders.counted ? num(orders) : "—"} note={d.orders.counted ? (ordersLw !== null ? `${num(ordersLw)} ${by}` : "no last week") : "not counted (kept 15 days)"} />
-            <Mini label="Orders vs last week" value={<Delta value={chg(orders, ordersLw)} />} note={isToday ? "same cut-off" : "whole day"} />
+              value={d.orders.counted ? num(d.orders.total) : "—"} note={d.orders.counted ? (d.orders.missingDays.length ? "part of the range" : "unique order ids") : `kept ${d.orders.keptDays} days`} />
           </div>
         )}
       </section>
-      {q.isLoading ? <section className="card"><Loading /></section>
+      {q.isLoading ? <section className="card"><Loading what={longWait ? `Reading ${spanText(to - from)} of numbers… the first time can take up to a minute` : "Reading the numbers…"} /></section>
         : q.error || !d || !a ? <section className="card"><div className="card-body"><ErrorCallout error={q.error} /></div></section> : (
           <>
-            {!a.hasData && <Callout tone="neutral" title="No API Gateway numbers for this day">The per-minute copies start on 1 Nov 2026.</Callout>}
-            <div className="ops-charts">
-              <ChartCard title="API calls" sub="per 5 minutes" start={a.start} step={300_000} fmt={compact} nowAt={nowAt}
-                series={[{ key: "now", label: isToday ? "Today" : day, color: C_NOW, values: bucket(a.calls, 5), area: true },
-                  ...(a.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: bucket(a.lastWeek.calls, 5), dashed: true }] : [])]} />
-              {d.orders.counted ? (
-                <ChartCard title="Orders" sub="per 15 minutes" start={a.start} step={900_000} fmt={compact} nowAt={nowAt}
-                  series={[{ key: "now", label: isToday ? "Today" : day, color: C_NOW, values: bucket(d.orders.minutes, 15), area: true },
-                    ...(d.orders.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: bucket(d.orders.lastWeek, 15), dashed: true }] : [])]} />
+            {!a.hasData && <Callout tone="neutral" title="No API Gateway numbers in this range">The per-minute copies start on 1 Nov 2026.</Callout>}
+            {d.orders.counted && d.orders.missingDays.length > 0 && (
+              <Callout tone="neutral" title="Orders are only counted for part of this range">Orders are kept for the last {d.orders.keptDays} days; not counted: {d.orders.missingDays[0]}{d.orders.missingDays.length > 1 ? ` to ${d.orders.missingDays[d.orders.missingDays.length - 1]}` : ""} (UTC days).</Callout>
+            )}
+            <div className={`ops-charts ${q.isFetching ? "ops-fetching" : ""}`}>
+              <ChartCard title="API calls" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} nowAt={nowAt}
+                series={[{ key: "now", label: sel ?? "All stages", color: C_NOW, values: a.series.calls, area: true }]} />
+              {d.orders.series ? (
+                <ChartCard title="Orders" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} nowAt={nowAt}
+                  series={[{ key: "now", label: store || service || "All services", color: C_NOW, values: d.orders.series, area: true }]} />
               ) : (
-                <section className="card"><CardHead title="Orders" sub="per 15 minutes" /><Empty title="Orders were not counted for this day">Orders are kept for the last 15 days.</Empty></section>
+                <section className="card"><CardHead title="Orders" sub={stepText(d.step)} /><Empty title="Orders were not counted for this range">Orders are kept for the last {d.orders.keptDays} days.</Empty></section>
               )}
-              <ChartCard title="Errors" sub="per 5 minutes" start={a.start} step={300_000} fmt={compact} nowAt={nowAt}
-                series={[{ key: "4xx", label: "4xx", color: C_4XX, values: bucket(a.err4xx, 5) }, { key: "5xx", label: "5xx", color: C_5XX, values: bucket(a.err5xx, 5) },
-                  ...(a.lastWeek ? [{ key: "5lw", label: "5xx last week", color: C_LW, values: bucket(a.lastWeek.err5xx, 5), dashed: true }] : [])]} />
-              <ChartCard title="Latency p95" sub="average of the minute p95s, per 5 minutes" start={a.start} step={300_000} fmt={(v) => ms(v)} nowAt={nowAt}
-                series={[{ key: "p95", label: "p95", color: C_NOW, values: bucket(a.p95, 5, "avg") },
-                  { key: "backend", label: "Backend", color: C_BACKEND, values: bucket(a.integrationP95, 5, "avg") },
-                  ...(a.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: bucket(a.lastWeek.p95, 5, "avg"), dashed: true }] : [])]} />
+              <ChartCard title="Errors" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} nowAt={nowAt}
+                series={[{ key: "4xx", label: "4xx", color: C_4XX, values: a.series.err4xx }, { key: "5xx", label: "5xx", color: C_5XX, values: a.series.err5xx }]} />
+              <ChartCard title="Latency p95" sub={`${stepText(d.step)}, weighted by calls`} start={d.start} step={d.step} fmt={(v) => ms(v)} nowAt={nowAt}
+                series={[{ key: "p95", label: "p95", color: C_NOW, values: a.series.p95 }, { key: "backend", label: "Backend", color: C_BACKEND, values: a.series.integrationP95 }]} />
             </div>
+
+            <section className="card" style={{ overflow: "hidden" }}>
+              <CardHead title={`Stages · ${rows.length}`} sub={`${spanText(d.to - d.from)} · click a column to sort, a row to chart only that stage`}
+                right={<button type="button" className="btn btn-ghost btn-sm" onClick={exportCsv} disabled={!rows.length}><Icon name="download" size={15} /> CSV</button>} />
+              {rows.length === 0 ? <Empty title="No calls in this range" /> : (
+                <div className="table-scroll" style={{ maxHeight: "none" }}>
+                  <table className="table ops-table">
+                    <thead>
+                      <tr>
+                        <Th k="name" num={false}>Stage</Th><Th k="calls">Calls</Th><Th k="share">Share</Th><Th k="err4xxPct">4xx</Th><Th k="err5xxPct">5xx</Th>
+                        <Th k="p50">p50</Th><Th k="p95">p95</Th><Th k="integrationP95" title="IntegrationLatency p95: time spent in the backend">Backend p95</Th>
+                        <Th k="gatewayMs" title="p95 minus backend p95: roughly the time API Gateway itself adds">Gateway</Th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shown.map((s) => (
+                        <tr key={s.id} className={`clickable ${stage === s.id ? "selected" : ""}`} tabIndex={0} aria-selected={stage === s.id}
+                          onClick={() => set({ stage: stage === s.id ? null : s.id })} onKeyDown={(e) => { if (e.key === "Enter") set({ stage: stage === s.id ? null : s.id }); }}
+                          title={stage === s.id ? "Show all stages in the charts" : "Chart only this stage"}>
+                          <td><div className="stage"><div><div className="nm">{s.name}</div><div className="sub" title={s.api}>{s.api}</div></div></div></td>
+                          <td className="num" style={{ fontWeight: 600 }}>{num(s.calls)}</td>
+                          <td className="num"><span className="ops-share"><span className="ops-bar"><span style={{ width: `${Math.min(100, s.share ?? 0)}%` }} /></span><span className="pc">{pct(s.share)}</span></span></td>
+                          <td className="num">{s.err4xx ? pct(s.err4xxPct, 2) : <span className="dim">0</span>}</td>
+                          <td className="num">{s.err5xx ? <span className={s.err5xxPct !== null && s.err5xxPct >= 1 ? "danger-text" : s.err5xxPct !== null && s.err5xxPct >= 0.5 ? "warn-text" : ""}>{pct(s.err5xxPct, 2)}</span> : <span className="dim">0</span>}</td>
+                          <td className="num">{ms(s.p50)}</td>
+                          <td className="num">{ms(s.p95)}</td>
+                          <td className="num">{ms(s.integrationP95)}</td>
+                          <td className="num">{ms(s.gatewayMs)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {rows.length > 25 && (
+                <div className="card-foot"><button type="button" className="btn btn-ghost btn-sm" onClick={() => setAll(!all)}>{all ? "Show the top 25" : `Show all ${rows.length} stages`}</button></div>
+              )}
+            </section>
           </>
         )}
     </>

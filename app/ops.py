@@ -54,6 +54,9 @@ STALE_MS = 15 * MIN           # API numbers older than this are shown as stale (
 ORDERS_FINAL_MS = 3 * 3600_000  # a day's logs are read for the last time this long after it ends
 KEEP_DAYS = 15                # order counts kept on disk
 STATE_VERSION = 1
+RANGE_MAX_DAYS = 31           # History: the longest range that can be picked
+# bucket size for the charts of a range: up to 6 h per minute, 2 days per 5 min, 8 days per 15 min, then hourly
+RANGE_STEPS = ((6 * 3600_000, MIN), (2 * DAY, 5 * MIN), (8 * DAY, 15 * MIN), (RANGE_MAX_DAYS * DAY, 60 * MIN))
 
 CSV_COLUMNS = ("{'minute': 'VARCHAR', 'api': 'VARCHAR', 'stage': 'VARCHAR', 'calls': 'BIGINT', "
                "'err_4xx': 'BIGINT', 'err_5xx': 'BIGINT', 'latency_p50_ms': 'DOUBLE', "
@@ -1012,6 +1015,150 @@ class OpsService:
             "stores": sorted(({"service": k[0], "store": k[1], "name": cfg.name(k[1]), "count": c}
                               for k, c in (all_orders or {"stores": {}})["stores"].items()), key=lambda s: -s["count"]),
         }
+
+    # -- any time range (History tab)
+    def time_range(self, start_ms: int, end_ms: int, zone: str = "UTC", stage: str | None = None,
+              service: str | None = None, store: str | None = None) -> dict:
+        """Every stage's calls, errors and latency between two times, the totals over time in buckets
+        that fit the range, and the orders first seen in it. At most RANGE_MAX_DAYS long."""
+        now = self.now()
+        now_ms = int(now.timestamp() * 1000)
+        zone = zone_key(zone)
+        start, end = int(start_ms) // MIN * MIN, -(-int(end_ms) // MIN) * MIN
+        end = min(end, -(-now_ms // MIN) * MIN)
+        if end <= start:
+            raise bad_request("INVALID_RANGE", "The end must be after the start (and not in the future)")
+        if end - start > RANGE_MAX_DAYS * DAY:
+            raise bad_request("RANGE_TOO_LARGE", f"Pick at most {RANGE_MAX_DAYS} days")
+        cfg = self.config.get()
+        if service and not cfg.service(service):
+            raise bad_request("UNKNOWN_SERVICE", f"No order service called '{service}'")
+        span = end - start
+        step = next(st for lim, st in RANGE_STEPS if span <= lim)
+        tz = ZoneInfo(ZONES[zone])
+        off = int(datetime.fromtimestamp(start / 1000, tz).utcoffset().total_seconds() * 1000)
+        first = (start + off) // step * step - off        # buckets on round times in the zone
+        nb = -(-(end - first) // step)
+        con = duckdb.connect(config={"threads": 2, "memory_limit": "512MB"})
+        try:
+            paths = self.metrics.paths(start, end, now_ms)
+            rows = []
+            if paths:
+                rows = con.execute(
+                    "SELECT api, stage, (t - ?) // ?, sum(calls), sum(e4), sum(e5), "
+                    "sum(p50 * calls) FILTER (WHERE p50 IS NOT NULL), sum(calls) FILTER (WHERE p50 IS NOT NULL), "
+                    "sum(p95 * calls) FILTER (WHERE p95 IS NOT NULL), sum(calls) FILTER (WHERE p95 IS NOT NULL), "
+                    "sum(ip95 * calls) FILTER (WHERE ip95 IS NOT NULL), sum(calls) FILTER (WHERE ip95 IS NOT NULL), max(t) "
+                    "FROM (SELECT epoch_ms(strptime(minute, '%Y-%m-%dT%H:%MZ')) AS t, api, stage, coalesce(calls, 0) AS calls, "
+                    "coalesce(err_4xx, 0) AS e4, coalesce(err_5xx, 0) AS e5, latency_p50_ms AS p50, latency_p95_ms AS p95, "
+                    f"integration_p95_ms AS ip95 FROM read_csv(?, header=true, columns={CSV_COLUMNS}, compression='gzip')) "
+                    "WHERE t >= ? AND t < ? GROUP BY 1, 2, 3", [first, step, paths, start, end]).fetchall()
+        finally:
+            con.close()
+        # per stage (whole range) and per bucket (all stages, or the chosen one)
+        keys = ("calls", "e4", "e5", "p50w", "p50n", "p95w", "p95n", "ip95w", "ip95n")
+        per_stage: dict[tuple[str, str], list[float]] = {}
+        series = [[0.0] * len(keys) for _ in range(nb)]
+        as_of = None
+        want = stage.rpartition("/")[::2] if stage else None
+        for api_n, st_n, b, *vals in rows:
+            newest = vals.pop()
+            vals = [float(v or 0) for v in vals]
+            acc = per_stage.setdefault((api_n, st_n), [0.0] * len(keys))
+            for i, v in enumerate(vals):
+                acc[i] += v
+            as_of = newest if as_of is None or newest > as_of else as_of
+            if (want is None or (api_n, st_n) == want) and 0 <= b < nb:
+                for i, v in enumerate(vals):
+                    series[int(b)][i] += v
+        w = lambda a, i: _r(a[i] / a[i + 1]) if a[i + 1] else None  # noqa: E731
+        total = sum(a[0] for a in per_stage.values())
+        stages = []
+        for (api_n, st_n), a in per_stage.items():
+            calls = int(a[0])
+            p95, ip95 = w(a, 5), w(a, 7)
+            stages.append({"id": f"{api_n}/{st_n}", "api": api_n, "stage": st_n, "name": cfg.name(st_n), "calls": calls,
+                           "share": round(100.0 * calls / total, 2) if total else None,
+                           "err4xx": int(a[1]), "err5xx": int(a[2]), "err4xxPct": _pct(a[1], calls), "err5xxPct": _pct(a[2], calls),
+                           "p50": w(a, 3), "p95": p95, "integrationP95": ip95,
+                           "gatewayMs": round(p95 - ip95, 1) if p95 is not None and ip95 is not None else None})
+        stages.sort(key=lambda r: -r["calls"])
+        last_b = None if as_of is None else (as_of - first) // step
+        # sums of a bucket the range only partly covers (first / last) would look like a drop: left out
+        whole = lambda b, upto: (first + b * step >= start) and (first + (b + 1) * step <= upto)  # noqa: E731
+        known = lambda b: last_b is not None and b <= last_b and (step == MIN or whole(b, min(end, as_of + MIN)))  # noqa: E731
+        known_avg = lambda b: last_b is not None and b <= last_b  # noqa: E731
+        api = {
+            "hasData": bool(rows), "asOf": as_of,
+            "calls": int(sum(r[0] for r in series)), "err4xx": int(sum(r[1] for r in series)), "err5xx": int(sum(r[2] for r in series)),
+            "p95": _r(sum(r[5] for r in series) / sum(r[6] for r in series)) if sum(r[6] for r in series) else None,
+            "series": {
+                "calls": [int(r[0]) if known(b) else None for b, r in enumerate(series)],
+                "err4xx": [int(r[1]) if known(b) else None for b, r in enumerate(series)],
+                "err5xx": [int(r[2]) if known(b) else None for b, r in enumerate(series)],
+                "p95": [w(r, 5) if known_avg(b) else None for b, r in enumerate(series)],
+                "integrationP95": [w(r, 7) if known_avg(b) else None for b, r in enumerate(series)],
+            },
+        }
+        return {"from": start, "to": end, "zone": zone, "step": step, "start": first, "buckets": nb,
+                "generatedAt": now.isoformat(timespec="seconds"), "stage": stage, "service": service, "store": store,
+                "api": api, "stages": stages, "orders": self._range_orders(start, end, first, step, nb, cfg, now_ms, service, store),
+                "services": [{"service": s.name, "cluster": s.cluster} for s in cfg.services]}
+
+    def _range_orders(self, start: int, end: int, first: int, step: int, nb: int, cfg: OpsConfig, now_ms: int,
+                      service: str | None, store: str | None) -> dict:
+        """Orders first seen in [start, end): the UTC days it covers joined like a zone day."""
+        d0 = datetime.fromtimestamp(start / 1000, timezone.utc).date()
+        d1 = datetime.fromtimestamp((end - 1) / 1000, timezone.utc).date()
+        today_utc = datetime.fromtimestamp(now_ms / 1000, timezone.utc).date()
+        merged: dict[str, dict[str, dict[str, int]]] = {}
+        missing, newest = [], None
+        d = d0
+        while d <= d1:
+            st = self._day_orders(d)
+            if st is None:
+                if d != today_utc:
+                    missing.append(d.isoformat())
+            else:
+                if st.get("newestMs") and (newest is None or st["newestMs"] > newest):
+                    newest = st["newestMs"]
+                for name, svc in st["services"].items():
+                    for s_name, ids in svc["orders"].items():
+                        tgt = merged.setdefault(name, {}).setdefault(s_name, {})
+                        for oid, ms in ids.items():
+                            if oid not in tgt or ms < tgt[oid]:
+                                tgt[oid] = ms
+            d += timedelta(days=1)
+        counted = len(missing) < (d1 - d0).days + 1
+        series = [0] * nb
+        services, stores = [], {}
+        for svc in cfg.services:
+            n = 0
+            for s_name, ids in merged.get(svc.name, {}).items():
+                c = 0
+                for ms in ids.values():
+                    if start <= ms < end:
+                        c += 1
+                        if (not service or service == svc.name) and (not store or store == s_name):
+                            b = (ms - first) // step
+                            if 0 <= b < nb:
+                                series[b] += 1
+                if c:
+                    stores[(svc.name, s_name)] = c
+                n += c
+            services.append({"service": svc.name, "cluster": svc.cluster, "count": n})
+        upto = None if newest is None else min(newest + MIN, end)
+
+        def shown(b: int) -> bool:          # whole buckets only (see time_range)
+            if upto is None:
+                return False
+            a = first + b * step
+            return a < upto and (step == MIN or (a >= start and a + step <= upto))
+        total = sum(c for (sv, st_n), c in stores.items() if (not service or sv == service) and (not store or st_n == store))
+        return {"counted": counted, "missingDays": missing, "keptDays": KEEP_DAYS, "asOf": newest, "total": total if counted else None,
+                "services": services, "series": [v if shown(b) else None for b, v in enumerate(series)] if counted else None,
+                "stores": sorted(({"service": k[0], "store": k[1], "name": cfg.name(k[1]), "count": c} for k, c in stores.items()),
+                                 key=lambda r: -r["count"])}
 
     def status(self) -> dict:
         cfg = self.config.get()

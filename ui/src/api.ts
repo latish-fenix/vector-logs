@@ -510,6 +510,22 @@ export interface OpsHealth {
   orders: { lastRun: string | null; lastOk: string | null; error: string | null; running: boolean; configError: string | null; newestMs: number | null };
   thresholds: Record<string, number>;
 }
+export interface OpsRangeStage {
+  id: string; api: string; stage: string; name: string; calls: number; share: number | null;
+  err4xx: number; err5xx: number; err4xxPct: number | null; err5xxPct: number | null;
+  p50: number | null; p95: number | null; integrationP95: number | null; gatewayMs: number | null;
+}
+export interface OpsRange {
+  from: number; to: number; zone: string; step: number; start: number; buckets: number; generatedAt: string;
+  stage: string | null; service: string | null; store: string | null;
+  api: { hasData: boolean; asOf: number | null; calls: number; err4xx: number; err5xx: number; p95: number | null;
+    series: { calls: (number | null)[]; err4xx: (number | null)[]; err5xx: (number | null)[]; p95: (number | null)[]; integrationP95: (number | null)[] } };
+  stages: OpsRangeStage[];
+  orders: { counted: boolean; missingDays: string[]; keptDays: number; asOf: number | null; total: number | null;
+    services: { service: string; cluster: string; count: number }[]; series: (number | null)[] | null;
+    stores: { service: string; store: string; name: string; count: number }[] };
+  services: { service: string; cluster: string }[];
+}
 export interface OpsHistory {
   day: string; zone: string; dayStart: number; dayEnd: number; stage: string | null; service: string | null; store: string | null;
   api: OpsMinutes & {

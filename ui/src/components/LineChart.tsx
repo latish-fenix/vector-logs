@@ -47,6 +47,12 @@ export function clockZ(ms: number | null | undefined, zone: ClockZone, both = fa
   const others = both ? ZONES.filter((z) => z !== zone).map((z) => ` · ${clock(ms, z)} ${zoneName(ms, z)}`).join("") : "";
   return `${clock(ms, zone)} ${zoneName(ms, zone)}${others}`;
 }
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** "11 Nov" in the zone. */
+export function dateLabel(ms: number, zone: ClockZone): string {
+  const p = parts(ms, zone);
+  return `${p.d} ${MONTHS[p.mo - 1]}`;
+}
 /** Today's date in the zone, "2026-11-11". */
 export function dayIn(zone: ClockZone, ms = Date.now()): string {
   const p = parts(ms, zone);
@@ -118,7 +124,7 @@ function niceStep(max: number, count: number): number {
   return 10 * pw;
 }
 
-const TICK_STEPS = [5, 10, 15, 30, 60, 120, 180, 240, 360, 720].map((m) => m * 60_000);
+const TICK_STEPS = [5, 10, 15, 30, 60, 120, 180, 240, 360, 720, 1440, 2880, 4320, 10080].map((m) => m * 60_000);
 
 export function Legend({ series }: { series: Pick<LineSeries, "key" | "label" | "color" | "dashed">[] }) {
   return (
@@ -154,7 +160,7 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
   const n = Math.max(0, ...series.map((s) => s.values.length));
   const top = useMemo(() => Math.max(0, ...series.flatMap((s) => s.values.filter((v): v is number => v !== null))), [series]);
   const any = series.some((s) => s.values.some((v) => v !== null && v !== 0));
-  const tickStep = niceStep(top, 4);
+  const tickStep = Math.max(1, niceStep(top, 4));          // whole numbers: no "1, 1, 1" axis for small counts
   const max = Math.max(tickStep, Math.ceil(top / tickStep) * tickStep);
   const yTicks = Array.from({ length: Math.round(max / tickStep) + 1 }, (_, i) => i * tickStep);
   const labelW = Math.max(30, ...yTicks.map((t) => fmt(t).length * 6.4 + 8));
@@ -185,6 +191,9 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
   const xTicks: number[] = [];
   const off = offsetMs(start, zone);
   for (let t = Math.ceil((start + off) / xStep) * xStep - off; t <= start + span; t += xStep) xTicks.push(t);
+  const multiDay = fullSpan > 26 * 3600_000;
+  const tickLabel = (t: number) => (xStep >= 86_400_000 || (multiDay && clock(t, zone) === "00:00") ? dateLabel(t, zone) : clock(t, zone));
+  const hoverLabel = (t: number) => `${multiDay ? `${dateLabel(t, zone)} ` : ""}${clock(t, zone)}`;
   const gid = useMemo(() => `g${Math.random().toString(36).slice(2, 8)}`, []);
 
   return (
@@ -234,7 +243,7 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
           </g>
         )}
         {xTicks.map((t) => (
-          <text key={t} x={xAt(t)} y={height - 6} textAnchor="middle" className="histo-axis">{clock(t, zone)}</text>
+          <text key={t} x={xAt(t)} y={height - 6} textAnchor="middle" className="histo-axis">{tickLabel(t)}</text>
         ))}
         {hover !== null && (
           <g>
@@ -249,7 +258,7 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
       {hover !== null && (
         <div className="histo-tip" style={{ left: Math.min(Math.max(x(hover), 110), width - 110), top: legend ? 34 : 8 }}>
           <div className="t">
-            {clock(start + hover * step, zone)}{step > 60_000 ? `–${clock(start + (hover + 1) * step, zone)}` : ""} {zoneName(start + hover * step, zone)}
+            {hoverLabel(start + hover * step)}{step > 60_000 ? `–${clock(start + (hover + 1) * step, zone)}` : ""} {zoneName(start + hover * step, zone)}
             <span style={{ opacity: 0.7 }}>{ZONES.filter((z) => z !== zone).map((z) => ` · ${clock(start + hover * step, z)} ${zoneName(start + hover * step, z)}`).join("")}</span>
           </div>
           {series.map((s) => (

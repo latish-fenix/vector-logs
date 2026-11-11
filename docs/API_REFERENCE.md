@@ -223,9 +223,10 @@ long as the day. Last week = the same date 7 days back in that zone.
 | GET | `/api/v1/ops/summary?day=&window=60&zone=PST` | Calls and orders today (or `day`, YYYY-MM-DD in `zone`): totals, per minute, per stage (status from the last `window` minutes), per service and store |
 | GET | `/api/v1/ops/health?minutes=60` | Each stage's last N minutes (5–1440) against the same minutes last week: calls, 4xx %, 5xx %, p50 / p95, backend p95, gateway time, green / amber / red with reasons; worst first |
 | GET | `/api/v1/ops/history?day=&zone=&stage=&service=&store=` | Per-minute calls, 4xx, 5xx, p95, backend p95 and orders of one day (and last week), for all or one stage (`<api>/<stage>`), order service and store |
+| GET | `/api/v1/ops/range?from=&to=&zone=&stage=&service=&store=` | Any range up to 31 days (`from` / `to` = epoch ms or ISO date-time, no offset = UTC; `to` is capped at now): every stage's calls, share, 4xx / 5xx (count and %), p50, p95, backend p95 and gateway time over the whole range (p50 / p95 = averages of the minute values, weighted by calls); the totals over time in buckets of 1 min (≤ 6 h), 5 min (≤ 2 days), 15 min (≤ 8 days) or 1 h, starting on round times in `zone` (a bucket the range only partly covers is `null` in the sums); orders first seen in the range per service and store (`missingDays`: UTC days not counted; orders are kept 15 days). `stage` / `service` / `store` narrow the totals over time; the stage table always lists every stage. The History tab uses this |
 | GET | `/api/v1/ops/status` | Where the numbers come from, the order counter's last run and any config mistake |
 
-`OPS_DISABLED` (404) when `OPS_ENABLED=false`; `INVALID_DAY`, `INVALID_ZONE`, `UNKNOWN_SERVICE` (400).
+`OPS_DISABLED` (404) when `OPS_ENABLED=false`; `INVALID_DAY`, `INVALID_ZONE`, `INVALID_TIME`, `INVALID_RANGE`, `RANGE_TOO_LARGE` (over 31 days), `UNKNOWN_SERVICE` (400).
 
 ## Errors
 

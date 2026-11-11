@@ -343,3 +343,67 @@ def test_history_in_est_and_routes(ops, tmp_path, data):
     assert c.get("/api/v1/ops/summary?zone=pst", headers=ROOT_H).json()["zone"] == "PST"
     assert c.get("/api/v1/ops/history?zone=EST", headers=ROOT_H).json()["zone"] == "EST"
     assert c.get("/api/v1/ops/summary?zone=XYZ", headers=ROOT_H).json()["error"]["code"] == "INVALID_ZONE"
+
+
+# ------------------------------------------------------------------ any time range (History tab)
+def test_range_table_series_and_orders(ops):
+    a, b = datetime(2026, 11, 9, 9, 0, tzinfo=timezone.utc), datetime(2026, 11, 9, 9, 30, tzinfo=timezone.utc)
+    r = ops.time_range(MS(a), MS(b), "IST")
+    assert r["step"] == 60_000 and r["buckets"] == 30 and r["start"] == MS(a)
+    st = {x["id"]: x for x in r["stages"]}
+    v = st["Vuori/vuori"]
+    assert v["calls"] == 3000 and v["err5xxPct"] == 5.0 and v["p95"] == 200 and v["integrationP95"] == 190 and v["gatewayMs"] == 10
+    assert st["Alpha-EDDS-1/felina"]["err4xxPct"] == 10.0 and r["stages"][0]["id"] == "Vuori/vuori"
+    assert round(sum(x["share"] for x in r["stages"])) == 100
+    assert r["api"]["calls"] == 3300 and r["api"]["series"]["calls"][0] == 110 and r["api"]["p95"] is not None
+    o = r["orders"]
+    assert o["counted"] and o["total"] == 5 and {x["service"]: x["count"] for x in o["services"]} == {"OMS": 2, "OMS-11": 1, "CRS": 2}
+    one = ops.time_range(MS(a), MS(b), "IST", stage="Alpha-EDDS-1/felina", service="CRS", store="bombas.myshopify.com")
+    assert one["api"]["calls"] == 300 and len(one["stages"]) == 2           # the table keeps every stage
+    assert one["orders"]["total"] == 1 and sum(v or 0 for v in one["orders"]["series"]) == 1
+
+
+def test_range_long_buckets_and_limits(ops):
+    end = NOW
+    r = ops.time_range(MS(end - timedelta(days=7)), MS(end), "PST")     # 7 days → 15-minute buckets
+    assert r["step"] == 15 * 60_000
+    assert r["start"] % (15 * 60_000) == 0
+    calls = r["api"]["series"]["calls"]
+    assert calls[-1] is None or calls[-1] >= 0                          # after the newest minute: empty
+    assert r["api"]["calls"] == 110 * 810 + 110 * 626                  # 2 Nov from 10:30 + today so far
+    assert r["orders"]["missingDays"] == [] and r["orders"]["total"] == 5   # 900 and 901 (2 Nov 09:03, 10:03) are before the start
+    wk = ops.time_range(MS(end - timedelta(days=20)), MS(end), "IST")
+    assert wk["step"] == 3600_000 and wk["orders"]["missingDays"]       # not counted that far back
+    with pytest.raises(Exception) as e:
+        ops.time_range(MS(end - timedelta(days=32)), MS(end))
+    assert e.value.code == "RANGE_TOO_LARGE"
+    with pytest.raises(Exception) as e:
+        ops.time_range(MS(end), MS(end - timedelta(hours=1)))
+    assert e.value.code == "INVALID_RANGE"
+    ist_hours = ops.time_range(MS(end - timedelta(days=20)), MS(end), "IST")["start"]
+    assert (ist_hours + 330 * 60_000) % 3600_000 == 0                   # hourly buckets start on IST hours
+
+
+def test_range_route(tmp_path, data):
+    cfg = tmp_path / "ops-dashboard.yaml"
+    shutil.copy(REPO_CONFIG, cfg)
+    app = create_app(make_settings(tmp_path, data, ops_config_file=str(cfg)))
+    app.state.ops.now = lambda: NOW
+    c = TestClient(app)
+    r = c.get("/api/v1/ops/range?from=2026-11-09T09:00:00Z&to=2026-11-09T10:00:00Z&zone=EST", headers=ROOT_H)
+    assert r.status_code == 200 and r.json()["api"]["calls"] == 110 * 60 and r.json()["zone"] == "EST"
+    ms = MS(datetime(2026, 11, 9, 9, tzinfo=timezone.utc))
+    assert c.get(f"/api/v1/ops/range?from={ms}&to={ms + 600_000}", headers=ROOT_H).json()["api"]["calls"] == 1100
+    assert c.get("/api/v1/ops/range?from=nope&to=1", headers=ROOT_H).json()["error"]["code"] == "INVALID_TIME"
+    assert c.get("/api/v1/ops/range?from=200000&to=100000", headers=ROOT_H).json()["error"]["code"] == "INVALID_RANGE"
+
+
+def test_range_leaves_out_partial_buckets(ops):
+    r = ops.time_range(MS(datetime(2026, 11, 9, 0, 7, tzinfo=timezone.utc)), MS(NOW), "UTC")   # 10 h → 5-minute buckets
+    assert r["step"] == 300_000 and r["start"] == MS(datetime(2026, 11, 9, 0, 5, tzinfo=timezone.utc))
+    calls = r["api"]["series"]["calls"]
+    assert calls[0] is None and calls[1] == 550                       # 00:05–00:10 only partly in the range
+    last = (MS(datetime(2026, 11, 9, 10, 25, tzinfo=timezone.utc)) - r["start"]) // 300_000
+    assert calls[last] is None and calls[last - 1] == 550             # data to 10:25: that bucket is not over yet
+    assert r["api"]["series"]["p95"][0] == r["api"]["series"]["p95"][1]   # averages are kept
+    assert r["api"]["calls"] == 110 * (626 - 7)                       # the totals count every minute
