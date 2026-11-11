@@ -491,7 +491,7 @@ export interface OpsOrders {
   minutes: (OpsMinutes & { counts: (number | null)[]; lastWeek: number[] | null }) | null;
 }
 export interface OpsSummary {
-  day: string; today: boolean; generatedAt: string;
+  day: string; zone: string; dayStart: number; dayEnd: number; today: boolean; generatedAt: string;
   api: OpsFreshness & {
     source: string; windowMinutes: number;
     calls: number; callsLastWeek: number | null; callsLastWeekDay: number | null; change: number | null; err4xx: number; err5xx: number;
@@ -511,7 +511,7 @@ export interface OpsHealth {
   thresholds: Record<string, number>;
 }
 export interface OpsHistory {
-  day: string; stage: string | null; service: string | null; store: string | null;
+  day: string; zone: string; dayStart: number; dayEnd: number; stage: string | null; service: string | null; store: string | null;
   api: OpsMinutes & {
     calls: (number | null)[]; err4xx: (number | null)[]; err5xx: (number | null)[]; p95: (number | null)[]; integrationP95: (number | null)[]; hasData: boolean; shownMinutes: number;
     lastWeek: { calls: number[]; err4xx: number[]; err5xx: number[]; p95: (number | null)[] } | null;

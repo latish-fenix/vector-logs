@@ -210,17 +210,22 @@ Cluster access is `{"<cluster>": "view", "*": "view", "<cluster>": "none"}`:
 
 ## Ops dashboard
 
-API Gateway calls per stage and orders processed (OMS / CRS) for a UTC day, against the same day
+API Gateway calls per stage and orders processed (OMS / CRS) for one day, against the same day
 last week. Any signed-in user. "Last week" totals for today stop at the same minute.
+
+A day runs midnight to midnight in `zone`: `IST`, `PST`, `EST` or `UTC` (default `UTC`; the page sends
+the zone picked in its header). `PST` and `EST` follow daylight saving (PDT / EDT in summer), so the
+day the clocks change has 1380 or 1500 minutes; the per-minute arrays start at `dayStart` and are as
+long as the day. Last week = the same date 7 days back in that zone.
 
 | Method | Path | What it returns |
 | --- | --- | --- |
-| GET | `/api/v1/ops/summary?day=&window=60` | Calls and orders today (or `day`, YYYY-MM-DD): totals, per minute, per stage (status from the last `window` minutes), per service and store |
+| GET | `/api/v1/ops/summary?day=&window=60&zone=PST` | Calls and orders today (or `day`, YYYY-MM-DD in `zone`): totals, per minute, per stage (status from the last `window` minutes), per service and store |
 | GET | `/api/v1/ops/health?minutes=60` | Each stage's last N minutes (5–1440) against the same minutes last week: calls, 4xx %, 5xx %, p50 / p95, backend p95, gateway time, green / amber / red with reasons; worst first |
-| GET | `/api/v1/ops/history?day=&stage=&service=&store=` | Per-minute calls, 4xx, 5xx, p95, backend p95 and orders of one day (and last week), for all or one stage (`<api>/<stage>`), order service and store |
+| GET | `/api/v1/ops/history?day=&zone=&stage=&service=&store=` | Per-minute calls, 4xx, 5xx, p95, backend p95 and orders of one day (and last week), for all or one stage (`<api>/<stage>`), order service and store |
 | GET | `/api/v1/ops/status` | Where the numbers come from, the order counter's last run and any config mistake |
 
-`OPS_DISABLED` (404) when `OPS_ENABLED=false`; `INVALID_DAY`, `UNKNOWN_SERVICE` (400).
+`OPS_DISABLED` (404) when `OPS_ENABLED=false`; `INVALID_DAY`, `INVALID_ZONE`, `UNKNOWN_SERVICE` (400).
 
 ## Errors
 

@@ -1,22 +1,66 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-// Times are shown in IST or UTC (the page's switch). IST has no daylight saving: UTC + 5:30.
-export type ClockZone = "ist" | "utc";
-const OFFSET: Record<ClockZone, number> = { ist: 330 * 60_000, utc: 0 };
-export const ZONE_LABEL: Record<ClockZone, string> = { ist: "IST", utc: "UTC" };
+// Times are shown in IST, PST or EST (the page's switch). IST has no daylight saving (UTC + 5:30);
+// PST and EST turn into PDT and EDT in summer, so the offset is looked up for each time.
+export type ClockZone = "ist" | "pst" | "est";
+export const ZONES: ClockZone[] = ["ist", "pst", "est"];
+const TZ: Record<ClockZone, string> = { ist: "Asia/Kolkata", pst: "America/Los_Angeles", est: "America/New_York" };
+/** Label on the switch. */
+export const ZONE_LABEL: Record<ClockZone, string> = { ist: "IST", pst: "PST", est: "EST" };
+export const ZONE_TITLE: Record<ClockZone, string> = {
+  ist: "India time (UTC + 5:30)",
+  pst: "US Pacific time (PST, PDT in summer)",
+  est: "US Eastern time (EST, EDT in summer)",
+};
 const pad2 = (n: number) => String(n).padStart(2, "0");
+const fmts = new Map<ClockZone, Intl.DateTimeFormat>();
+function parts(ms: number, zone: ClockZone) {
+  let f = fmts.get(zone);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", { timeZone: TZ[zone], hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+    fmts.set(zone, f);
+  }
+  const o: Record<string, number> = {};
+  for (const p of f.formatToParts(new Date(ms))) if (p.type !== "literal") o[p.type] = Number(p.value);
+  return { y: o.year, mo: o.month, d: o.day, h: o.hour % 24, mi: o.minute };
+}
+/** Local time minus UTC, in ms (e.g. −8 h for PST). */
+export function offsetMs(ms: number, zone: ClockZone): number {
+  if (zone === "ist") return 330 * 60_000;
+  const p = parts(ms, zone);
+  return Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi) - Math.floor(ms / 60_000) * 60_000;
+}
+/** "IST", "PST" / "PDT", "EST" / "EDT" at that moment. */
+export function zoneName(ms: number, zone: ClockZone): string {
+  if (zone === "ist") return "IST";
+  const h = offsetMs(ms, zone) / 3600_000;
+  if (zone === "pst") return h === -7 ? "PDT" : "PST";
+  return h === -4 ? "EDT" : "EST";
+}
 /** "17:35" in the zone. */
 export function clock(ms: number, zone: ClockZone): string {
-  const d = new Date(ms + OFFSET[zone]);
-  return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+  const p = parts(ms, zone);
+  return `${pad2(p.h)}:${pad2(p.mi)}`;
 }
-/** "17:35 IST" (with the other zone after it when `both`). */
+/** "17:35 IST" (with the other zones after it when `both`). */
 export function clockZ(ms: number | null | undefined, zone: ClockZone, both = false): string {
   if (ms === null || ms === undefined) return "—";
-  const other: ClockZone = zone === "ist" ? "utc" : "ist";
-  return `${clock(ms, zone)} ${ZONE_LABEL[zone]}${both ? ` · ${clock(ms, other)} ${ZONE_LABEL[other]}` : ""}`;
+  const others = both ? ZONES.filter((z) => z !== zone).map((z) => ` · ${clock(ms, z)} ${zoneName(ms, z)}`).join("") : "";
+  return `${clock(ms, zone)} ${zoneName(ms, zone)}${others}`;
+}
+/** Today's date in the zone, "2026-11-11". */
+export function dayIn(zone: ClockZone, ms = Date.now()): string {
+  const p = parts(ms, zone);
+  return `${p.y}-${pad2(p.mo)}-${pad2(p.d)}`;
+}
+/** "2026-11-11T00:05-08:00": a minute in the zone with its offset (for CSV files). */
+export function localStamp(ms: number, zone: ClockZone): string {
+  const p = parts(ms, zone);
+  const off = offsetMs(ms, zone) / 60_000;
+  const a = Math.abs(off);
+  return `${p.y}-${pad2(p.mo)}-${pad2(p.d)}T${pad2(p.h)}:${pad2(p.mi)}${off < 0 ? "-" : "+"}${pad2(Math.floor(a / 60))}:${pad2(a % 60)}`;
 }
 
-// Line chart for per-minute series (UTC), drawn in SVG like the other charts. Values are grouped
+// Line chart for per-minute series, drawn in SVG like the other charts. Values are grouped
 // into buckets (sum for counts, average for latencies) or added up (running totals) before drawing.
 
 export interface LineSeries {
@@ -89,7 +133,7 @@ export function Legend({ series }: { series: Pick<LineSeries, "key" | "label" | 
   );
 }
 
-export function LineChart({ start, step, series, height = 190, fmt, empty, label, legend = true, nowAt, zone = "utc" }: {
+export function LineChart({ start, step, series, height = 190, fmt, empty, label, legend = true, nowAt, zone = "ist" }: {
   start: number;
   /** ms per point */
   step: number;
@@ -139,9 +183,8 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
   const fullSpan = n * step;
   const xStep = TICK_STEPS.find((s) => fullSpan / s <= Math.max(2, plotW / 72)) ?? TICK_STEPS[TICK_STEPS.length - 1];
   const xTicks: number[] = [];
-  const off = OFFSET[zone];
+  const off = offsetMs(start, zone);
   for (let t = Math.ceil((start + off) / xStep) * xStep - off; t <= start + span; t += xStep) xTicks.push(t);
-  const other: ClockZone = zone === "ist" ? "utc" : "ist";
   const gid = useMemo(() => `g${Math.random().toString(36).slice(2, 8)}`, []);
 
   return (
@@ -206,8 +249,8 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
       {hover !== null && (
         <div className="histo-tip" style={{ left: Math.min(Math.max(x(hover), 110), width - 110), top: legend ? 34 : 8 }}>
           <div className="t">
-            {clock(start + hover * step, zone)}{step > 60_000 ? `–${clock(start + (hover + 1) * step, zone)}` : ""} {ZONE_LABEL[zone]}
-            <span style={{ opacity: 0.7 }}> · {clock(start + hover * step, other)} {ZONE_LABEL[other]}</span>
+            {clock(start + hover * step, zone)}{step > 60_000 ? `–${clock(start + (hover + 1) * step, zone)}` : ""} {zoneName(start + hover * step, zone)}
+            <span style={{ opacity: 0.7 }}>{ZONES.filter((z) => z !== zone).map((z) => ` · ${clock(start + hover * step, z)} ${zoneName(start + hover * step, z)}`).join("")}</span>
           </div>
           {series.map((s) => (
             <div key={s.key} className="row" style={{ justifyContent: "space-between", gap: 16 }}>

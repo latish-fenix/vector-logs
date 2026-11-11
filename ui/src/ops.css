@@ -122,8 +122,7 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .ops-now-label { fill: var(--faint); font: 600 10.5px var(--font-sans); text-transform: uppercase; letter-spacing: 0.05em; }
 
 /* ---- IST / UTC switch */
-.ops-zone .tab { min-height: 28px; padding: 0 10px; font-size: 12.5px; }
-.ops-zone { padding: 3px; }
+.ops-zone { width: auto; min-width: 0; font-weight: 600; }
 
 /* ---- top stages inside the API hero (same rows as the order services) */
 .ops-hero-fill { flex: 1; }

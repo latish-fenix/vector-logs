@@ -3,16 +3,16 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { useSearchParams } from "react-router-dom";
 import { get, type OpsHealth, type OpsHistory, type OpsStatus, type OpsSummary } from "../api";
 import { Icon } from "../components/icons";
-import { bucket, clock, clockZ, cumulative, Legend, LineChart, Spark, ZONE_LABEL, type ClockZone, type LineSeries } from "../components/LineChart";
+import { bucket, clock, clockZ, cumulative, dayIn, Legend, LineChart, localStamp, Spark, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
 import { Callout, Empty, ErrorCallout, Loading, SearchSelect, downloadFile } from "../components/ui";
-import { ago, fmtTime, num } from "../format";
+import { ago, num } from "../format";
 import { useMe } from "../session";
 import "../ops.css";
 
 // API Gateway calls per stage (per-minute CloudWatch copies in S3) and orders processed by OMS / CRS
-// (counted from the Vector logs), against the same time last week. A "day" is the UTC day; times are
-// shown in IST or UTC (switch in the header, remembered per browser).
+// (counted from the Vector logs), against the same time last week. Times and the day follow the zone
+// switch in the header (IST, PST or EST, remembered per browser): a day runs midnight to midnight there.
 
 type Tab = "live" | "health" | "history";
 interface Fresh { asOf: number | null; ageMs: number | null; stale: boolean; error: string | null }
@@ -23,14 +23,13 @@ const C_4XX = "var(--st-4xx)";
 const C_5XX = "var(--st-5xx)";
 const C_BACKEND = "#8b7fe0";
 
-const todayUtc = () => new Date().toISOString().slice(0, 10);
 const ZoneCtx = createContext<ClockZone>("ist");
 const useZone = () => useContext(ZoneCtx);
 const ZONE_KEY = "ops-zone";
 function storedOpsZone(): ClockZone {
-  try { return localStorage.getItem(ZONE_KEY) === "utc" ? "utc" : "ist"; } catch { return "ist"; }
+  try { const v = localStorage.getItem(ZONE_KEY); return ZONES.includes(v as ClockZone) ? (v as ClockZone) : "ist"; } catch { return "ist"; }
 }
-/** A time in the page's zone, e.g. "17:35 IST"; hover shows the other zone. */
+/** A time in the page's zone, e.g. "17:35 IST"; hover shows the other zones. */
 function T({ ms }: { ms: number | null | undefined }) {
   const z = useZone();
   if (ms === null || ms === undefined) return <>—</>;
@@ -120,7 +119,7 @@ function LiveBadge({ fresh }: { fresh: Fresh | null }) {
   return (
     <span className={`ops-live ${cls}`} role="status" title={fresh.error ?? `${fresh.asOf !== null ? clockZ(fresh.asOf, z, true) + ". " : ""}API Gateway numbers are copied from CloudWatch every 5 minutes; the page refreshes every minute`}>
       <span className="pulse" />
-      {none ? "No data yet today" : late ? <>Delayed · data to <strong>{fresh.asOf !== null ? clock(fresh.asOf, z) : "—"}</strong> {ZONE_LABEL[z]} ({mins} min)</> : <>Live · data to <strong>{fresh.asOf !== null ? clock(fresh.asOf, z) : "—"}</strong> {ZONE_LABEL[z]}</>}
+      {none ? "No data yet today" : late ? <>Delayed · data to <strong>{fresh.asOf !== null ? clock(fresh.asOf, z) : "—"}</strong> {zoneName(fresh.asOf ?? Date.now(), z)} ({mins} min)</> : <>Live · data to <strong>{fresh.asOf !== null ? clock(fresh.asOf, z) : "—"}</strong> {zoneName(fresh.asOf ?? Date.now(), z)}</>}
     </span>
   );
 }
@@ -144,16 +143,14 @@ export function Ops() {
       <div className="ops-head">
         <div className="grow">
           <h1>Ops dashboard</h1>
-          <p className="sub">API Gateway calls and orders processed, against the same time last week. A day runs 00:00–24:00 UTC (05:30–05:30 IST).</p>
+          <p className="sub">API Gateway calls and orders processed, against the same time last week. A day runs midnight to midnight {zone === "ist" ? "India time" : zone === "pst" ? "US Pacific time" : "US Eastern time"} ({ZONE_LABEL[zone]}).</p>
         </div>
         <div className="ops-head-right">
           <LiveBadge fresh={fresh} />
-          <div className="tabs ops-zone" role="group" aria-label="Show times in">
-            {(["ist", "utc"] as ClockZone[]).map((z) => (
-              <button key={z} type="button" className="tab" aria-pressed={zone === z} aria-selected={zone === z} onClick={() => setZone(z)}
-                title={z === "ist" ? "Show times in India time (UTC + 5:30)" : "Show times in UTC"}>{ZONE_LABEL[z]}</button>
-            ))}
-          </div>
+          <select className="select ops-zone" aria-label="Time zone" value={zone} title={`Days and times in ${ZONE_TITLE[zone]}`}
+            onChange={(e) => setZone(e.target.value as ClockZone)}>
+            {ZONES.map((z) => <option key={z} value={z}>{ZONE_LABEL[z]} · {ZONE_TITLE[z].split(" (")[0]}</option>)}
+          </select>
           <div className="tabs" role="tablist" aria-label="View">
             {([["live", "Live"], ["health", "Health"], ["history", "History"]] as [Tab, string][]).map(([v, l]) => (
               <button key={v} type="button" role="tab" className="tab" aria-selected={tab === v}
@@ -193,7 +190,7 @@ function SourceProblems({ api, orders }: {
 function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; onHealth: () => void; onFresh: (f: Fresh) => void }) {
   const zone = useZone();
   const [all, setAll] = useState(false);
-  const q = useQuery({ queryKey: ["ops-summary"], queryFn: () => get<OpsSummary>("/ops/summary"), refetchInterval: 60_000, retry: false, placeholderData: keepPreviousData });
+  const q = useQuery({ queryKey: ["ops-summary", zone], queryFn: () => get<OpsSummary>("/ops/summary", { zone: zone.toUpperCase() }), refetchInterval: 60_000, retry: false, placeholderData: keepPreviousData });
   const d = q.data;
   useEffect(() => { if (d) onFresh(d.api); }, [d, onFresh]);
   const callsCum = useMemo(() => (d ? { now: cumulative(d.api.minutes.calls), lw: cumulative(d.api.minutes.lastWeek) } : null), [d]);
@@ -438,7 +435,7 @@ function HealthTab({ params, set, onStage, onFresh }: {
             </>
           ) : <span className="ops-count"><Dot status="green" />None</span>}
           note={`of ${d.stages.length} stages with calls`} />
-        <Kpi label="Window" value={<span title={`${clockZ(d.from, zone, true)} to ${clockZ(d.to, zone, true)}`}>{clock(d.from, zone)}–{clock(d.to, zone)} <span style={{ fontSize: 13, fontWeight: 600, color: "var(--muted)" }}>{ZONE_LABEL[zone]}</span></span>} note={d.lastWeekAvailable ? "vs the same minutes last week" : "last week not available"} />
+        <Kpi label="Window" value={<span title={`${clockZ(d.from, zone, true)} to ${clockZ(d.to, zone, true)}`}>{clock(d.from, zone)}–{clock(d.to, zone)} <span style={{ fontSize: 13, fontWeight: 600, color: "var(--muted)" }}>{zoneName(d.to, zone)}</span></span>} note={d.lastWeekAvailable ? "vs the same minutes last week" : "last week not available"} />
         <Kpi label="API data to" value={<T ms={d.api.asOf} />} tone={d.api.stale || d.api.error ? "warn" : undefined}
           note={d.api.ageMs === null ? "no data yet" : `${Math.round(d.api.ageMs / 60_000)} min ago · copied every 5 min`} />
         <Kpi label="Orders counted" value={d.orders.lastRun ? ago(d.orders.lastRun) : "not yet"} tone={d.orders.error ? "warn" : undefined}
@@ -518,14 +515,16 @@ function ChartCard({ title, sub, series, ...rest }: { title: string; sub: string
 }
 
 function History({ params, set }: { params: URLSearchParams; set: (p: Record<string, string | null>) => void }) {
-  const day = params.get("day") || todayUtc();
+  const zone = useZone();
+  const today = dayIn(zone);
+  const day = params.get("day") || today;
   const stage = params.get("stage") || "";
   const service = params.get("service") || "";
   const store = params.get("store") || "";
-  const isToday = day === todayUtc();
+  const isToday = day === today;
   const q = useQuery({
-    queryKey: ["ops-history", day, stage, service, store],
-    queryFn: () => get<OpsHistory>("/ops/history", { day, stage, service, store }),
+    queryKey: ["ops-history", day, stage, service, store, zone],
+    queryFn: () => get<OpsHistory>("/ops/history", { day, stage, service, store, zone: zone.toUpperCase() }),
     refetchInterval: isToday ? 60_000 : false, retry: false, placeholderData: keepPreviousData,
   });
   const d = q.data;
@@ -539,23 +538,22 @@ function History({ params, set }: { params: URLSearchParams; set: (p: Record<str
   const exportCsv = () => {
     if (!d) return;
     const a = d.api, o = d.orders;
-    const head = ["minute_utc", "minute_ist", "calls", "err_4xx", "err_5xx", "p95_ms", "integration_p95_ms", "calls_last_week", "p95_ms_last_week", "orders", "orders_last_week"];
+    const head = [`minute_${zone}`, "minute_utc", "calls", "err_4xx", "err_5xx", "p95_ms", "integration_p95_ms", "calls_last_week", "p95_ms_last_week", "orders", "orders_last_week"];
     const lines = [head.join(",")];
-    for (let i = 0; i < 1440; i++) {
-      const t = fmtTime(a.start + i * 60_000, "utc", false).slice(0, 16).replace(" ", "T") + "Z";
-      const ist = new Date(a.start + i * 60_000 + 330 * 60_000).toISOString().slice(0, 16) + "+05:30";
-      lines.push([t, ist, a.calls[i] ?? "", a.err4xx[i] ?? "", a.err5xx[i] ?? "", a.p95[i] ?? "", a.integrationP95[i] ?? "", a.lastWeek?.calls[i] ?? "", a.lastWeek?.p95[i] ?? "",
+    for (let i = 0; i < a.calls.length; i++) {
+      const t = new Date(a.start + i * 60_000).toISOString().slice(0, 16) + "Z";
+      lines.push([localStamp(a.start + i * 60_000, zone), t, a.calls[i] ?? "", a.err4xx[i] ?? "", a.err5xx[i] ?? "", a.p95[i] ?? "", a.integrationP95[i] ?? "", a.lastWeek?.calls[i] ?? "", a.lastWeek?.p95[i] ?? "",
         o.minutes?.[i] ?? "", o.lastWeek?.[i] ?? ""].join(","));
     }
-    const name = ["ops", day, stage.replace(/[^\w.-]+/g, "_"), service, store.replace(/[^\w.-]+/g, "_")].filter(Boolean).join("-");
+    const name = ["ops", day, zone, stage.replace(/[^\w.-]+/g, "_"), service, store.replace(/[^\w.-]+/g, "_")].filter(Boolean).join("-");
     downloadFile(`${name}.csv`, lines.join("\n") + "\n", "text/csv");
   };
 
   const a = d?.api;
-  const sum = (v: (number | null)[] | null | undefined, upto = 1440) => (v ?? []).slice(0, upto).reduce<number>((x, y) => x + (y ?? 0), 0);
+  const sum = (v: (number | null)[] | null | undefined, upto = Infinity) => (v ?? []).slice(0, upto).reduce<number>((x, y) => x + (y ?? 0), 0);
   const known = (v: (number | null)[] | null | undefined) => { const arr = v ?? []; let n = arr.length; while (n > 0 && arr[n - 1] === null) n--; return n; };
-  const apiUpto = a ? a.shownMinutes : 1440;
-  const ordUpto = d?.orders.minutes ? (isToday ? known(d.orders.minutes) : 1440) : 1440;
+  const apiUpto = a ? a.shownMinutes : Infinity;
+  const ordUpto = d?.orders.minutes && isToday ? known(d.orders.minutes) : Infinity;
   const calls = a ? sum(a.calls) : 0, callsLw = a?.lastWeek ? sum(a.lastWeek.calls, apiUpto) : null;
   const orders = d?.orders.total ?? null, ordersLw = d?.orders.lastWeek ? sum(d.orders.lastWeek, ordUpto) : null;
   const chg = (x: number | null, y: number | null) => (x === null || !y ? null : (100 * (x - y)) / y);
@@ -566,8 +564,8 @@ function History({ params, set }: { params: URLSearchParams; set: (p: Record<str
     <>
       <section className="card">
         <div className="ops-toolbar">
-          <label className="field" title="The UTC day: 05:30 IST to 05:30 IST the next morning">Day (UTC)
-            <input type="date" className="input" value={day} max={todayUtc()} onChange={(e) => set({ day: e.target.value && e.target.value !== todayUtc() ? e.target.value : null })} />
+          <label className="field" title={`Midnight to midnight, ${ZONE_TITLE[zone]}`}>Day ({ZONE_LABEL[zone]})
+            <input type="date" className="input" value={day} max={today} onChange={(e) => set({ day: e.target.value && e.target.value !== today ? e.target.value : null })} />
           </label>
           <SearchSelect id="ops-stage" label="Stage" value={stage} options={stageOpts} allLabel="All stages" onChange={(v) => set({ stage: v || null })} maxWidth={340} />
           <select aria-label="Order service" className="select" value={service} onChange={(e) => set({ service: e.target.value || null, store: null })}>

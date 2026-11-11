@@ -1,12 +1,16 @@
 """Ops dashboard: API Gateway calls per stage and orders processed (OMS / CRS), today against the
-same day last week. Times and "today" are UTC.
+same day last week. A "day" runs midnight to midnight in the zone the caller picks (IST, PST, EST or
+UTC; PST and EST follow daylight saving, so a US day can be 23 or 25 hours). Last week = the same
+date 7 days back in that zone, compared minute by minute from its midnight.
 
 Where the numbers come from
     API Gateway  s3://LOGS_BUCKET/OPS_METRICS_PREFIX dt=YYYY-MM-DD/part-HH.csv.gz, one row per stage per
                  minute, written every 5 minutes by scripts/apigw_metrics_to_s3.py on another server
                  (6 files a day; HH = 00, 04, … 20; the newest file is rewritten until its 4 hours end).
     Orders       the Vector logs of the clusters in config/ops-dashboard.yaml, counted here: one unique
-                 (store, order id) per service per UTC day, at the minute it is first seen.
+                 (store, order id) per service per UTC day, at the minute it is first seen. A day in
+                 another zone joins the two UTC days it overlaps (an order seen on both counts once,
+                 at its first sighting) and keeps the orders first seen inside it.
 
 Where things live (local disk, all rebuilt from S3 if deleted)
     CACHE_DIR/ops/apigw/...             copies of the metric files (finished ones never change)
@@ -29,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import duckdb
 import yaml
@@ -77,6 +82,47 @@ def parse_day(value: str | None, today: date) -> date:
     if d > today:
         raise bad_request("INVALID_DAY", f"{value} is in the future")
     return d
+
+
+ZONES = {"IST": "Asia/Kolkata", "PST": "America/Los_Angeles", "EST": "America/New_York", "UTC": "UTC"}
+
+
+def zone_key(name: str | None) -> str:
+    key = (name or "UTC").strip().upper()
+    if key not in ZONES:
+        raise bad_request("INVALID_ZONE", f"zone must be one of {', '.join(ZONES)}")
+    return key
+
+
+@dataclass(frozen=True)
+class ZoneDay:
+    """One calendar day in a zone: [start, end) in epoch ms."""
+    day: date
+    zone: str
+    start: int
+    end: int
+
+    @property
+    def minutes(self) -> int:
+        return (self.end - self.start) // MIN
+
+    def utc_days(self) -> list[date]:
+        first = datetime.fromtimestamp(self.start / 1000, timezone.utc).date()
+        last = datetime.fromtimestamp((self.end - 1) / 1000, timezone.utc).date()
+        return [first + timedelta(days=i) for i in range((last - first).days + 1)]
+
+
+def zone_day(d: date, zone: str = "UTC") -> ZoneDay:
+    key = zone_key(zone)
+    tz = ZoneInfo(ZONES[key])
+    nxt = d + timedelta(days=1)
+    start = datetime(d.year, d.month, d.day, tzinfo=tz)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz)
+    return ZoneDay(d, key, int(start.timestamp() * 1000), int(end.timestamp() * 1000))
+
+
+def zone_today(now: datetime, zone: str) -> date:
+    return now.astimezone(ZoneInfo(ZONES[zone_key(zone)])).date()
 
 
 # ------------------------------------------------------------------ config file
@@ -607,15 +653,51 @@ class OpsService:
                 self._order_cache.pop(next(iter(self._order_cache)))
         return st
 
-    def _orders_view(self, d: date, cutoff_ms: int | None, cfg: OpsConfig, service: str | None = None,
+    def _zone_orders(self, z: ZoneDay, now_ms: int) -> dict | None:
+        """The counted orders of the UTC days `z` overlaps, joined: per service, store and order id the
+        first time it was seen. None when a day that has started is not counted yet (today's UTC day
+        may be missing for a few minutes after midnight UTC: its orders show up on the next count)."""
+        states = []
+        today_utc = datetime.fromtimestamp(now_ms / 1000, timezone.utc).date()
+        for ud in z.utc_days():
+            if day_start_ms(ud) > now_ms:
+                continue
+            st = self._day_orders(ud)
+            if st is None:
+                if ud == today_utc and states:
+                    continue
+                return None
+            states.append(st)
+        if not states:
+            return None
+        if len(states) == 1:
+            st = states[0]
+            return {"services": {n: v["orders"] for n, v in st["services"].items()}, "newestMs": st.get("newestMs"),
+                    "final": st.get("final"), "updated": st.get("updated")}
+        merged: dict[str, dict[str, dict[str, int]]] = {}
+        for st in states:
+            for name, svc in st["services"].items():
+                for s_name, ids in svc["orders"].items():
+                    tgt = merged.setdefault(name, {}).setdefault(s_name, {})
+                    for oid, ms in ids.items():
+                        if oid not in tgt or ms < tgt[oid]:
+                            tgt[oid] = ms
+        newest = [st["newestMs"] for st in states if st.get("newestMs")]
+        return {"services": merged, "newestMs": max(newest) if newest else None,
+                "final": all(st.get("final") for st in states),
+                "updated": max((st.get("updated") or "") for st in states) or None}
+
+    def _orders_view(self, z: ZoneDay, cutoff_ms: int | None, cfg: OpsConfig, now_ms: int, service: str | None = None,
                      store: str | None = None) -> dict | None:
         """Per minute, per service and per store counts of one day (only orders first seen before
         cutoff_ms when given). None when the day has not been counted yet."""
-        st = self._day_orders(d)
+        st = self._zone_orders(z, now_ms)
         if st is None:
             return None
-        start = day_start_ms(d)
-        minutes = [0] * 1440
+        start, end = z.start, z.end
+        n = z.minutes
+        n_h = -(-n // 60)
+        minutes = [0] * n
         services, stores = {}, {}
         svc_hours: dict[str, list[int]] = {}
         store_hours: dict[tuple[str, str], list[int]] = {}
@@ -623,37 +705,37 @@ class OpsService:
             svc = st["services"].get(name)
             if svc is None or (service and name != service):
                 continue
-            n = 0
-            sh = svc_hours[name] = [0] * 24
-            for s, ids in svc["orders"].items():
+            total = 0
+            sh = svc_hours[name] = [0] * n_h
+            for s, ids in svc.items():
                 if store and s != store:
                     continue
                 c = 0
-                hh = [0] * 24
+                hh = [0] * n_h
                 for ms in ids.values():
-                    if cutoff_ms is not None and ms >= cutoff_ms:
+                    if not (start <= ms < end) or (cutoff_ms is not None and ms >= cutoff_ms):
                         continue
                     i = (ms - start) // MIN
-                    if 0 <= i < 1440:
-                        minutes[i] += 1
-                        hh[i // 60] += 1
-                        sh[i // 60] += 1
+                    minutes[i] += 1
+                    hh[i // 60] += 1
+                    sh[i // 60] += 1
                     c += 1
                 if c:
                     stores[(name, s)] = c
                     store_hours[(name, s)] = hh
-                n += c
-            services[name] = n
+                total += c
+            services[name] = total
+        newest = st.get("newestMs")
         return {"minutes": minutes, "services": services, "stores": stores, "total": sum(services.values()),
                 "serviceHours": svc_hours, "storeHours": store_hours,
-                "newestMs": st.get("newestMs"), "final": st.get("final"), "updated": st.get("updated")}
+                "newestMs": min(newest, end - 1) if newest else None, "final": st.get("final"), "updated": st.get("updated")}
 
     # -- API metrics (read side)
-    def _api_as_of(self, con, d: date, now_ms: int) -> int | None:
-        start = day_start_ms(d)
-        if now_ms >= start + DAY + SETTLE_MS:
-            return start + DAY - MIN                      # a past day: all of it
-        row = con.execute("SELECT max(t) FROM m WHERE t >= ? AND t < ?", [start, start + DAY]).fetchone()
+    def _api_as_of(self, con, z: ZoneDay, now_ms: int) -> int | None:
+        start, end = z.start, z.end
+        if now_ms >= end + SETTLE_MS:
+            return end - MIN                              # a past day: all of it
+        row = con.execute("SELECT max(t) FROM m WHERE t >= ? AND t < ?", [start, end]).fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
     @staticmethod
@@ -672,53 +754,59 @@ class OpsService:
         return {"asOf": as_of, "ageMs": age, "stale": bool(today and (age is None or age > STALE_MS)),
                 "error": self.metrics.error}
 
-    def summary(self, day: str | None = None, window_minutes: int = 60) -> dict:
+    def summary(self, day: str | None = None, window_minutes: int = 60, zone: str = "UTC") -> dict:
         now = self.now()
         now_ms = int(now.timestamp() * 1000)
-        d = parse_day(day, now.date())
-        is_today = d == now.date()
+        zone = zone_key(zone)
+        today = zone_today(now, zone)
+        d = parse_day(day, today)
+        is_today = d == today
         cfg = self.config.get()
-        start = day_start_ms(d)
+        z = zone_day(d, zone)
+        lz = zone_day(d - timedelta(days=7), zone)
+        start, end, n = z.start, z.end, z.minutes
+        shift = start - lz.start                         # a week, give or take a daylight-saving hour
         con = _db()
         try:
-            paths = self.metrics.paths(start - WEEK, start - WEEK + DAY, now_ms) + self.metrics.paths(start, start + DAY, now_ms)
-            _load_metrics(con, paths, [(start - WEEK, start - WEEK + DAY), (start, start + DAY)])
-            as_of = self._api_as_of(con, d, now_ms)
+            paths = self.metrics.paths(lz.start, lz.end, now_ms) + self.metrics.paths(start, end, now_ms)
+            _load_metrics(con, paths, [(lz.start, lz.end), (start, end)])
+            as_of = self._api_as_of(con, z, now_ms)
             upto = (as_of + MIN) if as_of is not None else start
             per_min = con.execute("SELECT t, sum(calls), sum(e4), sum(e5) FROM m WHERE t >= ? AND t < ? GROUP BY t",
-                                  [start, start + DAY]).fetchall()
-            lw_min = con.execute("SELECT t + ?, sum(calls) FROM m WHERE t >= ? AND t < ? GROUP BY t",
-                                 [WEEK, start - WEEK, start - WEEK + DAY]).fetchall()
+                                  [start, end]).fetchall()
+            lw_min = con.execute("SELECT t, sum(calls) FROM m WHERE t >= ? AND t < ? GROUP BY t",
+                                 [lz.start, lz.end]).fetchall()
             day_rows = self._stage_rows(con, start, upto)
-            lw_rows = self._stage_rows(con, start - WEEK, upto - WEEK)
+            lw_rows = self._stage_rows(con, lz.start, upto - shift)
             w0 = max(start, upto - window_minutes * MIN)
             win = self._stage_rows(con, w0, upto)
-            lw_win = self._stage_rows(con, w0 - WEEK, upto - WEEK)
-            lw_have = con.execute("SELECT count(*) FROM m WHERE t >= ? AND t < ?", [start - WEEK, start - WEEK + DAY]).fetchone()[0]
+            lw_win = self._stage_rows(con, w0 - shift, upto - shift)
+            lw_have = con.execute("SELECT count(*) FROM m WHERE t >= ? AND t < ?", [lz.start, lz.end]).fetchone()[0]
             q15 = 15 * MIN
             spark_rows = con.execute("SELECT api, stage, (t - ?) // ?, sum(calls) FROM m WHERE t >= ? AND t < ? GROUP BY 1, 2, 3",
-                                     [start, q15, start, start + DAY]).fetchall()
+                                     [start, q15, start, end]).fetchall()
             spark_lw = con.execute("SELECT api, stage, (t - ?) // ?, sum(calls) FROM m WHERE t >= ? AND t < ? GROUP BY 1, 2, 3",
-                                   [start - WEEK, q15, start - WEEK, start - WEEK + DAY]).fetchall()
+                                   [lz.start, q15, lz.start, lz.end]).fetchall()
         finally:
             con.close()
-        n_shown = 1440 if not is_today else (0 if as_of is None else (as_of - start) // MIN + 1)
+        n_shown = n if not is_today else (0 if as_of is None else (as_of - start) // MIN + 1)
         # 15-minute buckets for the small charts; today's bucket in progress is left out
-        b_done = 96 if not is_today else (0 if as_of is None else (as_of + MIN - start) // q15)
+        nb, nb_lw = -(-n // 15), -(-lz.minutes // 15)
+        b_done = nb if not is_today else (0 if as_of is None else (as_of + MIN - start) // q15)
         sparks: dict[tuple[str, str], list] = {}
         for api_n, st_n, b, c in spark_rows:
-            arr = sparks.setdefault((api_n, st_n), [0] * 96)
-            if 0 <= b < 96:
+            arr = sparks.setdefault((api_n, st_n), [0] * nb)
+            if 0 <= b < nb:
                 arr[int(b)] = int(c or 0)
         sparks_lw: dict[tuple[str, str], list] = {}
         for api_n, st_n, b, c in spark_lw:
-            arr = sparks_lw.setdefault((api_n, st_n), [0] * 96)
-            if 0 <= b < 96:
+            arr = sparks_lw.setdefault((api_n, st_n), [0] * nb_lw)
+            if 0 <= b < nb_lw:
                 arr[int(b)] = int(c or 0)
-        calls = _minute_array([(t, c) for t, c, _, _ in per_min], start)
-        e4 = _minute_array([(t, v) for t, _, v, _ in per_min], start)
-        e5 = _minute_array([(t, v) for t, _, _, v in per_min], start)
-        lastweek = _minute_array(lw_min, start) if lw_have else None
+        calls = _minute_array([(t, c) for t, c, _, _ in per_min], start, n)
+        e4 = _minute_array([(t, v) for t, _, v, _ in per_min], start, n)
+        e5 = _minute_array([(t, v) for t, _, _, v in per_min], start, n)
+        lastweek = _minute_array(lw_min, lz.start, lz.minutes) if lw_have else None
         cut = lambda arr: [v if i < n_shown else None for i, v in enumerate(arr)]  # noqa: E731
         stages = []
         for key in sorted(set(day_rows) | set(win)):
@@ -737,8 +825,8 @@ class OpsService:
                 "recent": {"calls": w["calls"], "p95": w.get("p95"), "p95LastWeek": (lww or {}).get("p95"),
                            "err5xxPct": _pct(w["err5xx"], w["calls"]), "err4xxPct": _pct(w["err4xx"], w["calls"])},
                 "status": status, "reasons": reasons,
-                "spark": {"now": [v if i < b_done else None for i, v in enumerate(sparks.get(key) or [0] * 96)],
-                          "lastWeek": (sparks_lw.get(key) or [0] * 96) if lw_have else None},
+                "spark": {"now": [v if i < b_done else None for i, v in enumerate(sparks.get(key) or [0] * nb)],
+                          "lastWeek": (sparks_lw.get(key) or [0] * nb_lw) if lw_have else None},
             })
         stages.sort(key=lambda s: -s["calls"])
         total = sum(s["calls"] for s in stages)
@@ -759,10 +847,11 @@ class OpsService:
             "stages": stages,
             "statusCounts": {k: sum(1 for s in stages if s["status"] == k) for k in ("red", "amber", "green", "idle")},
         }
-        return {"day": d.isoformat(), "today": is_today, "generatedAt": now.isoformat(timespec="seconds"),
-                "api": api, "orders": self._orders_summary(d, is_today, now_ms, cfg)}
+        return {"day": d.isoformat(), "zone": zone, "dayStart": start, "dayEnd": end, "today": is_today,
+                "generatedAt": now.isoformat(timespec="seconds"),
+                "api": api, "orders": self._orders_summary(z, lz, is_today, now_ms, cfg)}
 
-    def _orders_summary(self, d: date, is_today: bool, now_ms: int, cfg: OpsConfig) -> dict:
+    def _orders_summary(self, z: ZoneDay, lz: ZoneDay, is_today: bool, now_ms: int, cfg: OpsConfig) -> dict:
         status = self.orders.read_status()
         base = {"lastRun": status.get("lastRun"), "lastOk": status.get("lastOk"), "running": bool(status.get("running")),
                 "error": status.get("error"), "configError": self.config.error,
@@ -770,30 +859,32 @@ class OpsService:
                 "minutes": None, "asOf": None, "ready": False, "lastWeekReady": False}
         if not self.settings.ops_enabled:
             return base
-        cur = self._orders_view(d, None, cfg)
+        cur = self._orders_view(z, None, cfg, now_ms)
         if cur is None:
             return base
-        as_of = cur["newestMs"] if is_today else day_start_ms(d) + DAY - MIN
-        cutoff = (as_of + MIN - WEEK) if as_of is not None else None
-        lw = self._orders_view(d - timedelta(days=7), cutoff, cfg) if cutoff is not None else None
-        lw_full = self._orders_view(d - timedelta(days=7), None, cfg)
-        start = day_start_ms(d)
-        n_shown = 1440 if not is_today else (0 if as_of is None else (as_of - start) // MIN + 1)
+        start = z.start
+        as_of = cur["newestMs"] if is_today else z.end - MIN
+        cutoff = (as_of + MIN - (start - lz.start)) if as_of is not None else None
+        lw = self._orders_view(lz, cutoff, cfg, now_ms) if cutoff is not None else None
+        lw_full = self._orders_view(lz, None, cfg, now_ms)
+        n = z.minutes
+        n_h = -(-n // 60)
+        n_shown = n if not is_today else (0 if as_of is None else (as_of - start) // MIN + 1)
         # whole hours only: the hour in progress would look like a drop at the end of the small charts
-        h_shown = 24 if not is_today else (0 if as_of is None else (as_of + MIN - start) // 3600_000)
+        h_shown = n_h if not is_today else (0 if as_of is None else (as_of + MIN - start) // 3600_000)
         hours = lambda arr: [v if i < h_shown else None for i, v in enumerate(arr)] if arr else None  # noqa: E731
         services = [{"service": s.name, "cluster": s.cluster, "count": cur["services"].get(s.name, 0),
                      "lastWeek": lw["services"].get(s.name, 0) if lw else None,
-                     "hours": hours(cur["serviceHours"].get(s.name) or [0] * 24),
-                     "lastWeekHours": (lw_full["serviceHours"].get(s.name) or [0] * 24) if lw_full else None}
+                     "hours": hours(cur["serviceHours"].get(s.name) or [0] * n_h),
+                     "lastWeekHours": (lw_full["serviceHours"].get(s.name) or [0] * -(-lz.minutes // 60)) if lw_full else None}
                     for s in cfg.services]
         for s in services:
             s["change"] = _change(s["count"], s["lastWeek"])
         keys = set(cur["stores"]) | (set(lw["stores"]) if lw else set())
         stores = [{"service": k[0], "store": k[1], "name": cfg.name(k[1]), "count": cur["stores"].get(k, 0),
                    "lastWeek": lw["stores"].get(k, 0) if lw else None,
-                   "hours": hours(cur["storeHours"].get(k) or [0] * 24),
-                   "lastWeekHours": (lw_full["storeHours"].get(k) or [0] * 24) if lw_full else None} for k in keys]
+                   "hours": hours(cur["storeHours"].get(k) or [0] * n_h),
+                   "lastWeekHours": (lw_full["storeHours"].get(k) or [0] * -(-lz.minutes // 60)) if lw_full else None} for k in keys]
         for s in stores:
             s["change"] = _change(s["count"], s["lastWeek"])
         stores.sort(key=lambda s: (-s["count"], s["name"]))
@@ -849,20 +940,24 @@ class OpsService:
                 "thresholds": cfg.status}
 
     def history(self, day: str | None = None, stage: str | None = None, service: str | None = None,
-                store: str | None = None) -> dict:
+                store: str | None = None, zone: str = "UTC") -> dict:
         now = self.now()
         now_ms = int(now.timestamp() * 1000)
-        d = parse_day(day, now.date())
-        if d < now.date() - timedelta(days=60):
+        zone = zone_key(zone)
+        today = zone_today(now, zone)
+        d = parse_day(day, today)
+        if d < today - timedelta(days=60):
             raise bad_request("INVALID_DAY", "History goes back 60 days at most")
         cfg = self.config.get()
         if service and not cfg.service(service):
             raise bad_request("UNKNOWN_SERVICE", f"No order service called '{service}'")
-        start = day_start_ms(d)
+        z = zone_day(d, zone)
+        lz = zone_day(d - timedelta(days=7), zone)
+        start, n = z.start, z.minutes
         con = _db()
         try:
-            paths = self.metrics.paths(start - WEEK, start - WEEK + DAY, now_ms) + self.metrics.paths(start, start + DAY, now_ms)
-            _load_metrics(con, paths, [(start - WEEK, start - WEEK + DAY), (start, start + DAY)])
+            paths = self.metrics.paths(lz.start, lz.end, now_ms) + self.metrics.paths(start, z.end, now_ms)
+            _load_metrics(con, paths, [(lz.start, lz.end), (start, z.end)])
             all_stages = con.execute("SELECT api, stage, sum(calls) FROM m WHERE t >= ? GROUP BY 1, 2 ORDER BY 3 DESC",
                                      [start]).fetchall()
             filt, fp = "", []
@@ -870,31 +965,34 @@ class OpsService:
                 api_name, _, st_name = stage.rpartition("/")
                 filt, fp = " AND api = ? AND stage = ?", [api_name, st_name]
 
-            def series(a: int, shift: int):
+            def series(zd: ZoneDay):
                 return con.execute(
-                    "SELECT t + ?, sum(calls), sum(e4), sum(e5), "
+                    "SELECT t, sum(calls), sum(e4), sum(e5), "
                     "sum(p95 * calls) / nullif(sum(CASE WHEN p95 IS NOT NULL THEN calls END), 0), "
                     "sum(ip95 * calls) / nullif(sum(CASE WHEN ip95 IS NOT NULL THEN calls END), 0) "
-                    f"FROM m WHERE t >= ? AND t < ?{filt} GROUP BY t", [shift, a, a + DAY, *fp]).fetchall()
-            cur = series(start, 0)
-            lw = series(start - WEEK, WEEK)
+                    f"FROM m WHERE t >= ? AND t < ?{filt} GROUP BY t", [zd.start, zd.end, *fp]).fetchall()
+            cur = series(z)
+            lw = series(lz)
         finally:
             con.close()
-        col = lambda rows, i, rnd=False: _minute_array([(r[0], (_r(r[i]) if rnd else r[i])) for r in rows], start)  # noqa: E731
+
+        def col(rows, i, rnd=False, zd: ZoneDay = z):
+            return _minute_array([(r[0], (_r(r[i]) if rnd else r[i])) for r in rows], zd.start, zd.minutes)
         api = {"start": start, "step": MIN, "calls": col(cur, 1), "err4xx": col(cur, 2), "err5xx": col(cur, 3),
                "p95": col(cur, 4, True), "integrationP95": col(cur, 5, True),
-               "lastWeek": {"calls": col(lw, 1), "err4xx": col(lw, 2), "err5xx": col(lw, 3), "p95": col(lw, 4, True)} if lw else None,
-               "hasData": bool(cur), "shownMinutes": 1440}
+               "lastWeek": {"calls": col(lw, 1, zd=lz), "err4xx": col(lw, 2, zd=lz), "err5xx": col(lw, 3, zd=lz),
+                            "p95": col(lw, 4, True, lz)} if lw else None,
+               "hasData": bool(cur), "shownMinutes": n}
         for arr in (api["p95"], api["integrationP95"]):
             for i, v in enumerate(arr):
                 if v == 0:
                     arr[i] = None
         if api["lastWeek"]:
             api["lastWeek"]["p95"] = [v or None for v in api["lastWeek"]["p95"]]
-        o = self._orders_view(d, None, cfg, service, store)
-        olw = self._orders_view(d - timedelta(days=7), None, cfg, service, store)
-        all_orders = self._orders_view(d, None, cfg)
-        if d == now.date():
+        o = self._orders_view(z, None, cfg, now_ms, service, store)
+        olw = self._orders_view(lz, None, cfg, now_ms, service, store)
+        all_orders = self._orders_view(z, None, cfg, now_ms)
+        if d == today:
             # today: the minutes not copied / counted yet are empty, not 0
             api_n = 0 if not cur else (max(int(r[0]) for r in cur) - start) // MIN + 1
             for k in ("calls", "err4xx", "err5xx", "p95", "integrationP95"):
@@ -904,7 +1002,7 @@ class OpsService:
                 o_n = 0 if not o["newestMs"] else (o["newestMs"] - start) // MIN + 1
                 o["minutes"] = [v if i < o_n else None for i, v in enumerate(o["minutes"])]
         return {
-            "day": d.isoformat(), "stage": stage, "service": service, "store": store,
+            "day": d.isoformat(), "zone": zone, "dayStart": start, "dayEnd": z.end, "stage": stage, "service": service, "store": store,
             "api": api,
             "orders": {"counted": o is not None, "minutes": o["minutes"] if o else None, "total": o["total"] if o else None,
                        "lastWeek": olw["minutes"] if olw else None, "totalLastWeek": olw["total"] if olw else None},

@@ -3,8 +3,8 @@
 # A broken file keeps the last good version and the page says what is wrong.
 #
 # ---------------------------------------------------------------- orders
-# One order = one unique (store, order id) per service per UTC day, counted at the minute it is
-# first seen. Repeats, retries and duplicate lines are not counted again. An order seen by two
+# One order = one unique (store, order id) per service per day, counted at the minute it is
+# first seen (the day of the IST / PST / EST switch on the page). Repeats, retries and duplicate lines are not counted again. An order seen by two
 # services (OMS and CRS) counts once in each, and the total adds the services up.
 #
 #   service   name shown on the page

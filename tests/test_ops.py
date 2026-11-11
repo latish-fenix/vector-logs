@@ -261,3 +261,85 @@ def test_new_shapes_for_the_ui(ops):
     assert o["totalLastWeekDay"] == 2
     bombas = next(x for x in o["stores"] if x["name"] == "Bombas")
     assert bombas["hours"][9] is None and len(bombas["lastWeekHours"]) == 24
+
+
+# ------------------------------------------------------------------ days in IST / PST / EST
+from datetime import date  # noqa: E402
+
+from app.ops import zone_day  # noqa: E402
+
+
+def test_zone_days_follow_daylight_saving():
+    assert zone_day(date(2026, 11, 9), "UTC").start == MS(datetime(2026, 11, 9, tzinfo=timezone.utc))
+    ist = zone_day(date(2026, 11, 9), "ist")
+    assert ist.start == MS(datetime(2026, 11, 8, 18, 30, tzinfo=timezone.utc)) and ist.minutes == 1440
+    assert ist.utc_days() == [date(2026, 11, 8), date(2026, 11, 9)]
+    pst = zone_day(date(2026, 11, 9), "PST")
+    assert pst.start == MS(datetime(2026, 11, 9, 8, tzinfo=timezone.utc))      # PST = UTC − 8 in November
+    assert zone_day(date(2026, 7, 1), "PST").start == MS(datetime(2026, 7, 1, 7, tzinfo=timezone.utc))  # PDT in summer
+    assert zone_day(date(2026, 11, 9), "EST").start == MS(datetime(2026, 11, 9, 5, tzinfo=timezone.utc))
+    assert zone_day(date(2026, 11, 1), "PST").minutes == 1500                  # clocks went back: 25 hours
+    assert zone_day(date(2026, 3, 8), "EST").minutes == 1380                   # clocks went forward: 23 hours
+
+
+def test_summary_in_pst(ops):
+    s = ops.summary(zone="PST")
+    assert s["zone"] == "PST" and s["day"] == "2026-11-09"          # 02:30 in the morning in California
+    api = s["api"]
+    start = MS(datetime(2026, 11, 9, 8, tzinfo=timezone.utc))
+    assert api["minutes"]["start"] == start and s["dayStart"] == start
+    assert api["calls"] == 110 * 146                                # 08:00–10:26 UTC = 00:00–02:26 PST
+    assert api["callsLastWeek"] == 110 * 146                        # 2 Nov 00:00–02:26 PST
+    assert api["minutes"]["calls"][0] == 110 and api["minutes"]["calls"][146] is None
+    o = s["orders"]
+    assert o["total"] == 5 and o["minutes"]["start"] == start
+    assert o["minutes"]["counts"][60] == 1                          # 222 first seen 09:00:30 UTC = 01:00 PST
+    assert o["totalLastWeek"] == 1                                  # 900 at 2 Nov 09:03 UTC; 901 came after the cut-off
+
+
+def test_summary_in_ist_and_bad_zone(ops):
+    s = ops.summary(zone="IST")
+    assert s["day"] == "2026-11-09"
+    m = s["api"]["minutes"]
+    assert m["start"] == MS(datetime(2026, 11, 8, 18, 30, tzinfo=timezone.utc))
+    assert m["calls"][329] == 0 and m["calls"][330] == 110          # the copies start at 00:00 UTC = 05:30 IST
+    assert s["api"]["calls"] == 110 * 626
+    with pytest.raises(Exception) as e:
+        ops.summary(zone="CET")
+    assert getattr(e.value, "code", "") == "INVALID_ZONE"
+
+
+def test_orders_across_two_utc_days(ops, data):
+    """An IST day spans two UTC days: an order seen on both counts once, at its first sighting."""
+    late = datetime(2026, 11, 8, 23, 0, tzinfo=timezone.utc)
+    write_logs(data, "alpha-oms-routing", late, [(late + timedelta(minutes=50), ROUTE.format("555"))], name="x")
+    early = datetime(2026, 11, 9, 0, 0, tzinfo=timezone.utc)
+    write_logs(data, "alpha-oms-routing", early, [(early + timedelta(minutes=10), ROUTE.format("555")),
+                                                  (early + timedelta(minutes=20), ROUTE.format("666"))], name="y")
+    ops.orders.logs._lists = type(ops.orders.logs._lists)()
+    ops.orders.path(date(2026, 11, 8)).unlink()                     # 8 Nov was final already: count it again
+    ops.orders.run_once(days_back=7)
+    ist = ops.summary(zone="IST")["orders"]
+    oms = next(x for x in ist["services"] if x["service"] == "OMS")
+    assert oms["count"] == 4                                         # 111, 222, 555 (once), 666
+    assert ist["minutes"]["counts"][(23 * 60 + 50) - (18 * 60 + 30)] == 1   # 555 at 23:50 UTC = 05:20 IST
+    utc = ops.summary()["orders"]
+    assert next(x for x in utc["services"] if x["service"] == "OMS")["count"] == 4   # UTC 9 Nov: 111, 222, 555, 666
+    pst8 = ops.summary(day="2026-11-08", zone="PST")["orders"]       # 8 Nov PST = 8 Nov 08:00 – 9 Nov 08:00 UTC
+    assert next(x for x in pst8["services"] if x["service"] == "OMS")["count"] == 2  # 555, 666
+
+
+def test_history_in_est_and_routes(ops, tmp_path, data):
+    h = ops.history(zone="EST")
+    assert h["zone"] == "EST" and h["api"]["start"] == MS(datetime(2026, 11, 9, 5, tzinfo=timezone.utc))
+    assert h["api"]["shownMinutes"] == 326 and h["api"]["calls"][0] == 110 and h["api"]["calls"][326] is None
+    assert len(h["api"]["calls"]) == 1440 and h["orders"]["total"] == 5
+    past = ops.history(day="2026-11-01", zone="PST")                 # 25 hours long
+    assert len(past["api"]["calls"]) == 1500 and past["dayEnd"] - past["dayStart"] == 25 * 3600_000
+    cfg = tmp_path / "ops-dashboard.yaml"
+    app = create_app(make_settings(tmp_path, data, ops_config_file=str(cfg)))
+    app.state.ops.now = lambda: NOW
+    c = TestClient(app)
+    assert c.get("/api/v1/ops/summary?zone=pst", headers=ROOT_H).json()["zone"] == "PST"
+    assert c.get("/api/v1/ops/history?zone=EST", headers=ROOT_H).json()["zone"] == "EST"
+    assert c.get("/api/v1/ops/summary?zone=XYZ", headers=ROOT_H).json()["error"]["code"] == "INVALID_ZONE"
