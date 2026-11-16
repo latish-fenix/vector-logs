@@ -37,6 +37,7 @@ def env(tmp_path, logs_dir):
     slack = Slack()
     svc: AlertService = app.state.alerts
     svc.sender = slack
+    svc.ops = None                       # no end-of-day summary here (tests/test_daily_summary.py)
     svc.set_webhook(HOOK, "root")
     return TestClient(app), svc, slack, Path(svc.mutes.path)
 

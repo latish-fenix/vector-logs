@@ -426,6 +426,8 @@ export interface AlertSubject {
 export interface AlertRule {
   id: string; type: string; title: string; name: string; enabled: boolean; params: Record<string, unknown>;
   forMinutes: number; updatedAt?: string; updatedBy?: string; level?: AlertLevel | "two"; every?: number; confirm?: number;
+  /** The Slack channel it posts to: "main" (HTTP error-rate alerts) or "infra" (the rest). */
+  channel: AlertChannel;
   status: {
     lastRunAt: number | null; lastError: string | null; tookMs: number | null; firing: AlertSubject[]; pending: AlertSubject[];
     muted?: { subject: string; ids: string[]; level?: AlertLevel; since: number; message?: string }[];
@@ -443,11 +445,23 @@ export interface AlertSettings {
   consoleUrl: string; timeZone: string; timeZone2: string; paused: boolean; mutesPaused: boolean; updatedAt?: string; updatedBy?: string;
   thresholds: AlertThresholds; repeat: { warning: number; critical: number };
   digest: { enabled: boolean; day: string; time: string };
+  /** End-of-day ops summary: the day that just ended in `zone`, posted at `time` there. */
+  daily: { enabled: boolean; zone: "EST" | "PST" | "IST"; time: string };
 }
+export type AlertChannel = "main" | "infra";
+export interface SlackHook { configured: boolean; hint: string | null; updatedAt?: string; updatedBy?: string }
 export interface AlertsOverview {
   settings: AlertSettings;
-  slack: { configured: boolean; hint: string | null; updatedAt?: string; updatedBy?: string };
-  checker: { checkedAt: number | null; pid?: number; since?: number; intervalSeconds: number; background: boolean; digestSentFor?: string | null };
+  slack: SlackHook;
+  /** The infra channel: every alert not on the main channel; not set = they go to the main channel. */
+  infraSlack: SlackHook;
+  /** Rule types that post to the main channel unless moved. */
+  mainChannelTypes: string[];
+  /** The summaries channel (daily + weekly); not set = they go to the main channel. */
+  digestSlack: SlackHook;
+  dailyAvailable: boolean;
+  dailyZones: string[];
+  checker: { checkedAt: number | null; pid?: number; since?: number; intervalSeconds: number; background: boolean; digestSentFor?: string | null; dailySentFor?: string | null };
   rules: AlertRule[];
   snoozes: AlertSnooze[];
   mutes: AlertMutes;

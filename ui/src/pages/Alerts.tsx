@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
+  type AlertChannel,
+  type SlackHook,
   get, request,
   type AlertEvent, type AlertFinding, type AlertLevel, type AlertMuteEntry, type AlertOptions, type AlertPair, type AlertParamSpec, type AlertRule,
   type AlertSettings, type AlertSubject, type AlertThresholds, type AlertsOverview, type AlertType,
@@ -74,7 +76,7 @@ function AdminAlerts() {
       </section>
       <History />
       {adding && <TypePicker catalog={d.catalog} onClose={() => setAdding(false)} onPick={(type) => { setAdding(false); setEditing({ type }); }} />}
-      {editing?.type && <RuleDialog type={editing.type} rule={editing.rule} lag={d.lbLagMinutes} settings={d.settings} onClose={() => setEditing(null)} />}
+      {editing?.type && <RuleDialog type={editing.type} rule={editing.rule} lag={d.lbLagMinutes} settings={d.settings} mainTypes={d.mainChannelTypes} onClose={() => setEditing(null)} />}
     </>
   );
 }
@@ -82,28 +84,21 @@ function AdminAlerts() {
 function SlackCard({ d }: { d: AlertsOverview }) {
   const qc = useQueryClient();
   const toast = useToast();
-  const [url, setUrl] = useState("");
   const [consoleUrl, setConsoleUrl] = useState(d.settings.consoleUrl || "");
   const [tz, setTz] = useState(d.settings.timeZone || "UTC");
   const [tz2, setTz2] = useState(d.settings.timeZone2 ?? "");
   const [error, setError] = useState<unknown>(null);
   const done = (text: string) => { setError(null); toast(text); qc.invalidateQueries({ queryKey: ["alerts"] }); };
-  const save = useMutation({ mutationFn: () => request("/admin/alerts/slack", { method: "PUT", body: { webhookUrl: url.trim() } }),
-    onSuccess: () => { setUrl(""); done("Slack webhook saved"); }, onError: setError });
-  const test = useMutation({ mutationFn: () => request("/admin/alerts/slack/_test", { method: "POST", body: { webhookUrl: url.trim() || null } }),
-    onSuccess: () => done("Test message sent: check the Slack channel"), onError: setError });
-  const remove = useMutation({ mutationFn: () => request("/admin/alerts/slack", { method: "DELETE" }),
-    onSuccess: () => done("Slack webhook removed"), onError: setError });
   const settings = useMutation({ mutationFn: (body: Record<string, unknown>) => request("/admin/alerts/settings", { method: "PUT", body }),
     onSuccess: () => done("Saved"), onError: setError });
   const here = window.location.origin;
   const zones = ZONES.includes(tz) ? ZONES : [tz, ...ZONES];
   const zones2 = !tz2 || ZONES.includes(tz2) ? ZONES : [tz2, ...ZONES];
-  const busy = save.isPending || test.isPending || remove.isPending || settings.isPending;
+  const busy = settings.isPending;
   return (
     <section className="card">
       <div className="card-head">
-        <div className="grow"><span className="card-title">Slack</span><span className="hint">Alerts go to one channel through a Slack incoming webhook. The URL is kept in AWS Secrets Manager and never shown again.</span></div>
+        <div className="grow"><span className="card-title">Slack</span><span className="hint">Three channels, each through a Slack incoming webhook. Each rule says which alert channel it posts to (change it in the rule). The URLs are kept in AWS Secrets Manager and never shown again.</span></div>
         {d.slack.configured && (
           <button type="button" className="btn btn-sm" onClick={() => settings.mutate({ paused: !d.settings.paused })} disabled={busy}>
             {d.settings.paused ? "Resume notifications" : "Pause notifications"}
@@ -111,17 +106,17 @@ function SlackCard({ d }: { d: AlertsOverview }) {
         )}
       </div>
       <div className="card-body stack">
-        <div className="field">
-          <label className="label" htmlFor="hook">{d.slack.configured ? "Change the webhook URL" : "Webhook URL"} {d.slack.configured && <span className="hint">· now <span className="mono">{d.slack.hint}</span></span>}</label>
-          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-            <input id="hook" className="input mono" style={{ flex: "1 1 360px" }} type="password" autoComplete="off" spellCheck={false}
-              placeholder="https://hooks.slack.com/services/T…/B…/…" value={url} onChange={(e) => setUrl(e.target.value)} />
-            <button type="button" className="btn btn-primary" disabled={!url.trim() || busy} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : null} Save</button>
-            <button type="button" className="btn" disabled={(!url.trim() && !d.slack.configured) || busy} onClick={() => test.mutate()}>{test.isPending ? <Spinner /> : <Icon name="external" />} Send test message</button>
-            {d.slack.configured && <button type="button" className="btn btn-ghost btn-danger" disabled={busy} onClick={() => { if (window.confirm("Remove the Slack webhook? Alerts will only be kept in the history.")) remove.mutate(); }}>Remove</button>}
-          </div>
-          <span className="hint">In Slack: <strong>Apps → Incoming WebHooks</strong> (or your Slack app's <em>Incoming Webhooks</em> page) → <strong>Add New Webhook</strong>, pick the channel, copy the URL. "Send test message" tests the URL in the box, or the saved one when the box is empty.</span>
+        <div className="slack-channels">
+          <WebhookField id="hook" title="Main channel" sub="HTTP 5xx / 4xx error-rate alerts" hook={d.slack} path="/admin/alerts/slack"
+            removeText="Remove the main webhook? Its alerts will only be kept in the history." onDone={done} onError={setError} />
+          <WebhookField id="hook3" title="Infra channel" sub="every other alert, e.g. #infra-alerts" hook={d.infraSlack} path="/admin/alerts/slack/infra"
+            removeText="Remove the infra webhook? Infra alerts will go to the main channel." onDone={done} onError={setError}
+            empty="Not set: infra alerts go to the main channel." />
+          <WebhookField id="hook2" title="Summaries channel" sub="end-of-day and weekly, e.g. #daily-ops-digest" hook={d.digestSlack} path="/admin/alerts/slack/digest"
+            removeText="Remove the summaries webhook? Summaries will go to the main channel." onDone={done} onError={setError}
+            empty="Not set: summaries go to the main channel." />
         </div>
+        <span className="hint">In Slack: <strong>Apps → Incoming WebHooks</strong> (or your Slack app's <em>Incoming Webhooks</em> page) → <strong>Add New Webhook</strong>, pick the channel, copy the URL. "Send test" tests the URL in the box, or the saved one when the box is empty.</span>
         <div className="grid-2" style={{ gap: 16 }}>
           <div className="field">
             <label className="label" htmlFor="curl">Console address <span className="hint">· for links in Slack</span></label>
@@ -155,6 +150,54 @@ function SlackCard({ d }: { d: AlertsOverview }) {
   );
 }
 
+/** One Slack incoming webhook: paste, save, test, remove. */
+function WebhookField({ id, title, sub, hook, path, removeText, empty, onDone, onError }: {
+  id: string; title: string; sub: string; hook: SlackHook; path: string; removeText: string; empty?: string;
+  onDone: (text: string) => void; onError: (e: unknown) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const save = useMutation({ mutationFn: () => request(path, { method: "PUT", body: { webhookUrl: url.trim() } }),
+    onSuccess: () => { setUrl(""); onDone(`${title} saved`); }, onError });
+  const test = useMutation({ mutationFn: () => request(`${path}/_test`, { method: "POST", body: { webhookUrl: url.trim() || null } }),
+    onSuccess: () => onDone("Test message sent: check the Slack channel"), onError });
+  const remove = useMutation({ mutationFn: () => request(path, { method: "DELETE" }),
+    onSuccess: () => onDone(`${title} removed`), onError });
+  const busy = save.isPending || test.isPending || remove.isPending;
+  return (
+    <div className="field">
+      <label className="label" htmlFor={id}>
+        {title} <span className="hint">· {sub}</span>
+      </label>
+      <span className="hint" style={{ marginTop: -2 }}>
+        {hook.configured ? <>Set: <span className="mono">{hook.hint}</span>{hook.updatedBy ? ` · by ${hook.updatedBy} ${ago(hook.updatedAt)}` : ""}</> : (empty ?? "Not set.")}
+      </span>
+      <input id={id} className="input mono" type="password" autoComplete="off" spellCheck={false}
+        placeholder={hook.configured ? "Paste a new URL to change it" : "https://hooks.slack.com/services/T…/B…/…"} value={url} onChange={(e) => setUrl(e.target.value)} />
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <button type="button" className="btn btn-primary btn-sm" disabled={!url.trim() || busy} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : null} Save</button>
+        <button type="button" className="btn btn-sm" disabled={(!url.trim() && !hook.configured) || busy} onClick={() => test.mutate()}>{test.isPending ? <Spinner /> : <Icon name="external" />} Send test</button>
+        {hook.configured && <button type="button" className="btn btn-ghost btn-danger btn-sm" disabled={busy} onClick={() => { if (window.confirm(removeText)) remove.mutate(); }}>Remove</button>}
+      </div>
+    </div>
+  );
+}
+
+const DAILY_ZONE_NAME: Record<string, string> = { EST: "US Eastern", PST: "US Pacific", IST: "India" };
+
+/** The end-of-day summary as Slack will show it (mrkdwn as plain text). */
+function DailyPreview({ onClose }: { onClose: () => void }) {
+  const q = useQuery({ queryKey: ["daily-preview"], queryFn: () => get<{ text: string; summary: { title: string } }>("/admin/alerts/daily/_preview"), retry: false });
+  return (
+    <Dialog title="End-of-day summary" subtitle={q.data ? `For ${q.data.summary.title}, as it would be posted now. Nothing is sent.` : "Building it from the Ops dashboard…"} onClose={onClose} wide>
+      {q.isLoading ? <Loading what="Reading the day's numbers…" /> : q.error ? <ErrorCallout error={q.error} admin /> : (
+        <pre className="mono" style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.55, margin: 0, padding: 14, borderRadius: 8, background: "var(--surface-2)", border: "1px solid var(--border)", maxHeight: "60vh", overflow: "auto" }}>
+          {q.data!.text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")}
+        </pre>
+      )}
+    </Dialog>
+  );
+}
+
 // ------------------------------------------------------------------ thresholds, reminders, weekly summary
 
 const DAY_NAMES: Record<string, string> = { mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday" };
@@ -179,14 +222,16 @@ function ThresholdsCard({ d }: { d: AlertsOverview }) {
   const [t, setT] = useState<AlertThresholds>(() => JSON.parse(JSON.stringify(s.thresholds)));
   const [repeat, setRepeat] = useState(s.repeat);
   const [digest, setDigest] = useState(s.digest);
+  const [daily, setDaily] = useState(s.daily);
+  const [preview, setPreview] = useState(false);
   const [picking, setPicking] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const opts = useQuery({ queryKey: ["alert-options"], queryFn: () => get<AlertOptions>("/admin/alerts/options"), enabled: picking, staleTime: 60_000 });
-  const dirty = JSON.stringify([t, repeat, digest]) !== JSON.stringify([s.thresholds, s.repeat, s.digest]);
+  const dirty = JSON.stringify([t, repeat, digest, daily]) !== JSON.stringify([s.thresholds, s.repeat, s.digest, s.daily]);
   const pairs = [t.cpu, t.memory, t.disk, ...Object.values(t.clusters).flatMap((c) => [c.cpu, c.memory])].filter(Boolean) as AlertPair[];
   const invalid = pairs.some((p) => !(p.warning < p.critical) || p.warning < 1 || p.critical > 100);
   const save = useMutation({
-    mutationFn: () => request("/admin/alerts/settings", { method: "PUT", body: { thresholds: t, repeat, digest } }),
+    mutationFn: () => request("/admin/alerts/settings", { method: "PUT", body: { thresholds: t, repeat, digest, daily } }),
     onSuccess: () => { setError(null); toast("Saved"); qc.invalidateQueries({ queryKey: ["alerts"] }); },
     onError: setError,
   });
@@ -195,7 +240,14 @@ function ThresholdsCard({ d }: { d: AlertsOverview }) {
     onSuccess: () => { setError(null); toast("Weekly summary posted to Slack"); qc.invalidateQueries({ queryKey: ["alert-history"] }); },
     onError: setError,
   });
-  const reset = () => { setT(JSON.parse(JSON.stringify(s.thresholds))); setRepeat(s.repeat); setDigest(s.digest); setError(null); };
+  const sendDaily = useMutation({
+    mutationFn: () => request("/admin/alerts/daily/_send", { method: "POST" }),
+    onSuccess: () => { setError(null); toast("End-of-day summary posted to Slack"); qc.invalidateQueries({ queryKey: ["alert-history"] }); },
+    onError: setError,
+  });
+  const anyHook = d.slack.configured || d.digestSlack.configured;
+  const summariesTo = d.digestSlack.configured ? "the summaries channel" : "the main channel";
+  const reset = () => { setT(JSON.parse(JSON.stringify(s.thresholds))); setRepeat(s.repeat); setDigest(s.digest); setDaily(s.daily); setError(null); };
   const setCluster = (name: string, metric: "cpu" | "memory", v: AlertPair) =>
     setT((x) => ({ ...x, clusters: { ...x.clusters, [name]: { ...x.clusters[name], [metric]: v } } }));
   const dropCluster = (name: string) => setT((x) => { const c = { ...x.clusters }; delete c[name]; return { ...x, clusters: c }; });
@@ -205,7 +257,7 @@ function ThresholdsCard({ d }: { d: AlertsOverview }) {
   return (
     <section className="card">
       <div className="card-head">
-        <div className="grow"><span className="card-title">Thresholds, reminders and the weekly summary</span>
+        <div className="grow"><span className="card-title">Thresholds, reminders and summaries</span>
           <span className="hint">Two lines: warning and critical. An alert clears only 2 points below its line, so a value hovering around it doesn't post again and again. CPU alerts after 2 checks in a row (every 5 minutes).</span></div>
       </div>
       <div className="card-body stack">
@@ -278,10 +330,32 @@ function ThresholdsCard({ d }: { d: AlertsOverview }) {
             <input aria-label="Time" className="input" type="time" value={digest.time} disabled={!digest.enabled} onChange={(e) => setDigest((x) => ({ ...x, time: e.target.value }))} style={{ width: 120 }} />
             <span className="hint">{zone}</span>
             <div className="grow" />
-            <button type="button" className="btn btn-sm" disabled={!d.slack.configured || send.isPending} onClick={() => send.mutate()}>{send.isPending ? <Spinner /> : null} Send it now</button>
+            <button type="button" className="btn btn-sm" disabled={!anyHook || send.isPending} onClick={() => send.mutate()}>{send.isPending ? <Spinner /> : null} Send it now</button>
           </div>
-          <span className="hint">Alerts of the last 7 days per rule, what is failing now, what is snoozed, and rules that can't check.{d.checker.digestSentFor ? ` Last sent for ${d.checker.digestSentFor}.` : ""}</span>
+          <span className="hint">Alerts of the last 7 days per rule, what is failing now, what is snoozed, and rules that can't check. Posted to {summariesTo}.{d.checker.digestSentFor ? ` Last sent for ${d.checker.digestSentFor}.` : ""}</span>
         </div>
+        {d.dailyAvailable && (
+          <div className="field">
+            <span className="label">End-of-day summary</span>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <label className="check"><input type="checkbox" checked={daily.enabled} onChange={(e) => setDaily((x) => ({ ...x, enabled: e.target.checked }))} /> Post the day that just ended in</label>
+              <select aria-label="Day of" className="select" style={{ width: "auto" }} value={daily.zone} disabled={!daily.enabled} onChange={(e) => setDaily((x) => ({ ...x, zone: e.target.value as typeof x.zone }))}>
+                {d.dailyZones.map((z) => <option key={z} value={z}>{DAILY_ZONE_NAME[z] ?? z}</option>)}
+              </select>
+              <span className="hint">at</span>
+              <input aria-label="Daily summary time" className="input" type="time" value={daily.time} disabled={!daily.enabled} onChange={(e) => setDaily((x) => ({ ...x, time: e.target.value }))} style={{ width: 120 }} />
+              <span className="hint">{DAILY_ZONE_NAME[daily.zone] ?? daily.zone} time</span>
+              <div className="grow" />
+              <button type="button" className="btn btn-sm" onClick={() => setPreview(true)}><Icon name="eye" size={15} /> Preview</button>
+              <button type="button" className="btn btn-sm" disabled={!anyHook || sendDaily.isPending} onClick={() => sendDaily.mutate()}>{sendDaily.isPending ? <Spinner /> : null} Send it now</button>
+            </div>
+            <span className="hint">
+              API calls and orders against the same day last week, problem stages, top stores and the day's alerts, from the Ops dashboard. Posted to {summariesTo}.
+              {d.checker.dailySentFor ? ` Last sent for ${d.checker.dailySentFor}.` : ""}
+            </span>
+          </div>
+        )}
+        {preview && <DailyPreview onClose={() => setPreview(false)} />}
         {dirty && (
           <div className="row" style={{ gap: 8 }}>
             <button type="button" className="btn btn-primary btn-sm" disabled={save.isPending || invalid} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : null} Save</button>
@@ -507,7 +581,7 @@ function RulesTable({ d, onEdit }: { d: AlertsOverview; onEdit: (r: AlertRule) =
                     <tr>
                       <td><label className="check" title={r.enabled ? "Turn off" : "Turn on"}><input type="checkbox" checked={r.enabled} disabled={toggle.isPending} onChange={() => toggle.mutate(r)} /><span className="sr-only">On</span></label></td>
                       <td>
-                        <div style={{ fontWeight: 600 }}>{r.name}</div>
+                        <div style={{ fontWeight: 600 }}>{r.name} <span className={`chan-tag ${r.channel}`} title={r.channel === "main" ? "Posts to the main channel" : "Posts to the infra channel"}>{r.channel === "main" ? "main" : "infra"}</span></div>
                         {r.name !== r.title && <div className="hint">{r.title}</div>}
                       </td>
                       <td style={{ maxWidth: 460 }}>{describeRule(r, d.settings)}<div className="hint" style={{ fontSize: 12 }}>{levelText(r.level)} · every {r.every === 1 ? "minute" : `${r.every ?? "?"} min`}{(r.confirm ?? 1) > 1 ? ` · ${r.confirm} checks in a row` : ""}</div></td>
@@ -581,7 +655,7 @@ function TypePicker({ catalog, onPick, onClose }: { catalog: AlertType[]; onPick
 
 // ------------------------------------------------------------------ the rule editor
 
-function RuleDialog({ type, rule, lag, settings, onClose }: { type: AlertType; rule?: AlertRule; lag: number; settings: AlertSettings; onClose: () => void }) {
+function RuleDialog({ type, rule, lag, settings, mainTypes, onClose }: { type: AlertType; rule?: AlertRule; lag: number; settings: AlertSettings; mainTypes: string[]; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
   const needsOptions = type.params.some((p) => ["logClusters", "ecsClusters", "lbs", "targetGroups"].includes(p.kind));
@@ -592,12 +666,13 @@ function RuleDialog({ type, rule, lag, settings, onClose }: { type: AlertType; r
     ...Object.fromEntries(type.params.map((p) => [p.key, p.default])), ...(rule?.params ?? {}),
   }));
   const [forMinutes, setFor] = useState(rule?.forMinutes ?? type.forMinutes);
+  const [channel, setChannel] = useState<AlertChannel>(rule?.channel ?? (mainTypes.includes(type.type) ? "main" : "infra"));
   const [error, setError] = useState<unknown>(null);
   const [preview, setPreview] = useState<{ findings: AlertFinding[]; bad: number } | null>(null);
-  const body = { type: type.type, name, enabled, params, forMinutes };
+  const body = { type: type.type, name, enabled, params, forMinutes, channel };
   const save = useMutation({
     mutationFn: () => rule
-      ? request(`/admin/alerts/rules/${rule.id}`, { method: "PUT", body: { name, enabled, params, forMinutes } })
+      ? request(`/admin/alerts/rules/${rule.id}`, { method: "PUT", body: { name, enabled, params, forMinutes, channel } })
       : request("/admin/alerts/rules", { method: "POST", body }),
     onSuccess: () => { toast(rule ? "Rule saved" : "Rule added"); qc.invalidateQueries({ queryKey: ["alerts"] }); onClose(); },
     onError: setError,
@@ -634,9 +709,18 @@ function RuleDialog({ type, rule, lag, settings, onClose }: { type: AlertType; r
             {type.type === "app_disk" ? `Disk: ${pair(settings.thresholds.disk)}.` : `CPU: ${pair(settings.thresholds.cpu)} · memory: ${pair(settings.thresholds.memory)}${Object.keys(settings.thresholds.clusters).length ? `, other lines for ${Object.keys(settings.thresholds.clusters).join(", ")}` : ""}.`} Change them in “Thresholds” on the Alerts page.
           </Callout>
         )}
-        <div className="field">
-          <label className="label" htmlFor="rfor">Alert only after it has been bad for</label>
-          <div className="row" style={{ gap: 8 }}><input id="rfor" className="input" type="number" min={0} max={1440} value={forMinutes} onChange={(e) => setFor(Number(e.target.value))} style={{ width: 110 }} /> <span className="hint">min · 0 = as soon as the checks agree</span></div>
+        <div className="grid-2" style={{ gap: 16 }}>
+          <div className="field">
+            <label className="label" htmlFor="rfor">Alert only after it has been bad for</label>
+            <div className="row" style={{ gap: 8 }}><input id="rfor" className="input" type="number" min={0} max={1440} value={forMinutes} onChange={(e) => setFor(Number(e.target.value))} style={{ width: 110 }} /> <span className="hint">min · 0 = as soon as the checks agree</span></div>
+          </div>
+          <div className="field">
+            <label className="label" htmlFor="rchan">Post to</label>
+            <select id="rchan" className="select" value={channel} onChange={(e) => setChannel(e.target.value as AlertChannel)}>
+              <option value="main">Main channel (HTTP error-rate alerts)</option>
+              <option value="infra">Infra channel (#infra-alerts)</option>
+            </select>
+          </div>
         </div>
         <span className="hint">
           {levelText(type.level).replace(/^./, (c) => c.toUpperCase())}. Checked every {type.every === 1 ? "minute" : `${type.every} minutes`}{confirmOf(type.type, params, type.confirm) > 1 ? `; alerts when ${confirmOf(type.type, params, type.confirm)} checks in a row agree` : ""}.
@@ -803,7 +887,7 @@ function History() {
 
 function EventBadge({ e }: { e: AlertEvent }) {
   if (e.event === "resolved") return <Badge tone="green">OK again</Badge>;
-  if (e.event === "digest") return <Badge tone="blue">weekly summary</Badge>;
+  if (e.event === "digest") return <Badge tone="blue">{e.type === "daily" ? "daily summary" : "weekly summary"}</Badge>;
   if (e.event === "muted") return <span title={`Would have been ${e.level ?? "an alert"}`}><Badge>muted · {e.level ?? "alert"}</Badge></span>;
   const level = e.level ?? "critical";
   const text = e.event === "escalated" ? `${level} ↑` : e.event === "lowered" ? `${level} ↓` : e.event === "repeat" ? `still ${level}` : level;

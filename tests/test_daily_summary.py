@@ -1,0 +1,182 @@
+"""End-of-day ops summary (#daily-ops-digest) and the second Slack channel for summaries."""
+from __future__ import annotations
+
+import shutil
+from datetime import date, datetime, timedelta, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.alerts import MINUTE
+from app.daily_summary import problem_stages
+from app.ecs_health import HealthService
+from app.main import create_app
+from app.ops import DEFAULT_STATUS
+from conftest import ROOT_H, make_settings
+from fake_aws import FakeAws
+from test_alerts import Slack
+from test_ops import FELINA, INSTANT, RATE, REPO_CONFIG, ROUTE, VUORI, write_logs, write_metrics
+
+ALERTS_HOOK = "https://hooks.slack.com/services/T000/B000/alertsalertsalerts"
+DIGEST_HOOK = "https://hooks.slack.com/services/T000/B111/digestdigestdigest"
+URL = "/api/v1/admin/alerts"
+# Mon 9 Nov 2026 00:30 US Eastern (EST, UTC-5): Sunday 8 Nov has just ended there
+NOW = datetime(2026, 11, 9, 5, 30, tzinfo=timezone.utc)
+MS = lambda dt: int(dt.timestamp() * 1000)  # noqa: E731
+
+
+@pytest.fixture()
+def env(tmp_path):
+    root = tmp_path / "logs"
+    good = dict(calls=10, e4=1, e5=0, p95=100)
+    # the EST day 8 Nov = 8 Nov 05:00 – 9 Nov 05:00 UTC; last week 1 Nov (a 25-hour day: clocks went back)
+    for d in (date(2026, 11, 8), date(2026, 11, 1), date(2026, 11, 2)):
+        write_metrics(root, d, None, {FELINA: good, VUORI: dict(calls=100, e4=0, e5=0, p95=200)})
+    write_metrics(root, date(2026, 11, 9), datetime(2026, 11, 9, 5, 25, tzinfo=timezone.utc),
+                  {FELINA: good, VUORI: dict(calls=100, e4=0, e5=5, p95=200)})
+    # vuori: 5 % 5xx on the 8th (from 05:00 UTC, i.e. all of the EST day)
+    write_metrics(root, date(2026, 11, 8), None, {FELINA: good, VUORI: dict(calls=100, e4=0, e5=5, p95=200)})
+    t = datetime(2026, 11, 8, 15, tzinfo=timezone.utc)
+    write_logs(root, "alpha-oms-routing", t, [(t + timedelta(minutes=1), ROUTE.format("111")), (t + timedelta(minutes=2), ROUTE.format("222"))])
+    write_logs(root, "bombas-crs-1", t, [(t + timedelta(minutes=3), RATE.format("bombas.myshopify.com", "9001")),
+                                         (t + timedelta(minutes=4), INSTANT.format("felinagroup.myshopify.com", "9002"))])
+    lw = datetime(2026, 11, 1, 15, tzinfo=timezone.utc)
+    write_logs(root, "alpha-oms-routing", lw, [(lw + timedelta(minutes=1), ROUTE.format("100"))])
+    cfg = tmp_path / "ops-dashboard.yaml"
+    shutil.copy(REPO_CONFIG, cfg)
+    app = create_app(make_settings(tmp_path, root, ops_config_file=str(cfg)), health=HealthService("us-west-2", clients=FakeAws()))
+    ops, svc = app.state.ops, app.state.alerts
+    ops.now = ops.orders.now = lambda: NOW
+    ops.orders.run_once(days_back=9)
+    slack = Slack()
+    svc.sender = slack
+    svc.set_webhook(ALERTS_HOOK, "root")
+    # an alert that started on the 8th (EST), and one from the day before
+    svc._append_history([
+        {"id": "a1", "at": MS(datetime(2026, 11, 8, 18, tzinfo=timezone.utc)), "event": "firing", "level": "critical",
+         "ruleName": "Tasks below desired", "subject": "bombas-crs-1", "cluster": None},
+        {"id": "a0", "at": MS(datetime(2026, 11, 8, 3, tzinfo=timezone.utc)), "event": "firing", "level": "warning",
+         "ruleName": "CPU", "subject": "x", "cluster": None}])
+    return TestClient(app), svc, slack
+
+
+def test_message(env):
+    _, svc, _ = env
+    msg = svc.daily_message("2026-11-08", now=MS(NOW))
+    text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
+    assert "Daily ops summary · Sun 08 Nov* (US Eastern day, vs Sun 01 Nov)" in text
+    assert "*API calls:* 158,400" in text                       # 110 a minute × 1440 minutes
+    assert "158,400 · ▼ 4.0%" in text                           # last week's day had 25 hours: 165,000
+    assert "4xx 0.91% · 5xx 4.55%" in text and "busiest minute 110/min at 00:00 EST (10:30 IST)" in text
+    assert ":red_circle: *vuori* (Vuori) — 5xx 5.00% (7,200 errors)" in text
+    assert "*Orders:* 4 · ▲ 300%" in text and "OMS 2 (▲ 100%)" in text and "CRS 2" in text
+    assert "• Bombas (CRS) 1" in text and "• Felina (CRS) 1" in text
+    assert "*Alerts:* 1 started (1 critical) · most: Tasks below desired ×1" in text
+    covers = msg["blocks"][-1]["elements"][0]["text"]
+    assert covers.startswith("Covers Sun 08 Nov 00:00 EST – Mon 09 Nov 00:00 EST (Sun 08 Nov 10:30 IST – Mon 09 Nov 10:30 IST)")
+    assert msg["summary"]["title"] == "Sun 08 Nov (US Eastern)"
+
+
+def test_posts_once_after_midnight_to_the_summaries_channel(env):
+    _, svc, slack = env
+    cfg = svc.config()
+    st: dict = {}
+    assert svc._maybe_daily(cfg, st, MS(NOW) - 15 * MINUTE) is None              # 00:15 EST: not yet
+    entry = svc._maybe_daily(cfg, st, MS(NOW))                                    # 00:30 EST
+    assert entry["delivered"] and slack.sent[-1][0] == ALERTS_HOOK                # no summaries channel yet: alerts one
+    svc.set_webhook(DIGEST_HOOK, "root", "digest")
+    cfg = svc.config()
+    assert svc._maybe_daily(cfg, st, MS(NOW) + 30 * MINUTE) is None               # once a day
+    st.clear()
+    assert svc._maybe_daily(cfg, st, MS(NOW) + 4 * 60 * MINUTE) is None           # 04:30 EST: too late (restart)
+    svc._maybe_daily(cfg, st, MS(NOW) + 60 * MINUTE)
+    assert slack.sent[-1][0] == DIGEST_HOOK and st["dailySentFor"] == "2026-11-08 EST"
+    svc.update_settings({"daily": {"enabled": False}}, "root")
+    st.clear()
+    assert svc._maybe_daily(svc.config(), st, MS(NOW)) is None
+
+
+def test_weekly_summary_goes_to_the_summaries_channel(env):
+    _, svc, slack = env
+    svc.send_digest("root")
+    assert slack.sent[-1][0] == ALERTS_HOOK
+    svc.set_webhook(DIGEST_HOOK, "root", "digest")
+    svc.send_digest("root")
+    assert slack.sent[-1][0] == DIGEST_HOOK
+    # live alerts still go to the alerts channel
+    assert svc.webhook() == ALERTS_HOOK
+
+
+def test_routes(env):
+    client, svc, slack = env
+    r = client.put(f"{URL}/slack/digest", json={"webhookUrl": DIGEST_HOOK}, headers=ROOT_H)
+    assert r.status_code == 200 and r.json()["configured"]
+    d = client.get(URL, headers=ROOT_H).json()
+    assert d["digestSlack"]["configured"] and d["digestSlack"]["hint"] != DIGEST_HOOK and d["dailyAvailable"]
+    assert client.post(f"{URL}/slack/digest/_test", json={}, headers=ROOT_H).status_code == 200
+    assert slack.sent[-1][0] == DIGEST_HOOK and "summaries will arrive here" in slack.sent[-1][1]["text"]
+    svc.ops.now = lambda: NOW
+    p = client.get(f"{URL}/daily/_preview?day=2026-11-08", headers=ROOT_H).json()
+    assert "Daily ops summary" in p["text"] and p["summary"]["title"].startswith("Sun 08 Nov")
+    assert client.get(f"{URL}/daily/_preview?day=2030-01-01", headers=ROOT_H).json()["error"]["code"] == "INVALID_DAY"
+    r = client.post(f"{URL}/daily/_send?day=2026-11-08", headers=ROOT_H)
+    assert r.status_code == 200 and r.json()["ruleName"] == "Daily summary" and slack.sent[-1][0] == DIGEST_HOOK
+    for bad in ({"daily": {"zone": "CET"}}, {"daily": {"time": "24:00"}}):
+        assert client.put(f"{URL}/settings", json=bad, headers=ROOT_H).json()["error"]["code"] == "INVALID_SETTINGS"
+    s = client.put(f"{URL}/settings", json={"daily": {"zone": "PST", "time": "00:45"}}, headers=ROOT_H).json()
+    assert s["daily"] == {"enabled": True, "zone": "PST", "time": "00:45"}
+    assert client.delete(f"{URL}/slack/digest", headers=ROOT_H).json() == {"configured": False}
+    assert svc.summary_webhook() == ALERTS_HOOK
+
+
+def test_problem_rules():
+    th = dict(DEFAULT_STATUS)
+    row = lambda i, calls, e5=0, p95=200: {"id": i, "api": "A", "name": i, "calls": calls, "err5xx": e5, "p95": p95}  # noqa: E731
+    out = problem_stages([row("a", 10_000, e5=60), row("b", 10_000, p95=900), row("c", 300), row("d", 10_000, e5=5)],
+                         [row("a", 10_000), row("b", 10_000, p95=300), row("c", 5_000), row("e", 2_000), row("d", 10_000)], th)
+    whys = {p[2].split("*")[1]: (p[1], p[3]) for p in out}
+    assert whys["a"][0] == ":large_orange_circle:" and "5xx 0.60%" in whys["a"][1]          # amber: ≥ 0.5 %
+    assert whys["b"][0] == ":red_circle:" and "3.0× last week" in whys["b"][1]
+    assert "6% of last week" in whys["c"][1] and "0 calls" in whys["e"][1]                    # quiet / gone
+    assert "d" not in whys                                                                    # 5 errors: too few
+    assert out[0][0] == 2
+
+
+# ------------------------------------------------------------------ which channel each alert goes to
+INFRA_HOOK = "https://hooks.slack.com/services/T000/B222/infrainfrainfra1"
+
+
+def _fire(svc, rtype: str, now: int):
+    from app.alerts import Finding
+    rule = next(r for r in svc.config()["rules"] if r["type"] == rtype)
+    f = Finding(subject=f"{rtype}-subject", bad=True, message="bad")
+    return svc._notify(svc.config(), [(rule, "firing", "critical", [(f, {"firedAt": now})], False)], now)
+
+
+def test_error_rate_alerts_on_main_channel_the_rest_on_infra(env):
+    client, svc, slack = env
+    now = MS(NOW)
+    # no infra webhook yet: everything still goes to the main channel
+    assert _fire(svc, "ecs_tasks", now)[0]["delivered"] and slack.sent[-1][0] == ALERTS_HOOK
+    r = client.put(f"{URL}/slack/infra", json={"webhookUrl": INFRA_HOOK}, headers=ROOT_H)
+    assert r.status_code == 200 and client.get(URL, headers=ROOT_H).json()["infraSlack"]["configured"]
+    for rtype, hook in (("lb_errors", ALERTS_HOOK), ("lb_status", ALERTS_HOOK), ("ecs_tasks", INFRA_HOOK),
+                        ("lb_latency", INFRA_HOOK), ("logs_stale", INFRA_HOOK), ("app_disk", INFRA_HOOK)):
+        if not any(r["type"] == rtype for r in svc.config()["rules"]):
+            client.post(f"{URL}/rules", json={"type": rtype, **({"params": {"codes": "400"}} if rtype == "lb_status" else {})},
+                        headers=ROOT_H)
+        _fire(svc, rtype, now)
+        assert slack.sent[-1][0] == hook, rtype
+    # a rule can be moved to the other channel
+    rules = client.get(URL, headers=ROOT_H).json()["rules"]
+    ecs = next(r for r in rules if r["type"] == "ecs_tasks")
+    assert ecs["channel"] == "infra" and next(r for r in rules if r["type"] == "lb_errors")["channel"] == "main"
+    assert client.put(f"{URL}/rules/{ecs['id']}", json={"channel": "main"}, headers=ROOT_H).json()["channel"] == "main"
+    _fire(svc, "ecs_tasks", now)
+    assert slack.sent[-1][0] == ALERTS_HOOK
+    assert client.put(f"{URL}/rules/{ecs['id']}", json={"channel": "slack"}, headers=ROOT_H).json()["error"]["code"] == "INVALID_ALERT"
+    assert client.post(f"{URL}/slack/infra/_test", json={}, headers=ROOT_H).status_code == 200
+    assert slack.sent[-1][0] == INFRA_HOOK and "Infra alerts" in slack.sent[-1][1]["text"]
+    assert client.delete(f"{URL}/slack/infra", headers=ROOT_H).json() == {"configured": False}
+    _fire(svc, "app_disk", now)
+    assert slack.sent[-1][0] == ALERTS_HOOK                                    # back to the main channel

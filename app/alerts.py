@@ -7,7 +7,12 @@ Where things live
     state/alerts-state.json    what each rule found last time (firing / pending)       S3 state store
     state/alerts-history.json  the last 500 alerts sent (or not sent, and why)         S3 state store
     state/alerts-snoozes.json  snoozed alerts                                           S3 state store
-    <prefix>alerts             {"slackWebhookUrl": ...}                                 Secrets Manager
+    <prefix>alerts             {"slackWebhookUrl": ...}  the main channel: load balancer  Secrets Manager
+                               error-rate alerts (lb_errors, lb_status) and any rule set to it
+    <prefix>alerts-infra       {"slackWebhookUrl": ...}  the infra channel: every other   Secrets Manager
+                               alert (falls back to the main channel)
+    <prefix>alerts-digest      {"slackWebhookUrl": ...}  the summaries channel (daily   Secrets Manager
+                               and weekly; falls back to the main channel)
     CACHE_DIR/alerts/          the checker's lock and the viewer's own 5xx responses   local disk
 
 One checker runs per container (every API worker starts one; a file lock lets only one check).
@@ -52,6 +57,13 @@ STATE_KEY = "state/alerts-state.json"
 HISTORY_KEY = "state/alerts-history.json"
 SNOOZE_KEY = "state/alerts-snoozes.json"
 SECRET = "alerts"
+SECRET_DIGEST = "alerts-digest"
+SECRET_INFRA = "alerts-infra"
+# Three Slack channels (secret, config key, description): "alerts" = the main channel (the one used
+# from the start; load balancer error-rate alerts), "infra" = every other alert, "digest" = summaries.
+CHANNELS = {"alerts": (SECRET, "slack", "Vector Logs viewer: Slack webhook for alerts"),
+            "infra": (SECRET_INFRA, "infraSlack", "Vector Logs viewer: Slack webhook for infra alerts"),
+            "digest": (SECRET_DIGEST, "digestSlack", "Vector Logs viewer: Slack webhook for daily and weekly summaries")}
 CONFIG_VERSION = 2
 LEVELS = ("warning", "critical")
 RANK = {None: 0, "warning": 1, "critical": 2}
@@ -62,6 +74,22 @@ DEFAULT_THRESHOLDS = {"cpu": {"warning": 70, "critical": 80}, "memory": {"warnin
                       "disk": {"warning": 70, "critical": 80}, "clusters": {}}
 DEFAULT_REPEAT = {"warning": 60, "critical": 15}
 DEFAULT_DIGEST = {"enabled": True, "day": "fri", "time": "15:00"}
+# End-of-day ops summary: the day that just ended in `zone` (IST / PST / EST), posted at `time` there
+# (after midnight, so the last orders and API numbers are in). Only within DAILY_WINDOW of that time.
+DEFAULT_DAILY = {"enabled": True, "zone": "EST", "time": "00:20"}
+# Which channel a rule posts to ("channel" on the rule; default by type): the HTTP error-rate and
+# status-code rules go to the main channel, everything else to the infra channel.
+RULE_CHANNELS = ("main", "infra")
+MAIN_CHANNEL_TYPES = frozenset({"lb_errors", "lb_status"})
+
+
+def channel_of(rule: dict) -> str:
+    ch = rule.get("channel")
+    if ch in RULE_CHANNELS:
+        return ch
+    return "main" if rule.get("type") in MAIN_CHANNEL_TYPES else "infra"
+DAILY_ZONES = ("EST", "PST", "IST")
+DAILY_WINDOW_MINUTES = 180
 SNOOZE_MINUTES = (60, 240, 1440)
 DEFAULT_TIME_ZONE2 = "America/Los_Angeles"     # Slack times also in Pacific (PST / PDT); "" = only the first zone
 HISTORY_MAX = 500
@@ -265,6 +293,7 @@ def migrate_config(doc: dict) -> bool:
     st.setdefault("thresholds", json.loads(json.dumps(DEFAULT_THRESHOLDS)))
     st.setdefault("repeat", dict(DEFAULT_REPEAT))
     st.setdefault("digest", dict(DEFAULT_DIGEST))
+    st.setdefault("daily", dict(DEFAULT_DAILY))
     doc["version"] = CONFIG_VERSION
     return True
 
@@ -278,6 +307,7 @@ def settings_of(cfg: dict) -> dict:
                        "clusters": dict(t.get("clusters") or {})}
     s["repeat"] = {**DEFAULT_REPEAT, **(s.get("repeat") or {})}
     s["digest"] = {**DEFAULT_DIGEST, **(s.get("digest") or {})}
+    s["daily"] = {**DEFAULT_DAILY, **(s.get("daily") or {})}
     return {"consoleUrl": "", "timeZone": "UTC", "timeZone2": DEFAULT_TIME_ZONE2, "paused": False,
             "mutesPaused": False, **s}
 
@@ -371,10 +401,16 @@ def validate_rule(body: dict, existing: dict | None = None) -> dict:
         if not 0 <= v <= hi:
             raise bad_request("INVALID_ALERT", f"{key} must be between 0 and {hi}")
         return v
-    return {"type": rtype, "name": name,
-            "enabled": bool(body.get("enabled", (existing or {}).get("enabled", True))),
-            "params": params,
-            "forMinutes": minutes("forMinutes", spec["forMinutes"], 1440)}
+    out = {"type": rtype, "name": name,
+           "enabled": bool(body.get("enabled", (existing or {}).get("enabled", True))),
+           "params": params,
+           "forMinutes": minutes("forMinutes", spec["forMinutes"], 1440)}
+    ch = body.get("channel", (existing or {}).get("channel"))
+    if ch is not None:
+        if ch not in RULE_CHANNELS:
+            raise bad_request("INVALID_ALERT", "channel must be main or infra")
+        out["channel"] = ch
+    return out
 
 
 def parse_codes(value: Any, label: str = "Status codes") -> list[str]:
@@ -496,11 +532,12 @@ class AlertService:
     `metrics` are the app's services (any may be None: rules that need it report an error)."""
 
     def __init__(self, settings, store, secrets, logs=None, lb=None, health=None, metrics=None,
-                 sender: Callable[[str, dict], None] = post_slack):
+                 sender: Callable[[str, dict], None] = post_slack, ops=None):
         self.settings = settings
         self.store = store
         self.secrets = secrets
         self.logs, self.lb, self.health, self.metrics = logs, lb, health, metrics
+        self.ops = ops                    # the Ops dashboard service (end-of-day summary); None = no summary
         self.sender = sender
         self.root = Path(settings.cache_dir) / "alerts"
         self.errors = ServerErrors(self.root / "server-errors.log")
@@ -508,7 +545,7 @@ class AlertService:
         self._mutes_paused = False
         self._stop = threading.Event()
         self._started = time.time()
-        self._webhook_version = None
+        self._webhook_version: dict[str, Any] = {}
         self.thread: threading.Thread | None = None
 
     # -- config (rules + settings)
@@ -554,7 +591,7 @@ class AlertService:
         def mutate(doc):
             for i, r in enumerate(doc["rules"]):
                 if r["id"] == rule_id:
-                    merged = {**r, **{k: v for k, v in body.items() if k in ("name", "enabled", "forMinutes")}}
+                    merged = {**r, **{k: v for k, v in body.items() if k in ("name", "enabled", "forMinutes", "channel")}}
                     merged["params"] = {**r.get("params", {}), **(body.get("params") or {})}
                     doc["rules"][i] = {**r, **validate_rule(merged, existing=r), "updatedAt": iso(), "updatedBy": actor}
                     return doc["rules"][i]
@@ -617,10 +654,25 @@ class AlertService:
                 if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(d["time"])):
                     raise bad_request("INVALID_SETTINGS", "The summary time must look like 15:00")
                 s["digest"]["time"] = d["time"]
+        if body.get("daily") is not None:
+            d = body["daily"]
+            if not isinstance(d, dict):
+                raise bad_request("INVALID_SETTINGS", "daily must be an object")
+            s["daily"] = {}
+            if "enabled" in d:
+                s["daily"]["enabled"] = bool(d["enabled"])
+            if "zone" in d:
+                if d["zone"] not in DAILY_ZONES:
+                    raise bad_request("INVALID_SETTINGS", "The daily summary zone must be one of " + ", ".join(DAILY_ZONES))
+                s["daily"]["zone"] = d["zone"]
+            if "time" in d:
+                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(d["time"])):
+                    raise bad_request("INVALID_SETTINGS", "The daily summary time must look like 00:20")
+                s["daily"]["time"] = d["time"]
 
         def mutate(doc):
             cur = doc.setdefault("settings", {})
-            for k in ("thresholds", "repeat", "digest"):
+            for k in ("thresholds", "repeat", "digest", "daily"):
                 if k in s:
                     merged = {**(cur.get(k) or {}), **s.pop(k)}
                     cur[k] = merged
@@ -663,49 +715,65 @@ class AlertService:
             return items.pop(f"{rule_id}|{subject}", None) is not None
         return self._update_snoozes(mutate)
 
-    # -- the webhook (Secrets Manager)
-    def set_webhook(self, url: str, actor: str) -> dict:
+    # -- the webhooks (Secrets Manager): "alerts" (live alerts) and "digest" (daily + weekly summaries)
+    def set_webhook(self, url: str, actor: str, channel: str = "alerts") -> dict:
+        secret, key, desc = CHANNELS[channel]
         url = (url or "").strip()
         if not WEBHOOK_RE.match(url):
             raise bad_request("INVALID_WEBHOOK", "Paste a Slack incoming webhook URL "
                               "(https://hooks.slack.com/services/…)")
-        self.secrets.put(SECRET, {"slackWebhookUrl": url}, "Vector Logs viewer: Slack webhook for alerts")
+        self.secrets.put(secret, {"slackWebhookUrl": url}, desc)
 
         def mutate(doc):
-            slack = doc.setdefault("slack", {})
+            slack = doc.setdefault(key, {})
             slack.update(configured=True, hint=mask_webhook(url), updatedAt=iso(), updatedBy=actor,
                          version=int(slack.get("version", 0)) + 1)
             return slack
         return self._update(mutate)
 
-    def clear_webhook(self, actor: str) -> dict:
-        self.secrets.put(SECRET, {"slackWebhookUrl": ""}, "Vector Logs viewer: Slack webhook for alerts")
+    def clear_webhook(self, actor: str, channel: str = "alerts") -> dict:
+        secret, key, desc = CHANNELS[channel]
+        self.secrets.put(secret, {"slackWebhookUrl": ""}, desc)
 
         def mutate(doc):
-            slack = doc.setdefault("slack", {})
+            slack = doc.setdefault(key, {})
             slack.update(configured=False, hint=None, updatedAt=iso(), updatedBy=actor,
                          version=int(slack.get("version", 0)) + 1)
             return slack
         return self._update(mutate)
 
-    def webhook(self, cfg: dict | None = None) -> str | None:
+    def webhook(self, cfg: dict | None = None, channel: str = "alerts") -> str | None:
+        secret, key, _ = CHANNELS[channel]
         cfg = cfg or self.config()
-        version = (cfg.get("slack") or {}).get("version", 0)
-        if version != self._webhook_version and hasattr(self.secrets, "forget"):
-            self.secrets.forget(SECRET)      # changed in another worker: don't trust the cache
-        self._webhook_version = version
-        if not (cfg.get("slack") or {}).get("configured"):
+        version = (cfg.get(key) or {}).get("version", 0)
+        if version != self._webhook_version.get(channel) and hasattr(self.secrets, "forget"):
+            self.secrets.forget(secret)      # changed in another worker: don't trust the cache
+        self._webhook_version[channel] = version
+        if not (cfg.get(key) or {}).get("configured"):
             return None
-        return ((self.secrets.get(SECRET) or {}).get("slackWebhookUrl") or None)
+        return ((self.secrets.get(secret) or {}).get("slackWebhookUrl") or None)
 
-    def send_test(self, url: str | None, actor: str) -> dict:
-        url = (url or "").strip() or self.webhook()
+    def infra_webhook(self, cfg: dict | None = None) -> str | None:
+        """Where infra alerts go: the infra channel, else the main channel."""
+        cfg = cfg or self.config()
+        return self.webhook(cfg, "infra") or self.webhook(cfg, "alerts")
+
+    def summary_webhook(self, cfg: dict | None = None) -> str | None:
+        """Where the daily and weekly summaries go: the summaries channel, else the alerts channel."""
+        cfg = cfg or self.config()
+        return self.webhook(cfg, "digest") or self.webhook(cfg, "alerts")
+
+    def send_test(self, url: str | None, actor: str, channel: str = "alerts") -> dict:
+        url = (url or "").strip() or self.webhook(channel=channel)
         if not url:
             raise bad_request("NO_WEBHOOK", "Save a Slack webhook URL first, or paste one to test")
         if not WEBHOOK_RE.match(url):
             raise bad_request("INVALID_WEBHOOK", "That isn't a Slack incoming webhook URL")
         cfg = self.config()
-        text = f":wave: Test message from the Vector Logs viewer, sent by {actor}. Alerts will arrive here."
+        what = {"alerts": "Load balancer error-rate alerts (HTTP 5xx / 4xx) will arrive here.",
+                "infra": "Infra alerts (ECS, logs, the viewer, slow responses) will arrive here.",
+                "digest": "The end-of-day and weekly summaries will arrive here."}[channel]
+        text = f":wave: Test message from the Vector Logs viewer, sent by {actor}. {what}"
         self.sender(url, {"text": text, "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": _esc(text)}},
             {"type": "context", "elements": [{"type": "mrkdwn", "text": self._footer(cfg, now_ms(), None)}]}]})
@@ -1619,6 +1687,9 @@ class AlertService:
         digest = self._maybe_digest(cfg, st, now)
         if digest:
             entries.insert(0, digest)
+        daily = self._maybe_daily(cfg, st, now)
+        if daily:
+            entries.insert(0, daily)
         self.store.put_json(STATE_KEY, st)
         if entries:
             self._append_history(entries)
@@ -1890,22 +1961,24 @@ class AlertService:
                      {"type": "mrkdwn", "text": f"continued below ({i + 1}/{total})"}]}])}
                 for i, part in enumerate(out)]
 
-    def _delivery(self, cfg: dict) -> tuple[str | None, str | None]:
-        """(webhook URL, why nothing is sent)."""
+    def _delivery(self, cfg: dict, summary: bool = False, channel: str = "main") -> tuple[str | None, str | None]:
+        """(webhook URL, why nothing is sent). summary: the summaries channel; else the rule's channel
+        (main, or infra falling back to main)."""
         if (cfg.get("settings") or {}).get("paused"):
             return None, "Notifications are paused"
         try:
-            url = self.webhook(cfg)
+            url = (self.summary_webhook(cfg) if summary else self.infra_webhook(cfg) if channel == "infra"
+                   else self.webhook(cfg))
             return url, None if url else "No Slack webhook set"
         except Exception as e:  # noqa: BLE001
             return None, f"Can't read the Slack webhook: {_err(e)}"
 
     def _notify(self, cfg: dict, batches, now: int) -> list[dict]:
-        url, why = self._delivery(cfg)
+        targets = {ch: self._delivery(cfg, channel=ch) for ch in RULE_CHANNELS}
         entries = []
         order = {"muted": -1, "resolved": 0, "lowered": 1, "repeat": 2, "firing": 3, "escalated": 4}
         for rule, kind, level, items, snoozed in sorted(batches, key=lambda b: (order[b[1]], RANK[b[2]])):
-            error = why
+            url, error = targets[channel_of(rule)]
             if kind == "muted":
                 for f, cur in items:
                     entries.append({"id": new_id()[:12], "at": now, "ruleId": rule["id"], "ruleName": rule["name"],
@@ -1968,7 +2041,7 @@ class AlertService:
         if st.get("muteFileError") == err:
             return
         st["muteFileError"] = err
-        url, _ = self._delivery(cfg)
+        url, _ = self._delivery(cfg, channel="infra")
         if not url:
             return
         text = (f":warning: *The alert mute file has a mistake* — the last good version is still used.\n"
@@ -2082,12 +2155,12 @@ class AlertService:
         msg = self.digest(cfg, now, st)
         summary = msg.pop("summary")
         if actor:                                     # asked for: send even when paused
-            url = self.webhook(cfg)
+            url = self.summary_webhook(cfg)
             error = None if url else "No Slack webhook set"
             if not url:
                 raise bad_request("NO_WEBHOOK", "Save a Slack webhook URL first")
         else:
-            url, error = self._delivery(cfg)
+            url, error = self._delivery(cfg, summary=True)
         if url:
             try:
                 self.sender(url, msg)
@@ -2101,6 +2174,81 @@ class AlertService:
                             f"{summary['failing']} failing now, {summary['snoozed']} snoozed",
                  "details": [], "links": [], "cluster": None, "link": "/ui/alerts", "since": None,
                  "delivered": error is None, "error": error, "by": actor}
+        if actor:
+            self._append_history([entry])
+        return entry
+
+    # -- end-of-day ops summary (app/daily_summary.py builds the message)
+    def last_finished_day(self, cfg: dict, now: int):
+        from .ops import ZONES
+        from zoneinfo import ZoneInfo
+        zone = settings_of(cfg)["daily"]["zone"]
+        local = datetime.fromtimestamp(now / 1000, ZoneInfo(ZONES[zone]))
+        return local.date() - timedelta(days=1), zone, local
+
+    def _maybe_daily(self, cfg: dict, st: dict, now: int) -> dict | None:
+        d = settings_of(cfg)["daily"]
+        if not d.get("enabled") or self.ops is None:
+            return None
+        day, zone, local = self.last_finished_day(cfg, now)
+        hh, mm = (int(x) for x in d["time"].split(":"))
+        minutes_after = (local.hour * 60 + local.minute) - (hh * 60 + mm)
+        # only in the hours after its time: a restart later in the day doesn't post yesterday's summary
+        if not 0 <= minutes_after < DAILY_WINDOW_MINUTES:
+            return None
+        key = f"{day.isoformat()} {zone}"
+        if st.get("dailySentFor") == key:
+            return None
+        st["dailySentFor"] = key
+        try:
+            return self.send_daily(None, day.isoformat(), now=now, cfg=cfg)
+        except Exception as e:  # noqa: BLE001
+            log.warning("end-of-day summary failed: %s", _err(e))
+            return None
+
+    def daily_message(self, day: str | None = None, cfg: dict | None = None, now: int | None = None) -> dict:
+        from .daily_summary import build
+        if self.ops is None:
+            raise bad_request("OPS_DISABLED", "The ops dashboard is turned off (OPS_ENABLED=false)")
+        now = now or now_ms()
+        cfg = cfg or self.config()
+        last, zone, _ = self.last_finished_day(cfg, now)
+        if day:
+            try:
+                d = datetime.strptime(day, "%Y-%m-%d").date()
+            except ValueError:
+                raise bad_request("INVALID_DAY", f"'{day}' is not a date (YYYY-MM-DD)")
+            if d > last:
+                raise bad_request("INVALID_DAY", f"{day} has not ended yet in {zone}; the last finished day is {last}")
+        else:
+            d = last
+        return build(self, cfg, d, zone, now)
+
+    def send_daily(self, actor: str | None, day: str | None = None, now: int | None = None,
+                   cfg: dict | None = None) -> dict:
+        """Post the end-of-day summary (the checker after midnight, or an admin from the Alerts page)."""
+        now = now or now_ms()
+        cfg = cfg or self.config()
+        msg = self.daily_message(day, cfg, now)
+        summary = msg.pop("summary")
+        if actor:                                     # asked for: send even when paused
+            url = self.summary_webhook(cfg)
+            if not url:
+                raise bad_request("NO_WEBHOOK", "Save a Slack webhook URL first")
+            error = None
+        else:
+            url, error = self._delivery(cfg, summary=True)
+        if url:
+            try:
+                self.sender(url, msg)
+            except Exception as e:  # noqa: BLE001
+                error = _err(e)
+                if actor:
+                    raise
+        entry = {"id": new_id()[:12], "at": now, "ruleId": None, "ruleName": "Daily summary", "type": "daily",
+                 "event": "digest", "level": None, "subject": summary["title"],
+                 "message": summary["line"], "details": [], "links": [], "cluster": None, "link": "/ui/ops",
+                 "since": None, "delivered": error is None, "error": error, "by": actor}
         if actor:
             self._append_history([entry])
         return entry

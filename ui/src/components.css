@@ -43,3 +43,10 @@
 /* keep visually-hidden labels (.sr-only, position: absolute) inside the scrolling page, so they
    never make the whole window scroll */
 .page, .table-scroll, .dialog-body { position: relative; }
+
+/* Alerts page: the three Slack channels, and which channel a rule posts to */
+.slack-channels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1100px) { .slack-channels { grid-template-columns: minmax(0, 1fr); } }
+.chan-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; vertical-align: 1px;
+  background: var(--surface-3); color: var(--muted); border: 1px solid var(--border); }
+.chan-tag.main { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent-soft-border); }

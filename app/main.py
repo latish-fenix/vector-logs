@@ -97,20 +97,21 @@ def _create_app(settings: Settings, store: ObjectStore, secrets: SecretStore,
         # Every API worker starts one; a file lock lets only one of them convert.
         app.state.lb_converter = Converter(settings)
         app.state.lb_converter.start()
-    app.state.alerts = None
-    if settings.alerts_enabled:
-        app.state.alerts = AlertService(settings, store, secrets, logs=app.state.logs, lb=app.state.lb,
-                                        health=app.state.health if settings.health_enabled else None,
-                                        metrics=app.state.metrics if settings.health_enabled else None)
-        if settings.alerts_background:
-            # Every API worker starts one; a file lock lets only one of them check.
-            app.state.alerts.start()
     app.state.ops = None
     if settings.ops_enabled:
         app.state.ops = OpsService(settings, app.state.logs)
         if settings.ops_background:
             # Every API worker starts one; a file lock lets only one of them count orders.
             app.state.ops.start()
+    app.state.alerts = None
+    if settings.alerts_enabled:
+        app.state.alerts = AlertService(settings, store, secrets, logs=app.state.logs, lb=app.state.lb,
+                                        health=app.state.health if settings.health_enabled else None,
+                                        metrics=app.state.metrics if settings.health_enabled else None,
+                                        ops=app.state.ops)
+        if settings.alerts_background:
+            # Every API worker starts one; a file lock lets only one of them check.
+            app.state.alerts.start()
     if settings.auth_mode == "password":
         _bootstrap_passwords(settings, app.state.users, bootstrap_pw, secrets)
 

@@ -9,8 +9,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
-from .alerts import (CATALOG, DAYS, LB_LAG_MINUTES, SNOOZE_MINUTES, TYPES, AlertService, _err, confirm_of,
-                     now_ms, settings_of, validate_rule)
+from .alerts import (CATALOG, DAILY_ZONES, DAYS, LB_LAG_MINUTES, MAIN_CHANNEL_TYPES, SNOOZE_MINUTES, TYPES,
+                     AlertService, _err, channel_of, confirm_of, now_ms, settings_of, validate_rule)
 from .errors import ApiError, not_found
 from .identity import User, current_user, require_admin
 
@@ -24,6 +24,8 @@ class RuleBody(BaseModel):
     enabled: bool | None = None
     params: dict[str, Any] | None = None
     forMinutes: int | None = Field(None, description="Must be bad this long before it alerts (0 = at once)")
+    channel: str | None = Field(None, description='"main" or "infra": the Slack channel this rule posts to '
+                                '(default: main for HTTP error-rate and status-code rules, infra for the rest)')
 
 
 class SettingsBody(BaseModel):
@@ -40,6 +42,9 @@ class SettingsBody(BaseModel):
                                           '{"warning": 60, "critical": 15} (0 = never)')
     digest: dict[str, Any] | None = Field(None, description='Weekly summary {"enabled": true, "day": "fri", '
                                           '"time": "15:00"} (the settings\' time zone)')
+    daily: dict[str, Any] | None = Field(None, description='End-of-day ops summary {"enabled": true, "zone": "EST", '
+                                         '"time": "00:20"}: the day that just ended in zone (EST, PST or IST), '
+                                         'posted at that time there')
 
 
 class SnoozeBody(BaseModel):
@@ -85,7 +90,7 @@ def _public_rule(rule: dict, status: dict | None, snoozes: dict) -> dict:
             out.append({"subject": k, **v, "snooze": sn})
         return sorted(out, key=lambda x: (-{"critical": 2, "warning": 1}.get(x.get("level"), 0), x["subject"]))
     spec = TYPES.get(rule["type"], {})
-    return {**rule, "title": spec.get("title", rule["type"]), "level": spec.get("level"),
+    return {**rule, "channel": channel_of(rule), "title": spec.get("title", rule["type"]), "level": spec.get("level"),
             "every": spec.get("every"), "confirm": confirm_of(rule),
             "status": {"lastRunAt": status.get("lastRunAt"), "lastError": status.get("lastError"),
                        "tookMs": status.get("tookMs"), "firing": items("firing"), "pending": items("pending"),
@@ -100,15 +105,23 @@ def overview(request: Request, user: User = Depends(require_admin)):
     cfg = svc.config()
     st = svc.state()
     slack = cfg.get("slack") or {}
+    dslack = cfg.get("digestSlack") or {}
+    islack = cfg.get("infraSlack") or {}
     snoozes = svc.snoozes()
     now = now_ms()
     return {"settings": settings_of(cfg),
             "slack": {"configured": bool(slack.get("configured")), "hint": slack.get("hint"),
                       "updatedAt": slack.get("updatedAt"), "updatedBy": slack.get("updatedBy")},
+            "digestSlack": {"configured": bool(dslack.get("configured")), "hint": dslack.get("hint"),
+                            "updatedAt": dslack.get("updatedAt"), "updatedBy": dslack.get("updatedBy")},
+            "infraSlack": {"configured": bool(islack.get("configured")), "hint": islack.get("hint"),
+                           "updatedAt": islack.get("updatedAt"), "updatedBy": islack.get("updatedBy")},
+            "mainChannelTypes": sorted(MAIN_CHANNEL_TYPES),
+            "dailyAvailable": svc.ops is not None, "dailyZones": list(DAILY_ZONES),
             "checker": {"checkedAt": st.get("checkedAt"), **(st.get("checker") or {}),
                         "intervalSeconds": request.app.state.settings.alerts_interval_seconds,
                         "background": request.app.state.settings.alerts_background,
-                        "digestSentFor": st.get("digestSentFor")},
+                        "digestSentFor": st.get("digestSentFor"), "dailySentFor": st.get("dailySentFor")},
             "rules": [_public_rule(r, st.get("rules", {}).get(r["id"]), snoozes) for r in cfg.get("rules", [])],
             "snoozes": sorted((s for s in snoozes.values() if s.get("until") is None or s["until"] > now),
                               key=lambda s: s.get("at", 0), reverse=True),
@@ -225,6 +238,66 @@ def send_digest(request: Request, user: User = Depends(require_admin)):
     entry = _svc(request).send_digest(user.username)
     _event(request, user, "ALERT_DIGEST_SEND")
     return entry
+
+
+@admin.post("/daily/_send", summary="Post the end-of-day ops summary to the summaries channel now")
+def send_daily(request: Request, day: str | None = Query(None, description="YYYY-MM-DD in the summary's zone; default the last finished day"),
+               user: User = Depends(require_admin)):
+    entry = _svc(request).send_daily(user.username, day)
+    _event(request, user, "ALERT_DAILY_SEND", day=day)
+    return entry
+
+
+@admin.get("/daily/_preview", summary="The end-of-day summary as it would be posted (nothing is sent)")
+def preview_daily(request: Request, day: str | None = Query(None, description="YYYY-MM-DD; default the last finished day"),
+                  user: User = Depends(require_admin)):
+    msg = _svc(request).daily_message(day)
+    return {"text": "\n".join(b["text"]["text"] if b["type"] == "section" else b["elements"][0]["text"]
+                              for b in msg["blocks"]), "summary": msg["summary"], "blocks": msg["blocks"]}
+
+
+@admin.put("/slack/infra", summary="Save (or change) the infra channel webhook (every alert not on the main channel)")
+def put_infra_slack(body: WebhookBody, request: Request, user: User = Depends(require_admin)):
+    out = _svc(request).set_webhook(body.webhookUrl, user.username, "infra")
+    _event(request, user, "ALERT_SLACK_SET", hint=out.get("hint"), channel="infra")
+    return {"configured": True, "hint": out.get("hint"), "updatedAt": out.get("updatedAt"),
+            "updatedBy": out.get("updatedBy")}
+
+
+@admin.delete("/slack/infra", summary="Remove the infra channel webhook (infra alerts then go to the main channel)")
+def delete_infra_slack(request: Request, user: User = Depends(require_admin)):
+    _svc(request).clear_webhook(user.username, "infra")
+    _event(request, user, "ALERT_SLACK_CLEAR", channel="infra")
+    return {"configured": False}
+
+
+@admin.post("/slack/infra/_test", summary="Send a test message to the infra channel")
+def test_infra_slack(body: TestBody, request: Request, user: User = Depends(require_admin)):
+    out = _svc(request).send_test(body.webhookUrl, user.username, "infra")
+    _event(request, user, "ALERT_SLACK_TEST", channel="infra")
+    return out
+
+
+@admin.put("/slack/digest", summary="Save (or change) the summaries channel webhook (daily + weekly summaries)")
+def put_digest_slack(body: WebhookBody, request: Request, user: User = Depends(require_admin)):
+    out = _svc(request).set_webhook(body.webhookUrl, user.username, "digest")
+    _event(request, user, "ALERT_SLACK_SET", hint=out.get("hint"), channel="digest")
+    return {"configured": True, "hint": out.get("hint"), "updatedAt": out.get("updatedAt"),
+            "updatedBy": out.get("updatedBy")}
+
+
+@admin.delete("/slack/digest", summary="Remove the summaries channel webhook (summaries then go to the alerts channel)")
+def delete_digest_slack(request: Request, user: User = Depends(require_admin)):
+    _svc(request).clear_webhook(user.username, "digest")
+    _event(request, user, "ALERT_SLACK_CLEAR", channel="digest")
+    return {"configured": False}
+
+
+@admin.post("/slack/digest/_test", summary="Send a test message to the summaries channel")
+def test_digest_slack(body: TestBody, request: Request, user: User = Depends(require_admin)):
+    out = _svc(request).send_test(body.webhookUrl, user.username, "digest")
+    _event(request, user, "ALERT_SLACK_TEST", channel="digest")
+    return out
 
 
 @admin.put("/slack", summary="Save (or change) the Slack incoming webhook URL (kept in Secrets Manager)")

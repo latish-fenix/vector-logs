@@ -41,6 +41,7 @@ def env(tmp_path, logs_dir):
     app = create_app(make_settings(tmp_path, logs_dir), health=HealthService("us-west-2", clients=FakeAws()))
     slack = Slack()
     app.state.alerts.sender = slack
+    app.state.alerts.ops = None          # no end-of-day summary here (tests/test_daily_summary.py)
     return TestClient(app), app.state.alerts, slack
 
 
@@ -69,6 +70,7 @@ def test_default_rules_and_catalog(env):
     assert d["settings"]["thresholds"]["cpu"] == {"warning": 70, "critical": 80}
     assert d["settings"]["repeat"] == {"warning": 60, "critical": 15}
     assert d["settings"]["digest"] == {"enabled": True, "day": "fri", "time": "15:00"}
+    assert d["settings"]["daily"] == {"enabled": True, "zone": "EST", "time": "00:20"}
     assert "ecs_instances" in types and all("repeatMinutes" not in r for r in d["rules"])
     every = {c["type"]: c["every"] for c in d["catalog"]}
     assert every["ecs_usage"] == 5 and every["app_disk"] == 5
