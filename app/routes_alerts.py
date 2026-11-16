@@ -251,9 +251,9 @@ def send_daily(request: Request, day: str | None = Query(None, description="YYYY
 @admin.get("/daily/_preview", summary="The end-of-day summary as it would be posted (nothing is sent)")
 def preview_daily(request: Request, day: str | None = Query(None, description="YYYY-MM-DD; default the last finished day"),
                   user: User = Depends(require_admin)):
+    from .daily_summary import as_text
     msg = _svc(request).daily_message(day)
-    return {"text": "\n".join(b["text"]["text"] if b["type"] == "section" else b["elements"][0]["text"]
-                              for b in msg["blocks"]), "summary": msg["summary"], "blocks": msg["blocks"]}
+    return {"text": as_text(msg["blocks"]), "summary": msg["summary"], "blocks": msg["blocks"]}
 
 
 @admin.put("/slack/infra", summary="Save (or change) the infra channel webhook (every alert not on the main channel)")

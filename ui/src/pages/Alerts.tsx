@@ -184,15 +184,66 @@ function WebhookField({ id, title, sub, hook, path, removeText, empty, onDone, o
 
 const DAILY_ZONE_NAME: Record<string, string> = { EST: "US Eastern", PST: "US Pacific", IST: "India" };
 
-/** The end-of-day summary as Slack will show it (mrkdwn as plain text). */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type SlackBlock = Record<string, any>;
+
+/** Slack mrkdwn → React: ```code```, *bold*, <url|text>, line breaks (enough for our own messages). */
+function Mrkdwn({ text }: { text: string }) {
+  const parts = text.split(/```\n?([\s\S]*?)\n?```/g);
+  return (
+    <>
+      {parts.map((p, i) => i % 2 ? <pre key={i} className="sk-code">{p}</pre> : (
+        <span key={i}>{p.split("\n").map((line, j, all) => (
+          <Fragment key={j}>
+            {line.split(/(\*[^*\n]+\*|<[^|>]+\|[^>]+>)/g).map((t, k) => {
+              if (/^\*[^*]+\*$/.test(t)) return <strong key={k}>{t.slice(1, -1)}</strong>;
+              const m = /^<([^|>]+)\|([^>]+)>$/.exec(t);
+              if (m) return <a key={k} href={m[1]} target="_blank" rel="noreferrer">{m[2]}</a>;
+              return <Fragment key={k}>{t}</Fragment>;
+            })}
+            {j < all.length - 1 && <br />}
+          </Fragment>
+        ))}</span>
+      ))}
+    </>
+  );
+}
+
+/** The blocks of a Slack message, drawn roughly the way Slack shows them. */
+function SlackBlocks({ blocks }: { blocks: SlackBlock[] }) {
+  return (
+    <div className="sk-msg">
+      <div className="sk-avatar">VL</div>
+      <div style={{ minWidth: 0 }}>
+        <div className="sk-meta"><strong>Vector Logs</strong><span className="sk-app">APP</span></div>
+        {blocks.map((b, i) => {
+          if (b.type === "header") return <div key={i} className="sk-header">{b.text.text}</div>;
+          if (b.type === "divider") return <hr key={i} className="sk-divider" />;
+          if (b.type === "context") return <div key={i} className="sk-context">{b.elements.map((e: SlackBlock, j: number) => <Mrkdwn key={j} text={e.text} />)}</div>;
+          if (b.type === "actions") return (
+            <div key={i} className="sk-actions">
+              {b.elements.map((e: SlackBlock, j: number) => <a key={j} className={`sk-button ${e.style === "primary" ? "primary" : ""}`} href={e.url} target="_blank" rel="noreferrer">{e.text.text}</a>)}
+            </div>
+          );
+          return (
+            <div key={i} className="sk-section">
+              {b.text && <div><Mrkdwn text={b.text.text} /></div>}
+              {b.fields && <div className="sk-fields">{b.fields.map((f: SlackBlock, j: number) => <div key={j}><Mrkdwn text={f.text} /></div>)}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** The end-of-day summary as Slack will show it. */
 function DailyPreview({ onClose }: { onClose: () => void }) {
-  const q = useQuery({ queryKey: ["daily-preview"], queryFn: () => get<{ text: string; summary: { title: string } }>("/admin/alerts/daily/_preview"), retry: false });
+  const q = useQuery({ queryKey: ["daily-preview"], queryFn: () => get<{ text: string; blocks: SlackBlock[]; summary: { title: string } }>("/admin/alerts/daily/_preview"), retry: false });
   return (
     <Dialog title="End-of-day summary" subtitle={q.data ? `For ${q.data.summary.title}, as it would be posted now. Nothing is sent.` : "Building it from the Ops dashboard…"} onClose={onClose} wide>
       {q.isLoading ? <Loading what="Reading the day's numbers…" /> : q.error ? <ErrorCallout error={q.error} admin /> : (
-        <pre className="mono" style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.55, margin: 0, padding: 14, borderRadius: 8, background: "var(--surface-2)", border: "1px solid var(--border)", maxHeight: "60vh", overflow: "auto" }}>
-          {q.data!.text.replace(/<([^|>]+)\|([^>]+)>/g, "$2 ($1)")}
-        </pre>
+        <div style={{ maxHeight: "65vh", overflow: "auto" }}><SlackBlocks blocks={q.data!.blocks} /></div>
       )}
     </Dialog>
   );

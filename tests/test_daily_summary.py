@@ -61,20 +61,46 @@ def env(tmp_path):
 
 
 def test_message(env):
+    """Template A (scoreboard): header, six boxes, bars per service, medals, problem stages, alerts, buttons."""
+    from app.daily_summary import as_text
     _, svc, _ = env
+    svc.update_settings({"consoleUrl": "https://logs.example.com"}, "root")
     msg = svc.daily_message("2026-11-08", now=MS(NOW))
-    text = "\n".join(b["text"]["text"] for b in msg["blocks"] if b["type"] == "section")
-    assert "Daily ops summary · Sun 08 Nov* (US Eastern day, vs Sun 01 Nov)" in text
-    assert "*API calls:* 158,400" in text                       # 110 a minute × 1440 minutes
-    assert "158,400 · ▼ 4.0%" in text                           # last week's day had 25 hours: 165,000
-    assert "4xx 0.91% · 5xx 4.55%" in text and "busiest minute 110/min at 00:00 EST (10:30 IST)" in text
-    assert ":red_circle: *vuori* (Vuori) — 5xx 5.00% (7,200 errors)" in text
-    assert "*Orders:* 4 · ▲ 300%" in text and "OMS 2 (▲ 100%)" in text and "CRS 2" in text
-    assert "• Bombas (CRS) 1" in text and "• Felina (CRS) 1" in text
-    assert "*Alerts:* 1 started (1 critical) · most: Tasks below desired ×1" in text
-    covers = msg["blocks"][-1]["elements"][0]["text"]
-    assert covers.startswith("Covers Sun 08 Nov 00:00 EST – Mon 09 Nov 00:00 EST (Sun 08 Nov 10:30 IST – Mon 09 Nov 10:30 IST)")
+    b = msg["blocks"]
+    assert b[0] == {"type": "header", "text": {"type": "plain_text", "text": "🌅 Daily Ops Report · Sun 08 Nov", "emoji": True}}
+    assert b[1]["elements"][0]["text"] == "🇺🇸 US Eastern day · compared with Sun 01 Nov"
+    fields = {f["text"].split("\n")[0]: f["text"].split("\n")[1] for f in b[2]["fields"]}
+    assert fields["*📈 API calls*"] == "*158,400*  📉 −4.0%"           # last week's day had 25 hours: 165,000
+    assert fields["*🛒 Orders*"] == "*4*  📈 +300% 🚀"
+    assert fields["*⚠️ 4xx rate*"] == "*0.91%*" and fields["*🔥 5xx rate*"] == "*4.55%* 🔴"
+    assert fields["*⚡ Busiest minute*"] == "110/min at 00:00 EST (10:30 IST)"
+    assert fields["*🚨 Alerts*"] == "1 started · nothing failing now ✅"
+    text = as_text(b)
+    assert "```\nOMS     ████████████████████  2  ▲ +100%\nCRS     ████████████████████  2\nOMS-11                        0\n```" in text
+    assert "🥇 *Dermalogica* 2 📈 +100%   🥈 *Bombas* 1   🥉 *Felina* 1" in text
+    assert "• 🔴 *vuori* (Vuori) — 5xx 5.00% (7,200 errors)" in text
+    assert "1 started · 1 reached critical · most: Tasks below desired ×1" in text
+    buttons = b[-2]["elements"]
+    assert [x["text"]["text"] for x in buttons] == ["📊 Open the day", "🔔 Alerts page"] and buttons[0]["style"] == "primary"
+    assert buttons[0]["url"].startswith("https://logs.example.com/ui/ops?tab=history&range=custom&from=")
+    assert b[-1]["elements"][0]["text"].startswith(
+        "Covers Sun 08 Nov 00:00 EST – Mon 09 Nov 00:00 EST (Sun 08 Nov 10:30 IST – Mon 09 Nov 10:30 IST)")
+    assert msg["text"] == "Daily Ops Report Sun 08 Nov: 158,400 calls (📉 −4.0%), 4 orders (📈 +300%), 1 problem stage, 1 alert"
     assert msg["summary"]["title"] == "Sun 08 Nov (US Eastern)"
+    assert len(b) <= 50 and all(len(f["text"]) <= 2000 for f in b[2]["fields"])     # Slack's limits
+
+
+def test_critical_counted_once_per_alert(env):
+    """An alert that starts as a warning and goes up to critical counts once ("20 started (23 critical)")."""
+    _, svc, _ = env
+    at = MS(datetime(2026, 11, 8, 20, tzinfo=timezone.utc))
+    svc._append_history([
+        {"id": "w1", "at": at, "event": "firing", "level": "warning", "ruleName": "CPU", "subject": "c1", "cluster": None},
+        {"id": "w2", "at": at + 1, "event": "escalated", "level": "critical", "ruleName": "CPU", "subject": "c1", "cluster": None},
+        {"id": "w3", "at": at + 2, "event": "escalated", "level": "critical", "ruleName": "CPU", "subject": "c1", "cluster": None}])
+    from app.daily_summary import as_text
+    text = as_text(svc.daily_message("2026-11-08", now=MS(NOW))["blocks"])
+    assert "2 started · 2 reached critical" in text
 
 
 def test_posts_once_after_midnight_to_the_summaries_channel(env):
@@ -117,7 +143,7 @@ def test_routes(env):
     assert slack.sent[-1][0] == DIGEST_HOOK and "summaries will arrive here" in slack.sent[-1][1]["text"]
     svc.ops.now = lambda: NOW
     p = client.get(f"{URL}/daily/_preview?day=2026-11-08", headers=ROOT_H).json()
-    assert "Daily ops summary" in p["text"] and p["summary"]["title"].startswith("Sun 08 Nov")
+    assert "DAILY OPS REPORT · SUN 08 NOV" in p["text"] and p["summary"]["title"].startswith("Sun 08 Nov")
     assert client.get(f"{URL}/daily/_preview?day=2030-01-01", headers=ROOT_H).json()["error"]["code"] == "INVALID_DAY"
     r = client.post(f"{URL}/daily/_send?day=2026-11-08", headers=ROOT_H)
     assert r.status_code == 200 and r.json()["ruleName"] == "Daily summary" and slack.sent[-1][0] == DIGEST_HOOK
@@ -135,8 +161,8 @@ def test_problem_rules():
     out = problem_stages([row("a", 10_000, e5=60), row("b", 10_000, p95=900), row("c", 300), row("d", 10_000, e5=5)],
                          [row("a", 10_000), row("b", 10_000, p95=300), row("c", 5_000), row("e", 2_000), row("d", 10_000)], th)
     whys = {p[2].split("*")[1]: (p[1], p[3]) for p in out}
-    assert whys["a"][0] == ":large_orange_circle:" and "5xx 0.60%" in whys["a"][1]          # amber: ≥ 0.5 %
-    assert whys["b"][0] == ":red_circle:" and "3.0× last week" in whys["b"][1]
+    assert whys["a"][0] == "🟠" and "5xx 0.60%" in whys["a"][1]                              # amber: ≥ 0.5 %
+    assert whys["b"][0] == "🔴" and "3.0× last week" in whys["b"][1]
     assert "6% of last week" in whys["c"][1] and "0 calls" in whys["e"][1]                    # quiet / gone
     assert "d" not in whys                                                                    # 5 errors: too few
     assert out[0][0] == 2
