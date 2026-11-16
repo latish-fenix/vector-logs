@@ -315,3 +315,37 @@ export function usePageTitle(title: string) {
     document.title = title ? `${title} · Vector Logs` : "Vector Logs";
   }, [title]);
 }
+
+// ------------------------------------------------------------------ 24-hour time pickers
+// The browser's own time boxes follow the computer's 12 / 24-hour setting (AM / PM on most); these
+// always show 00–23.
+const HOURS = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, "0"));
+const MINUTES = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0"));
+
+/** "HH:MM" as two drop-downs, 24-hour. */
+export function Time24({ value, onChange, disabled, label }: { value: string; onChange: (v: string) => void; disabled?: boolean; label: string }) {
+  const [h = "00", m = "00"] = (value || "00:00").split(":");
+  return (
+    <div className="t24" role="group" aria-label={label}>
+      <select className="select" aria-label={`${label}: hour`} value={h} disabled={disabled} onChange={(e) => onChange(`${e.target.value}:${m}`)}>
+        {HOURS.map((x) => <option key={x} value={x}>{x}</option>)}
+      </select>
+      <b className="t24-sep" aria-hidden="true">:</b>
+      <select className="select" aria-label={`${label}: minute`} value={m} disabled={disabled} onChange={(e) => onChange(`${h}:${e.target.value}`)}>
+        {MINUTES.map((x) => <option key={x} value={x}>{x}</option>)}
+      </select>
+    </div>
+  );
+}
+
+/** "YYYY-MM-DDTHH:MM" (like <input type="datetime-local">) as a date box and a 24-hour time. */
+export function DateTime24({ value, onChange, min, max, label }: { value: string; onChange: (v: string) => void; min?: string; max?: string; label: string }) {
+  const [d = "", t = "00:00"] = (value || "").split("T");
+  return (
+    <div className="t24" role="group" aria-label={label}>
+      <input type="date" className="input" aria-label={`${label}: date`} value={d} min={min?.slice(0, 10)} max={max?.slice(0, 10)}
+        onChange={(e) => onChange(e.target.value ? `${e.target.value}T${t.slice(0, 5)}` : "")} />
+      <Time24 value={t.slice(0, 5)} label={label} disabled={!d} onChange={(v) => onChange(`${d}T${v}`)} />
+    </div>
+  );
+}

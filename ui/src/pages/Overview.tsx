@@ -8,7 +8,7 @@ import {
 import { Histogram, LEVEL_VAR } from "../components/Histogram";
 import { Icon } from "../components/icons";
 import { Page } from "../components/Shell";
-import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, Spinner, copyText, useToast } from "../components/ui";
+import { Badge, Callout, DateTime24, Dialog, Empty, ErrorCallout, Loading, Spinner, copyText, useToast } from "../components/ui";
 import { bytes, duration, exportZone, fmtTime, fromInput, localZoneName, num, storedZone, storeZone, toInput, type Zone } from "../format";
 import { useClusters, useMe } from "../session";
 
@@ -412,9 +412,9 @@ export function TimePicker({ start, end, zone, maxHours, onChange, compact, draf
         </select>
         {custom && (
           <>
-            <input type="datetime-local" className="input" aria-label="From" style={{ width: "auto" }} value={from} onChange={(e) => { setFrom(e.target.value); setEdited(true); }} />
+            <DateTime24 label="From" value={from} onChange={(v) => { setFrom(v); setEdited(true); }} />
             <span className="hint">to</span>
-            <input type="datetime-local" className="input" aria-label="To" style={{ width: "auto" }} value={to} onChange={(e) => { setTo(e.target.value); setEdited(true); }} />
+            <DateTime24 label="To" value={to} onChange={(v) => { setTo(v); setEdited(true); }} />
             <button type="button" className={`btn ${pending ? "btn-primary" : ""}`} disabled={blocking} title={err ?? undefined}
               onClick={() => onChange(new Date(a!).toISOString(), new Date(b!).toISOString())}>Apply</button>
           </>

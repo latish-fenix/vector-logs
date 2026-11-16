@@ -194,10 +194,12 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .ops-range-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ops-dt { display: inline-flex; align-items: center; gap: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
 .ops-dt:focus-within { border-color: var(--accent); box-shadow: var(--focus); }
-.ops-dt span { padding: 0 10px; align-self: stretch; display: flex; align-items: center; font-size: 11px; font-weight: 700; letter-spacing: .06em;
+.ops-dt .ops-dt-label { padding: 0 10px; align-self: stretch; display: flex; align-items: center; font-size: 11px; font-weight: 700; letter-spacing: .06em;
   text-transform: uppercase; color: var(--muted); background: var(--surface-3); border-right: 1px solid var(--border); }
-.ops-dt .input { border: 0; border-radius: 0; height: 36px; box-shadow: none; font-variant-numeric: tabular-nums; min-width: 0; }
-.ops-dt .input:focus { box-shadow: none; }
+.ops-dt .input, .ops-dt .select { border: 0; border-radius: 0; height: 36px; min-height: 36px; box-shadow: none; font-variant-numeric: tabular-nums; min-width: 0; }
+.ops-dt .t24 { gap: 0; }
+.ops-dt .t24 .t24 .select { padding: 0 6px; }
+.ops-dt .input:focus, .ops-dt .select:focus { box-shadow: none; }
 .ops-dt-arrow { color: var(--faint); }
 .ops-dt-zone { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: var(--accent-text); background: var(--accent-soft);
   border: 1px solid var(--accent-soft-border); border-radius: 6px; padding: 3px 7px; }

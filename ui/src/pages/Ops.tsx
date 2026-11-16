@@ -5,7 +5,7 @@ import { get, type OpsHealth, type OpsRange, type OpsStatus, type OpsSummary } f
 import { Icon } from "../components/icons";
 import { bucket, clock, clockZ, cumulative, dateLabel, dayIn, Legend, LineChart, localStamp, offsetMs, Spark, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
-import { Callout, Empty, ErrorCallout, Loading, SearchSelect, downloadFile } from "../components/ui";
+import { Callout, DateTime24, Empty, ErrorCallout, Loading, SearchSelect, downloadFile } from "../components/ui";
 import { ago, num } from "../format";
 import { useMe } from "../session";
 import "../ops.css";
@@ -701,15 +701,13 @@ function History({ params, set, onFresh }: { params: URLSearchParams; set: (p: R
             <button type="button" className="tab" aria-pressed={preset === "custom"} aria-selected={preset === "custom"} onClick={apply} disabled={!!customErr}>Custom</button>
           </div>
           <div className="ops-range-pick">
-            <label className="ops-dt"><span>From</span>
-              <input type="datetime-local" className="input" value={fromText} max={toText} onChange={(e) => setFromText(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") apply(); }} />
-            </label>
+            <div className="ops-dt" onKeyDown={(e) => { if (e.key === "Enter") apply(); }}><span className="ops-dt-label">From</span>
+              <DateTime24 label="From" value={fromText} max={toText} onChange={setFromText} />
+            </div>
             <span className="ops-dt-arrow" aria-hidden="true">→</span>
-            <label className="ops-dt"><span>To</span>
-              <input type="datetime-local" className="input" value={toText} min={fromText} onChange={(e) => setToText(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") apply(); }} />
-            </label>
+            <div className="ops-dt" onKeyDown={(e) => { if (e.key === "Enter") apply(); }}><span className="ops-dt-label">To</span>
+              <DateTime24 label="To" value={toText} min={fromText} onChange={setToText} />
+            </div>
             <span className="ops-dt-zone" title={ZONE_TITLE[zone]}>{zoneName(from, zone)}</span>
             {dirty && <button type="button" className="btn btn-primary btn-sm" onClick={apply} disabled={!!customErr} title={customErr ?? "Show this range"}>Apply</button>}
           </div>

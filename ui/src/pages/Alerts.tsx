@@ -10,7 +10,7 @@ import {
 } from "../api";
 import { Icon } from "../components/icons";
 import { Page } from "../components/Shell";
-import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, SearchInput, SearchSelect, Spinner, useToast } from "../components/ui";
+import { Badge, Callout, Dialog, Empty, ErrorCallout, Loading, SearchInput, SearchSelect, Spinner, Time24, useToast } from "../components/ui";
 import { ago, fmtTime, localZoneName, num, storedZone } from "../format";
 import { useMe } from "../session";
 
@@ -378,7 +378,7 @@ function ThresholdsCard({ d }: { d: AlertsOverview }) {
               {d.days.map((x) => <option key={x} value={x}>{DAY_NAMES[x] ?? x}</option>)}
             </select>
             <span className="hint">at</span>
-            <input aria-label="Time" className="input" type="time" value={digest.time} disabled={!digest.enabled} onChange={(e) => setDigest((x) => ({ ...x, time: e.target.value }))} style={{ width: 120 }} />
+            <Time24 label="Weekly summary time" value={digest.time} disabled={!digest.enabled} onChange={(v) => setDigest((x) => ({ ...x, time: v }))} />
             <span className="hint">{zone}</span>
             <div className="grow" />
             <button type="button" className="btn btn-sm" disabled={!anyHook || send.isPending} onClick={() => send.mutate()}>{send.isPending ? <Spinner /> : null} Send it now</button>
@@ -394,7 +394,7 @@ function ThresholdsCard({ d }: { d: AlertsOverview }) {
                 {d.dailyZones.map((z) => <option key={z} value={z}>{DAILY_ZONE_NAME[z] ?? z}</option>)}
               </select>
               <span className="hint">at</span>
-              <input aria-label="Daily summary time" className="input" type="time" value={daily.time} disabled={!daily.enabled} onChange={(e) => setDaily((x) => ({ ...x, time: e.target.value }))} style={{ width: 120 }} />
+              <Time24 label="Daily summary time" value={daily.time} disabled={!daily.enabled} onChange={(v) => setDaily((x) => ({ ...x, time: v }))} />
               <span className="hint">{DAILY_ZONE_NAME[daily.zone] ?? daily.zone} time</span>
               <div className="grow" />
               <button type="button" className="btn btn-sm" onClick={() => setPreview(true)}><Icon name="eye" size={15} /> Preview</button>
