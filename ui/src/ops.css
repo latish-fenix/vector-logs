@@ -242,3 +242,28 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .ops-slow-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ops-slow-path .hint { font-family: var(--font-sans); }
 .ops-svc-tag { font-family: var(--font-sans); font-weight: 600; font-size: 11px; color: var(--muted); }
+
+/* inbound orders: a third "today" card and a fifth History chart */
+.ops-hero-grid > .ops-hero:nth-child(3):last-child { grid-column: 1 / -1; }
+@media (min-width: 1400px) {
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ops-hero-grid > .ops-hero:nth-child(3):last-child { grid-column: auto; }
+}
+@media (min-width: 1400px) and (max-width: 1799px) {
+  /* three cards side by side: narrower rows, no sparkline in the top 3 */
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-svc { grid-template-columns: minmax(0, 1fr) 64px 62px; padding: 9px 16px; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-svc .ops-spark { display: none; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-big { font-size: 34px; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-hero-top { padding-left: 16px; padding-right: 16px; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-minis { margin-left: 16px; margin-right: 16px; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-big-row { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-mini { padding-right: 8px; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-mini + .ops-mini { padding-left: 10px; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-mini-value { font-size: 16px; }
+  .ops-hero-grid:has(> .ops-hero:nth-child(3)) .ops-card-head .grow { min-width: 0; }
+}
+.ops-charts > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+@media (max-width: 1100px) { .ops-charts > :last-child:nth-child(odd) { grid-column: auto; } }
+.ops-stats-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+@media (max-width: 1280px) { .ops-stats-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .ops-stats-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -415,3 +415,98 @@ def test_range_leaves_out_partial_buckets(ops):
     assert calls[last] is None and calls[last - 1] == 550             # data to 10:25: that bucket is not over yet
     assert r["api"]["series"]["p95"][0] == r["api"]["series"]["p95"][1]   # averages are kept
     assert r["api"]["calls"] == 110 * (626 - 7)                       # the totals count every minute
+
+
+# ------------------------------------------------------------------ inbound orders (elkop2, 5-minute windows)
+def write_inbound(root: Path, windows: dict) -> None:
+    """windows: datetime (window start) -> {tenant: orders}; an _all row is added for each window."""
+    blocks: dict[str, list[dict]] = {}
+    for t, tenants in sorted(windows.items()):
+        m = t.strftime("%Y-%m-%dT%H:%MZ")
+        key = f"dt={t:%Y-%m-%d}/part-{t.hour - t.hour % 4:02d}.csv.gz"
+        rows = blocks.setdefault(key, [])
+        rows.append({"minute": m, "tenant": "_all", "orders": sum(tenants.values()), "docs": "", "span_min": 5, "src": "live"})
+        rows += [{"minute": m, "tenant": tn, "orders": n, "docs": "", "span_min": 5, "src": "live"} for tn, n in tenants.items() if n]
+    for key, rows in blocks.items():
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=["minute", "tenant", "orders", "docs", "span_min", "src"], lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
+        p = root / "es-order-counts" / "inbound" / key
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(gzip.compress(buf.getvalue().encode()))
+
+
+def windows(day, upto: datetime | None, per: dict):
+    t = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    end = upto or t + timedelta(days=1)
+    out = {}
+    while t < end:
+        out[t] = dict(per)
+        t += timedelta(minutes=5)
+    return out
+
+
+@pytest.fixture()
+def inbound(data):
+    # today: windows 00:00 … 10:20 (the 10:25 window is written at 10:30:0x, just after NOW's file copy)
+    write_inbound(data, {**windows(TODAY, datetime(2026, 11, 9, 10, 25, tzinfo=timezone.utc),
+                                   {"vuori-clothing.myshopify.com": 3, "dolls-test.myshopify.com": 1}),
+                         **windows(LW, None, {"vuori-clothing.myshopify.com": 2, "kuiu-shop.myshopify.com": 1})})
+    return data
+
+
+def test_inbound_summary_like_the_orders_card(ops, inbound):
+    ib = ops.summary(zone="UTC")["inbound"]
+    assert ib["ready"] and ib["lastWeekReady"] and not ib["stale"]
+    assert ib["asOf"] == MS(datetime(2026, 11, 9, 10, 24, tzinfo=timezone.utc))      # the 10:20 window ends 10:25
+    n_win = 10 * 12 + 5                                                                  # 00:00 … 10:20 = 125 windows
+    assert ib["total"] == 4 * n_win and ib["totalLastWeek"] == 3 * n_win and ib["totalLastWeekDay"] == 3 * 288
+    assert ib["change"] == round(100 * (4 / 3 - 1), 1)
+    m = ib["minutes"]
+    assert m["step"] == 60_000 and m["counts"][0] == 4 and m["counts"][1] == 0 and m["counts"][5] == 4
+    assert m["counts"][624] == 0 and m["counts"][625] is None                           # shown up to 10:24
+    assert sum(v or 0 for v in m["counts"]) == ib["total"] and len(m["lastWeek"]) == 1440
+    names = {s["store"]: s for s in ib["stores"]}
+    assert names["vuori-clothing.myshopify.com"]["name"] == "Vuori" and names["dolls-test.myshopify.com"]["name"] == "Dolls Test"
+    v = names["vuori-clothing.myshopify.com"]
+    assert v["count"] == 3 * n_win and v["lastWeek"] == 2 * n_win and v["hours"][9] == 36 and v["hours"][10] is None
+    assert names["kuiu-shop.myshopify.com"]["count"] == 0 and names["kuiu-shop.myshopify.com"]["lastWeek"] == n_win
+    assert ib["stores"][0]["store"] == "vuori-clothing.myshopify.com"
+
+
+def test_inbound_exclude_and_missing(ops, inbound, tmp_path):
+    cfg = Path(ops.config.path)
+    cfg.write_text(cfg.read_text().replace("inbound:\n  exclude: []", "inbound:\n  exclude: ['test']"))
+    ops.config._checked = 0
+    ib = ops.summary(zone="UTC")["inbound"]
+    assert "dolls-test.myshopify.com" not in {s["store"] for s in ib["stores"]} and ib["total"] == 3 * 125
+    # a day with no inbound files: not ready (the dashboard says "no data yet")
+    assert ops.summary(day="2026-11-05", zone="UTC")["inbound"]["ready"] is False
+
+
+def test_inbound_in_ist_and_in_a_range(ops, inbound):
+    ib = ops.summary(zone="IST")["inbound"]                       # IST day 9 Nov = 8 Nov 18:30 UTC … : starts at 00:00 UTC here
+    assert ib["ready"] and ib["total"] == 4 * 125
+    r = ops.time_range(MS(datetime(2026, 11, 9, 9, 0, tzinfo=timezone.utc)), MS(datetime(2026, 11, 9, 10, 0, tzinfo=timezone.utc)), "UTC")
+    i = r["inbound"]
+    assert r["step"] == 60_000 and i["step"] == 300_000 and len(i["series"]) == 12        # never finer than a window
+    assert i["series"] == [4] * 12 and i["total"] == 48
+    assert {t["tenant"]: t["count"] for t in i["tenants"]} == {"vuori-clothing.myshopify.com": 36, "dolls-test.myshopify.com": 12}
+    # up to now: the 10:25 window is not counted yet, so the last bucket of a 15-minute range is left out
+    r = ops.time_range(MS(datetime(2026, 11, 9, 10, 0, tzinfo=timezone.utc)), MS(NOW), "UTC")
+    assert r["inbound"]["series"][:5] == [4, 4, 4, 4, 4] and r["inbound"]["series"][5:] == [None, None]
+    one = ops.time_range(MS(datetime(2026, 11, 9, 9, 0, tzinfo=timezone.utc)), MS(datetime(2026, 11, 9, 10, 0, tzinfo=timezone.utc)),
+                         "UTC", store="dolls-test.myshopify.com")
+    assert one["inbound"]["series"] == [1] * 12 and one["inbound"]["total"] == 12
+
+
+def test_tenant_names():
+    cfg = parse_config("names:\n  vuori-clothing.myshopify.com: Vuori\n")
+    assert cfg.tenant_name("vuori-clothing.myshopify.com") == "Vuori"
+    assert cfg.tenant_name("buck-mason-usa.myshopify.com") == "Buck Mason Usa"
+    assert cfg.tenant_name("talons.com") == "Talons" and cfg.tenant_name("zenpatient") == "Zenpatient"
+    with pytest.raises(OpsConfigError, match="exclude"):
+        parse_config("inbound:\n  exclude: ['(']\n")
+    with pytest.raises(OpsConfigError, match="unknown setting"):
+        parse_config("inbound:\n  skip: []\n")

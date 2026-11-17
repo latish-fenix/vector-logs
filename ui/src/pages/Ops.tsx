@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { ApiError, get, type LbSlowest, type OpsHealth, type OpsRange, type OpsStatus, type OpsSummary } from "../api";
+import { ApiError, get, type LbSlowest, type OpsHealth, type OpsInbound, type OpsOrders, type OpsRange, type OpsStatus, type OpsSummary } from "../api";
 import { Icon } from "../components/icons";
 import { bucket, clock, clockZ, cumulative, dateLabel, dayIn, Legend, LineChart, localStamp, offsetMs, Spark, useHidden, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
@@ -295,9 +295,10 @@ export function Ops() {
   );
 }
 
-function SourceProblems({ api, orders }: {
+function SourceProblems({ api, orders, inbound }: {
   api: { stale: boolean; ageMs: number | null; error: string | null; asOf: number | null };
   orders: { error: string | null; configError: string | null };
+  inbound?: OpsInbound | null;
 }) {
   const me = useMe().data!;
   return (
@@ -310,7 +311,61 @@ function SourceProblems({ api, orders }: {
       )}
       {orders.configError && <Callout tone="warn" title="The ops dashboard config has a mistake (the last good version is used)">{orders.configError}</Callout>}
       {orders.error && <Callout tone="warn" title="Counting orders failed last time">{orders.error}</Callout>}
+      {inbound?.error && <Callout tone="warn" title="Can't read the inbound order counts">{inbound.error}</Callout>}
+      {inbound && !inbound.error && inbound.stale && (
+        <Callout tone="warn" title={inbound.asOf === null ? "No inbound order counts for today yet" : `Inbound orders are ${Math.round((inbound.ageMs ?? 0) / 60_000)} minutes old`}>
+          They are counted from elkop2 every 5 minutes by <span className="mono">es_order_counts.py</span> (cron on 172.0.23.77). {me.admin ? "Check ~/es-order-counts/run.log there." : "Ask an admin to check the count job."}
+        </Callout>
+      )}
     </>
+  );
+}
+
+/** A "… today" card: count vs last week by this time, last hour / projected / counted to, running total, top 3. */
+function CountHero({ title, data: o, showService, countedNote, countedTitle, waiting, pending }: {
+  title: string; data: OpsOrders | OpsInbound; showService?: boolean; countedNote: string; countedTitle: string;
+  waiting: ReactNode; pending: string;
+}) {
+  const cum = useMemo(() => (o.minutes ? { now: cumulative(o.minutes.counts), lw: cumulative(o.minutes.lastWeek) } : null), [o]);
+  const lastHour = o.minutes ? lastKnown(o.minutes.counts, 60, o.minutes.lastWeek) : null;
+  const projected = o.total !== null && o.totalLastWeek && o.totalLastWeekDay ? (o.total * o.totalLastWeekDay) / o.totalLastWeek : null;
+  return (
+    <section className="ops-hero" aria-label={title}>
+      <div className="ops-hero-top">
+        <div className="ops-eyebrow"><span>{title}</span><span className="grow" />{o.ready ? <Delta value={o.change} /> : null}</div>
+        <div className="ops-big-row">
+          <span className="ops-big">{o.ready ? num(o.total) : "…"}</span>
+          {o.ready && o.totalLastWeek !== null && <span className="ops-vs">vs <strong>{num(o.totalLastWeek)}</strong> by this time last week</span>}
+          {!o.ready && <span className="ops-vs">{pending}</span>}
+        </div>
+      </div>
+      <div className="ops-minis">
+        <Mini label="Last hour" value={lastHour ? num(lastHour.sum) : "—"} note={lastHour?.other !== null && lastHour?.other !== undefined ? `last week ${num(lastHour.other)}` : "—"} />
+        <Mini label="Projected" value={compact(projected)} note={o.totalLastWeekDay !== null ? `last week ${compact(o.totalLastWeekDay)}` : "needs last week"}
+          title="Today so far × (last week's whole day ÷ last week by this time)" />
+        <Mini label="Counted to" value={<T ms={o.asOf} />} note={countedNote} title={countedTitle} />
+      </div>
+      {cum && o.minutes ? (
+        <ToggleChart title="Running total" label={`${title}: added up through the day, today and last week`} start={o.minutes.start} step={60_000} height={150}
+          fmt={compact} axisFmt={kAxis} nowAt={o.asOf} series={[{ key: "now", label: "Today", color: C_NOW, values: cum.now, area: true },
+            ...(o.minutes.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: cum.lw, dashed: true }] : [])]} />
+      ) : waiting}
+      <div className="ops-hero-fill" />
+      {o.stores.length > 0 && (
+        <div className="ops-services" aria-label="Top 3 today">
+          {o.stores.slice(0, 3).map((s) => (
+            <div key={`${s.service}/${s.store}`} className="ops-svc">
+              <span className="name" title={`${s.name} · ${s.store}${showService ? ` · ${s.service}` : ""}`}>{s.name}
+                <span className="hint ops-store-sub">{s.name !== s.store && <>{s.store}{showService ? " · " : ""}</>}{showService && <span className="ops-svc-tag">{s.service}</span>}</span>
+              </span>
+              <Spark now={s.hours} lastWeek={s.lastWeekHours} />
+              <span className="n">{num(s.count)}</span>
+              <span className="d"><Chg value={s.change} base={s.lastWeek} /></span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -322,17 +377,14 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
   const d = q.data;
   useEffect(() => { if (d) onFresh(d.api); }, [d, onFresh]);
   const callsCum = useMemo(() => (d ? { now: cumulative(d.api.minutes.calls), lw: cumulative(d.api.minutes.lastWeek) } : null), [d]);
-  const ordersCum = useMemo(() => (d?.orders.minutes ? { now: cumulative(d.orders.minutes.counts), lw: cumulative(d.orders.minutes.lastWeek) } : null), [d]);
   if (q.isLoading) return <section className="card"><Loading what="Reading today's numbers…" /></section>;
   if (q.error || !d || !callsCum) return <section className="card"><div className="card-body"><ErrorCallout error={q.error} /></div></section>;
-  const { api: a, orders: o } = d;
+  const { api: a, orders: o, inbound: ib } = d;
   const m = a.minutes;
   const rate = lastKnown(m.calls, 5, m.lastWeek);
   const nowPerMin = rate.minutes ? rate.sum / rate.minutes : null;
   const lwPerMin = rate.minutes && rate.other !== null ? rate.other / rate.minutes : null;
   const projected = a.callsLastWeek && a.callsLastWeekDay ? (a.calls * a.callsLastWeekDay) / a.callsLastWeek : null;
-  const lastHour = o.minutes ? lastKnown(o.minutes.counts, 60, o.minutes.lastWeek) : null;
-  const oProjected = o.total !== null && o.totalLastWeek && o.totalLastWeekDay ? (o.total * o.totalLastWeekDay) / o.totalLastWeek : null;
   const problems = a.stages.filter((s) => s.status === "red" || s.status === "amber").sort((x, y) => (x.status === y.status ? 0 : x.status === "red" ? -1 : 1));
   const e4 = share(a.err4xx, a.calls), e5 = share(a.err5xx, a.calls);
   const stages = all ? a.stages : a.stages.slice(0, 15);
@@ -346,7 +398,7 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
 
   return (
     <>
-      <SourceProblems api={a} orders={o} />
+      <SourceProblems api={a} orders={o} inbound={ib} />
       <div className="ops-hero-grid">
         <section className="ops-hero" aria-label="API calls today">
           <div className="ops-hero-top">
@@ -359,7 +411,7 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
           <div className="ops-minis">
             <Mini label="Right now" value={nowPerMin === null ? "—" : `${num(Math.round(nowPerMin))}/min`}
               note={lwPerMin !== null ? `last week ${num(Math.round(lwPerMin))}/min` : "last 5 minutes"} title="Average of the last 5 minutes" />
-            <Mini label="Projected today" value={compact(projected)} note={a.callsLastWeekDay ? `last week ${compact(a.callsLastWeekDay)}` : "needs last week"}
+            <Mini label="Projected" value={compact(projected)} note={a.callsLastWeekDay ? `last week ${compact(a.callsLastWeekDay)}` : "needs last week"}
               title="Today so far × (last week's whole day ÷ last week by this time)" />
             <Mini label="Busiest minute" value={a.peak ? `${num(a.peak.calls)}/min` : "—"} note={a.peak ? <>at <T ms={a.peak.t} /></> : ""} />
           </div>
@@ -382,43 +434,15 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
           )}
         </section>
 
-        <section className="ops-hero" aria-label="CRS and OMS orders today">
-          <div className="ops-hero-top">
-            <div className="ops-eyebrow"><span>CRS &amp; OMS orders today</span><span className="grow" />{o.ready ? <Delta value={o.change} /> : null}</div>
-            <div className="ops-big-row">
-              <span className="ops-big">{o.ready ? num(o.total) : "…"}</span>
-              {o.ready && o.totalLastWeek !== null && <span className="ops-vs">vs <strong>{num(o.totalLastWeek)}</strong> by this time last week</span>}
-              {!o.ready && <span className="ops-vs">counting today's logs…</span>}
-            </div>
-          </div>
-          <div className="ops-minis">
-            <Mini label="Last hour" value={lastHour ? num(lastHour.sum) : "—"} note={lastHour?.other !== null && lastHour?.other !== undefined ? `last week ${num(lastHour.other)}` : "—"} />
-            <Mini label="Projected today" value={compact(oProjected)} note={o.totalLastWeekDay !== null ? `last week ${compact(o.totalLastWeekDay)}` : "needs last week"}
-              title="Today so far × (last week's whole day ÷ last week by this time)" />
-            <Mini label="Counted to" value={<T ms={o.asOf} />} note={o.lastRun ? `checked ${ago(o.lastRun)}` : "not yet"} title="Orders are counted from the logs every 5 minutes" />
-          </div>
-          {ordersCum ? (
-            <>
-              <ToggleChart title="Running total" label="CRS and OMS orders added up through the day, today and last week" start={o.minutes!.start} step={60_000} height={150} fmt={compact} axisFmt={kAxis}
-                nowAt={o.asOf} series={[{ key: "now", label: "Today", color: C_NOW, values: ordersCum.now, area: true },
-                  ...(o.minutes!.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: ordersCum.lw, dashed: true }] : [])]} />
-            </>
-          ) : <Empty title="Orders are being counted">The first count after a restart takes a few minutes.</Empty>}
-          {o.stores.length > 0 && (
-            <div className="ops-services" aria-label="Top 3 stores today">
-              {o.stores.slice(0, 3).map((s) => (
-                <div key={`${s.service}/${s.store}`} className="ops-svc">
-                  <span className="name" title={`${s.name} · ${s.store} · ${s.service}`}>{s.name}
-                    <span className="hint ops-store-sub">{s.name !== s.store && <>{s.store} · </>}<span className="ops-svc-tag">{s.service}</span></span>
-                  </span>
-                  <Spark now={s.hours} lastWeek={s.lastWeekHours} />
-                  <span className="n">{num(s.count)}</span>
-                  <span className="d"><Chg value={s.change} base={s.lastWeek} /></span>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
+        <CountHero title="CRS & OMS orders today" data={o} showService
+          countedNote={o.lastRun ? `checked ${ago(o.lastRun)}` : "not yet"} countedTitle="Orders are counted from the logs every 5 minutes"
+          waiting={<Empty title="Orders are being counted">The first count after a restart takes a few minutes.</Empty>} pending="counting today's logs…" />
+        {ib && (
+          <CountHero title="Inbound orders today" data={ib}
+            countedNote={ib.ready ? (ib.ageMs !== null ? `${Math.max(0, Math.round(ib.ageMs / 60_000))} min ago` : "") : "—"}
+            countedTitle="New documents in the elkop2 order indexes, counted every 5 minutes (es_order_counts.py on 172.0.23.77)"
+            waiting={<Empty title="No inbound orders counted yet">The counts arrive every 5 minutes from elkop2.</Empty>} pending="waiting for the first count…" />
+        )}
       </div>
 
       <div className="ops-kpis">
@@ -469,6 +493,12 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
               ...(o.minutes.lastWeek ? [{ key: "lw", label: "All last week", color: C_LW, values: bucket(o.minutes.lastWeek, 15), dashed: true }] : []),
             ]} />
         ) : <section className="card"><CardHead title="CRS & OMS orders" sub="per 15 minutes" /><Empty title="Orders are being counted" /></section>}
+        {ib && (ib.minutes ? (
+          <ChartCard title="Inbound orders" sub="per 15 minutes, elkop2 order indexes" label="Inbound orders per 15 minutes today and last week"
+            start={ib.minutes.start} step={900_000} fmt={compact} axisFmt={kAxis} nowAt={ib.asOf}
+            series={[{ key: "now", label: "Today", color: C_NOW, values: bucket(ib.minutes.counts, 15), area: true },
+              ...(ib.minutes.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: bucket(ib.minutes.lastWeek, 15), dashed: true }] : [])]} />
+        ) : <section className="card"><CardHead title="Inbound orders" sub="per 15 minutes" /><Empty title="No inbound orders counted yet" /></section>)}
       </div>
 
       <section className="card" style={{ overflow: "hidden" }}>
@@ -527,7 +557,41 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
           </div>
         )}
       </section>
+
+      {ib && <InboundTenants ib={ib} />}
     </>
+  );
+}
+
+function InboundTenants({ ib }: { ib: OpsInbound }) {
+  const [all, setAll] = useState(false);
+  const rows = all ? ib.stores : ib.stores.slice(0, 15);
+  return (
+    <section className="card" style={{ overflow: "hidden" }}>
+      <CardHead title="Inbound orders by tenant" sub="New orders in the elkop2 order indexes (sandbox -s- and -jg- copies left out) · last week until the same time"
+        right={<Legend series={[{ key: "now", label: "Today (per hour)", color: C_NOW }, { key: "lw", label: "Last week", color: C_LW, dashed: true }]} />} />
+      {!ib.ready ? <Empty title="No inbound orders counted yet" /> : ib.stores.length === 0 ? <Empty title="No inbound orders yet today" /> : (
+        <div className="table-scroll" style={{ maxHeight: "none" }}>
+          <table className="table ops-table">
+            <thead><tr><th>Tenant</th><th>Today vs last week</th><th className="num">Today</th><th className="num">Last week</th><th className="num">Change</th></tr></thead>
+            <tbody>
+              {rows.map((s) => (
+                <tr key={s.store}>
+                  <td><div className="stage"><div><div className="nm">{s.name}</div>{s.name !== s.store && <div className="sub">{s.store}</div>}</div></div></td>
+                  <td><Spark now={s.hours} lastWeek={s.lastWeekHours} width={128} /></td>
+                  <td className="num" style={{ fontWeight: 600 }}>{num(s.count)}</td>
+                  <td className="num">{s.lastWeek === null ? <span className="dim">—</span> : num(s.lastWeek)}</td>
+                  <td className="num"><Chg value={s.change} base={s.lastWeek} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {ib.stores.length > 15 && (
+        <div className="card-foot"><button type="button" className="btn btn-ghost btn-sm" onClick={() => setAll(!all)}>{all ? "Show the top 15" : `Show all ${ib.stores.length} tenants`}</button></div>
+      )}
+    </section>
   );
 }
 
@@ -816,13 +880,15 @@ function History({ params, set, onFresh }: { params: URLSearchParams; set: (p: R
           <button type="button" className="btn btn-sm" onClick={exportCsv} disabled={!d || !d.stages.length} title="Every stage's numbers for this range"><Icon name="download" size={15} /> Download CSV</button>
         </div>
         {d && a && (
-          <div className="ops-stats ops-stats-5">
+          <div className={`ops-stats ${d.inbound ? "ops-stats-6" : "ops-stats-5"}`}>
             <Mini label={sel ? `Calls · ${sel}` : "Calls · all stages"} value={num(a.calls)} note={a.asOf ? <>data to <T ms={a.asOf} /></> : "no data in this range"} />
             <Mini label="4xx rate" value={pct(share(a.err4xx, a.calls), 2)} note={`${num(a.err4xx)} client errors`} />
             <Mini label="5xx rate" value={pct(share(a.err5xx, a.calls), 2)} note={`${num(a.err5xx)} server errors`} />
             <Mini label="p95 latency" value={ms(a.p95)} note="weighted by calls" />
             <Mini label={`CRS & OMS orders · ${store ? storeOpts.find((s) => s.value === store)?.label.split(" · ")[0] ?? store : service || "all services"}`}
               value={d.orders.counted ? num(d.orders.total) : "—"} note={d.orders.counted ? (d.orders.missingDays.length ? "part of the range" : "unique order ids") : `kept ${d.orders.keptDays} days`} />
+            {d.inbound && <Mini label={`Inbound orders${store ? ` · ${d.inbound.tenants.find((t) => t.tenant === store)?.name ?? store}` : ""}`}
+              value={d.inbound.counted ? num(d.inbound.total) : "—"} note={d.inbound.counted ? "elkop2 order indexes" : "not counted for this range"} />}
           </div>
         )}
       </section>
@@ -850,6 +916,12 @@ function History({ params, set, onFresh }: { params: URLSearchParams; set: (p: R
                 series={[{ key: "4xx", label: "4xx", color: C_4XX, values: a.series.err4xx }, { key: "5xx", label: "5xx", color: C_5XX, values: a.series.err5xx }]} />
               <ChartCard title="Latency p95" sub={`${stepText(d.step)}, weighted by calls`} start={d.start} step={d.step} fmt={(v) => ms(v)} nowAt={nowAt}
                 series={[{ key: "p95", label: "p95", color: C_NOW, values: a.series.p95 }, { key: "backend", label: "Backend", color: C_BACKEND, values: a.series.integrationP95 }]} />
+              {d.inbound && (d.inbound.series ? (
+                <ChartCard title="Inbound orders" sub={`${stepText(d.inbound.step)}, elkop2 order indexes`} start={d.inbound.start} step={d.inbound.step} fmt={compact} axisFmt={kAxis} nowAt={nowAt}
+                  series={[{ key: "now", label: store ? d.inbound.tenants.find((t) => t.tenant === store)?.name ?? store : "All tenants", color: C_NOW, values: d.inbound.series, area: true }]} />
+              ) : (
+                <section className="card"><CardHead title="Inbound orders" sub={stepText(d.inbound.step)} /><Empty title="No inbound order counts in this range">They start on 9 Nov 2026.</Empty></section>
+              ))}
             </div>
 
             <section className="card" style={{ overflow: "hidden" }}>

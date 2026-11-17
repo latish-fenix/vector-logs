@@ -47,16 +47,39 @@ orders:
 tenants:
   ad5643d2f6db419abd35178d12762b54: stevemadden
 
+# ---------------------------------------------------------------- inbound orders
+# Orders arriving in the elkop2 order indexes (scripts/es_order_counts.py, every 5 minutes).
+# Tenants whose name matches one of these regular expressions are left out of every inbound number,
+# e.g. exclude: ['test'] leaves out dolls-test.myshopify.com and nomadtest.myshopify.com.
+inbound:
+  exclude: []
+
 # ---------------------------------------------------------------- names
-# Display names for API Gateway stages and stores. Anything not listed is shown as it is
-# (".myshopify.com" is dropped from store names).
+# Display names for API Gateway stages, stores and inbound tenants. Stages and stores not listed are
+# shown as they are (".myshopify.com" dropped); inbound tenants not listed get a name made from the
+# shop domain ("buck-mason-usa.myshopify.com" -> "Buck Mason Usa").
 names:
   stevemadden: Steve Madden
+  stevemadden.myshopify.com: Steve Madden
   dermalogica-us.myshopify.com: Dermalogica
   bombas.myshopify.com: Bombas
   felinagroup.myshopify.com: Felina
   aquiskhairpep.myshopify.com: Aquis
   k18-stylist-collective.myshopify.com: K18 Stylist Collective
+  vuori-clothing.myshopify.com: Vuori
+  buck-mason-usa.myshopify.com: Buck Mason
+  kuiu-shop.myshopify.com: KUIU
+  prod-wilson.myshopify.com: Wilson
+  shoppremiumoutlets.myshopify.com: Shop Premium Outlets
+  divebombindustries.myshopify.com: Divebomb Industries
+  clocksandcolours.myshopify.com: Clocks and Colours
+  hatchcollection.myshopify.com: Hatch Collection
+  bearabystore.myshopify.com: Bearaby
+  bulbheadshop1.myshopify.com: BulbHead (shop 1)
+  bulbhead-shop4.myshopify.com: BulbHead (shop 4)
+  bulbheadstore2.myshopify.com: BulbHead (store 2)
+  mimikidshaircare.com: Mimi Kids Hair Care
+  confidenceclub.com: Confidence Club
 
 # ---------------------------------------------------------------- status colours
 # Each stage gets green / amber / red on the Live and Health pages, from its last N minutes

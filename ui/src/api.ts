@@ -515,6 +515,11 @@ export interface OpsSummary {
     statusCounts: Record<OpsStatus, number>;
   };
   orders: OpsOrders;
+  inbound?: OpsInbound;
+}
+/** Orders arriving in the elkop2 order indexes (5-minute windows), shaped like OpsOrders. */
+export interface OpsInbound extends Omit<OpsOrders, "lastRun" | "lastOk" | "running" | "configError"> {
+  ageMs: number | null; stale: boolean; source: string;
 }
 export interface OpsWindow { calls: number; err4xx: number; err5xx: number; err4xxPct: number | null; err5xxPct: number | null; p50: number | null; p95: number | null; integrationP95: number | null; gatewayMs: number | null }
 export interface OpsHealth {
@@ -539,6 +544,8 @@ export interface OpsRange {
     services: { service: string; cluster: string; count: number }[]; series: (number | null)[] | null;
     serviceSeries?: Record<string, (number | null)[]> | null;
     stores: { service: string; store: string; name: string; count: number }[] };
+  inbound?: { counted: boolean; asOf: number | null; start: number; step: number; total: number | null;
+    series: (number | null)[] | null; tenants: { tenant: string; name: string; count: number }[]; source: string; error: string | null };
   services: { service: string; cluster: string }[];
 }
 export interface OpsHistory {
