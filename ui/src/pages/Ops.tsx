@@ -107,17 +107,6 @@ function Kpi({ label, value, note, tone, onClick, title }: { label: string; valu
   return onClick ? <button type="button" className="ops-kpi" onClick={onClick} title={title}>{inner}</button> : <div className="ops-kpi" title={title}>{inner}</div>;
 }
 
-/** The service's three busiest stores today, in place of its cluster name. */
-function TopStores({ stores, cluster }: { stores: { name: string; store: string; count: number }[]; cluster: string }) {
-  const top = [...stores].sort((a, b) => b.count - a.count).slice(0, 3);
-  if (!top.length) return <span className="hint">{cluster}</span>;
-  return (
-    <span className="hint ops-topstores" title={`Busiest stores today (${cluster}): ${top.map((t) => `${t.name} ${num(t.count)}`).join(", ")}`}>
-      {top.map((t, i) => <span key={t.store}>{i > 0 && <span className="sep"> · </span>}{t.name}</span>)}
-    </span>
-  );
-}
-
 const SLOW_WINDOWS: [number, string][] = [[15, "15 min"], [60, "60 min"], [180, "3 h"], [360, "6 h"], [720, "12 h"], [1440, "24 h"]];
 const SLOW_KEY = "ops-slowest-minutes";
 const slowWindowText = (m: number) => SLOW_WINDOWS.find(([v]) => v === m)?.[1] ?? `${m} min`;
@@ -415,11 +404,13 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
                   ...(o.minutes!.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: ordersCum.lw, dashed: true }] : [])]} />
             </>
           ) : <Empty title="Orders are being counted">The first count after a restart takes a few minutes.</Empty>}
-          {o.services.length > 0 && (
-            <div className="ops-services">
-              {o.services.map((s) => (
-                <div key={s.service} className="ops-svc">
-                  <span className="name">{s.service}<TopStores stores={o.stores.filter((x) => x.service === s.service)} cluster={s.cluster} /></span>
+          {o.stores.length > 0 && (
+            <div className="ops-services" aria-label="Top 3 stores today">
+              {o.stores.slice(0, 3).map((s) => (
+                <div key={`${s.service}/${s.store}`} className="ops-svc">
+                  <span className="name" title={`${s.name} · ${s.store} · ${s.service}`}>{s.name}
+                    <span className="hint ops-store-sub">{s.name !== s.store && <>{s.store} · </>}<span className="ops-svc-tag">{s.service}</span></span>
+                  </span>
                   <Spark now={s.hours} lastWeek={s.lastWeekHours} />
                   <span className="n">{num(s.count)}</span>
                   <span className="d"><Chg value={s.change} base={s.lastWeek} /></span>

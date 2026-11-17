@@ -241,6 +241,4 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .ops-slow-path { font: 12.5px var(--font-mono); width: 100%; max-width: 0; min-width: 260px; }
 .ops-slow-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ops-slow-path .hint { font-family: var(--font-sans); }
-.ops-topstores { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ops-topstores .sep { color: var(--faint); }
-.ops-svc .name .ops-topstores { font-family: var(--font-sans); font-size: 12px; }
+.ops-svc-tag { font-family: var(--font-sans); font-weight: 600; font-size: 11px; color: var(--muted); }
