@@ -512,3 +512,22 @@ def test_out_of_memory_on_a_single_file_is_retried(tmp_path, logs_dir):
     store = LbStore(Path(settings.cache_dir) / "lb")
     assert list((store.root / "raw").rglob("*.parquet")) and max(m or 0 for m in seen) >= 768
     assert store.read_status()["lastError"] is None
+
+
+def test_slowest_requests(lb_env):
+    client, written, _, _ = lb_env
+    r = client.get("/api/v1/lb/_slowest?minutes=360&limit=5", headers=ROOT_H)
+    assert r.status_code == 200, r.text
+    got = r.json()
+    every = client.post("/api/v1/lb/_export", json={"start": f"now-360m", "end": "now", "format": "json", "limit": 10000},
+                        headers=ROOT_H).json()
+    times = sorted((h["tgt_t"] for h in every if h.get("tgt_t") is not None), reverse=True)[:5]
+    assert [h["tgt_t"] for h in got["hits"]] == pytest.approx(times)
+    top = got["hits"][0]
+    assert top["cluster"] and top["method"] and top["path"] and top["tg"]
+    assert abs(got["requests"] - len(every)) <= 50 and got["minutes"] == 360
+    # members only see their own clusters
+    add_user(client, "dev@x.com", {"demo-edds-1": "view"})
+    mine = client.get("/api/v1/lb/_slowest?minutes=360", headers=as_user("dev@x.com")).json()
+    assert mine["hits"] and {h["tg"] for h in mine["hits"]} == {"tg-demo-edds-1"}
+    assert client.get("/api/v1/lb/_slowest?minutes=1", headers=ROOT_H).status_code == 400

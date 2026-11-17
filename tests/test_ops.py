@@ -259,6 +259,9 @@ def test_new_shapes_for_the_ui(ops):
     crs = next(x for x in o["services"] if x["service"] == "CRS")
     assert crs["hours"][:9] == [0] * 9 and crs["hours"][9] is None   # counted to 09:30: the hour in progress is left out
     assert o["totalLastWeekDay"] == 2
+    per = o["minutes"]["services"]
+    assert set(per) == {"OMS", "OMS-11", "CRS"}
+    assert [sum((arr[i] or 0) for arr in per.values()) for i in range(len(o["minutes"]["counts"]))] == [v or 0 for v in o["minutes"]["counts"]]
     bombas = next(x for x in o["stores"] if x["name"] == "Bombas")
     assert bombas["hours"][9] is None and len(bombas["lastWeekHours"]) == 24
 
@@ -361,6 +364,11 @@ def test_range_table_series_and_orders(ops):
     one = ops.time_range(MS(a), MS(b), "IST", stage="Alpha-EDDS-1/felina", service="CRS", store="bombas.myshopify.com")
     assert one["api"]["calls"] == 300 and len(one["stages"]) == 2           # the table keeps every stage
     assert one["orders"]["total"] == 1 and sum(v or 0 for v in one["orders"]["series"]) == 1
+    # one line per service for the chart; together they make the total line
+    ss = o["serviceSeries"]
+    assert set(ss) == {"OMS", "OMS-11", "CRS"} and {k: sum(v or 0 for v in arr) for k, arr in ss.items()} == {"OMS": 2, "OMS-11": 1, "CRS": 2}
+    assert [sum(arr[i] or 0 for arr in ss.values()) for i in range(30)] == [v or 0 for v in o["series"]]
+    assert list(one["orders"]["serviceSeries"]) == ["CRS"]
 
 
 def test_range_long_buckets_and_limits(ops):

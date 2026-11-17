@@ -502,7 +502,7 @@ export interface OpsOrders {
   total: number | null; totalLastWeek: number | null; totalLastWeekDay: number | null; change: number | null;
   services: (OpsOrderRow & { cluster: string })[];
   stores: (OpsOrderRow & { store: string; name: string })[];
-  minutes: (OpsMinutes & { counts: (number | null)[]; lastWeek: number[] | null }) | null;
+  minutes: (OpsMinutes & { counts: (number | null)[]; services?: Record<string, (number | null)[]>; lastWeek: number[] | null }) | null;
 }
 export interface OpsSummary {
   day: string; zone: string; dayStart: number; dayEnd: number; today: boolean; generatedAt: string;
@@ -537,6 +537,7 @@ export interface OpsRange {
   stages: OpsRangeStage[];
   orders: { counted: boolean; missingDays: string[]; keptDays: number; asOf: number | null; total: number | null;
     services: { service: string; cluster: string; count: number }[]; series: (number | null)[] | null;
+    serviceSeries?: Record<string, (number | null)[]> | null;
     stores: { service: string; store: string; name: string; count: number }[] };
   services: { service: string; cluster: string }[];
 }
@@ -551,3 +552,10 @@ export interface OpsHistory {
   services: { service: string; cluster: string }[];
   stores: { service: string; store: string; name: string; count: number }[];
 }
+
+export interface LbSlowHit {
+  time: string; ts_ms: number; lb: string; tg?: string; cluster?: string; domain?: string; method?: string; path?: string;
+  path_group?: string; url?: string; elb_code?: number; tgt_code?: number; target?: string; req_t?: number; tgt_t: number;
+  resp_t?: number; trace_id?: string; type?: string;
+}
+export interface LbSlowest { minutes: number; start: number; end: number; hits: LbSlowHit[]; requests: number; files: number; tookMs: number }

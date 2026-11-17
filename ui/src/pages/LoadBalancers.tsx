@@ -74,11 +74,6 @@ export function secs(v: number | null | undefined): string {
 }
 
 /** A path that may break after each "/" instead of in the middle of a word. */
-function slashBreaks(path: string | null | undefined): ReactNode {
-  if (!path) return "—";
-  return path.split("/").map((part, i) => <Fragment key={i}>{i > 0 && <>/<wbr /></>}{part}</Fragment>);
-}
-
 function pct(n: number, total: number): string {
   if (!total) return "—";
   const p = (100 * n) / total;
@@ -455,43 +450,67 @@ function GroupsTable({ rows, logClusters, lineLink, onPick, onPath }: {
   onPick: (tg: string | null) => void; onPath: (tg: string | null, method: string, pg: string) => void;
 }) {
   if (!rows.length) return <Empty title="No requests match" />;
+  const most = Math.max(...rows.map((r) => r.requests), 1);
+  const stop = (e: { stopPropagation(): void }) => e.stopPropagation();
   return (
     <div className="table-scroll">
-      <table className="table htable">
+      <table className="table htable lbtg">
         <thead>
           <tr>
-            <th>Target group</th><th>Load balancer</th><th className="num">Requests</th><th className="num">4xx</th><th className="num">5xx</th>
-            <th className="num">p95</th><th>Top failing path</th>
+            <th>Target group</th><th className="num">Requests</th><th className="num">4xx</th><th className="num">5xx</th>
+            <th className="num">p95</th><th>Top failing path</th><th className="lbtg-acts-h"><span className="sr-only">Open</span></th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.tg ?? "-"} className="clickable" tabIndex={0} onClick={() => onPick(r.tg)} onKeyDown={(e) => { if (e.key === "Enter") onPick(r.tg); }}
-              title="Show this target group's paths">
-              <td className="nowrap">
-                {r.tg ? <span className="mono" style={{ fontWeight: 600 }}>{r.tg}</span> : <span className="hint" title="Requests the load balancer answered without forwarding (redirects, fixed responses, bad requests)">(no target group)</span>}
-                {r.cluster && logClusters.has(r.cluster) && <Link className="hlink" to={`/logs/${enc(r.cluster)}`} onClick={(e) => e.stopPropagation()}>logs</Link>}
-                <Link className="hlink" to={lineLink({ tg: r.tg ?? "-" })} onClick={(e) => e.stopPropagation()} title="This target group's log lines">lines</Link>
-                {r.tg && <Link className="hlink" to={`/health?q=${enc(r.tg)}`} onClick={(e) => e.stopPropagation()}>health</Link>}
-              </td>
-              <td className="mono nowrap" style={{ fontSize: 13 }}>{r.lbs.map((l) => <div key={l}>{l}</div>)}</td>
-              <td className="num">{num(r.requests)}</td>
-              <td className="num nowrap">{r.s4xx ? <span className="warn-text">{num(r.s4xx)}</span> : <span className="hint">0</span>} <span className="hint">{r.s4xx ? pct(r.s4xx, r.requests) : ""}</span></td>
-              <td className="num nowrap">
-                {r.s5xx ? <span className="danger-text" title={`${num(r.s5xxApp)} from the app, ${num(r.s5xxLb)} from the load balancer`}><Icon name="alert" size={13} style={{ verticalAlign: -2, marginRight: 3 }} />{num(r.s5xx)}</span> : <span className="hint">0</span>}
-                {r.s5xxLb > 0 && <span className="hint" title="No target answered"> · {num(r.s5xxLb)} LB</span>}
-              </td>
-              <td className="num nowrap">{secs(r.p95)}</td>
-              <td className="lbpath">
-                {r.topError ? (
-                  <button type="button" className="linkish" onClick={(e) => { e.stopPropagation(); onPath(r.tg, r.topError!.method ?? "", r.topError!.pathGroup ?? ""); }}
-                    title="Show these requests">
-                    <CodePill code={r.topError.code} /> <span className="mono">{r.topError.method} {slashBreaks(r.topError.pathGroup)}</span> <span className="hint">· {num(r.topError.count)}</span>
-                  </button>
-                ) : <span className="hint">—</span>}
-              </td>
-            </tr>
-          ))}
+          {rows.map((r) => {
+            const hasLogs = !!(r.cluster && logClusters.has(r.cluster));
+            const path = r.topError ? `${r.topError.method ?? ""} ${r.topError.pathGroup ?? ""}`.trim() : "";
+            return (
+              <tr key={r.tg ?? "-"} className="clickable" tabIndex={0} onClick={() => onPick(r.tg)} onKeyDown={(e) => { if (e.key === "Enter") onPick(r.tg); }}
+                title="Show this target group's paths">
+                <td className="lbtg-name">
+                  {r.tg ? <div className="lbtg-title">{r.tg}</div>
+                    : <div className="lbtg-title none" title="Requests the load balancer answered without forwarding (redirects, fixed responses, bad requests)">(no target group)</div>}
+                  <div className="lbtg-sub" title={r.lbs.join(", ")}>{r.lbs[0] ?? "—"}{r.lbs.length > 1 && <span className="lbtg-more"> +{r.lbs.length - 1} more</span>}</div>
+                </td>
+                <td className="num">
+                  <div className="lbtg-big">{num(r.requests)}</div>
+                  <div className="lbtg-share" title={`${pct(r.requests, rows.reduce((t, x) => t + x.requests, 0))} of all requests`}><span style={{ width: `${Math.max(2, (100 * r.requests) / most)}%` }} /></div>
+                </td>
+                <td className="num">
+                  {r.s4xx ? <><div className="lbtg-big warn-text">{num(r.s4xx)}</div><div className="lbtg-pct">{pct(r.s4xx, r.requests)}</div></> : <span className="lbtg-zero">0</span>}
+                </td>
+                <td className="num">
+                  {r.s5xx ? (
+                    <>
+                      <div className="lbtg-big danger-text" title={`${num(r.s5xxApp)} from the app, ${num(r.s5xxLb)} from the load balancer`}>{num(r.s5xx)}</div>
+                      <div className="lbtg-pct">{pct(r.s5xx, r.requests)}{r.s5xxLb > 0 && <span title="No target answered"> · {num(r.s5xxLb)} LB</span>}</div>
+                    </>
+                  ) : <span className="lbtg-zero">0</span>}
+                </td>
+                <td className="num nowrap lbtg-big">{secs(r.p95)}</td>
+                <td className="lbtg-path">
+                  {r.topError ? (
+                    <button type="button" className="lbtg-pathbtn" title={`${path} · ${num(r.topError.count)} requests — show them`}
+                      onClick={(e) => { e.stopPropagation(); onPath(r.tg, r.topError!.method ?? "", r.topError!.pathGroup ?? ""); }}>
+                      <CodePill code={r.topError.code} />
+                      <span className="lbtg-pathtext">{path}</span>
+                      <span className="lbtg-count">×{num(r.topError.count)}</span>
+                    </button>
+                  ) : <span className="lbtg-zero">no errors</span>}
+                </td>
+                <td className="lbtg-acts">
+                  <div className="lbtg-actions">
+                    {hasLogs ? <Link className="lbtg-act" to={`/logs/${enc(r.cluster!)}`} onClick={stop} title={`Application logs of ${r.cluster}`}><Icon name="list" size={13} />Logs</Link>
+                      : <span className="lbtg-act lbtg-none" aria-hidden="true" />}
+                    <Link className="lbtg-act" to={lineLink({ tg: r.tg ?? "-" })} onClick={stop} title="This target group's load balancer log lines"><Icon name="terminal" size={13} />Lines</Link>
+                    {r.tg ? <Link className="lbtg-act" to={`/health?q=${enc(r.tg)}`} onClick={stop} title="ECS health of this service"><Icon name="activity" size={13} />Health</Link>
+                      : <span className="lbtg-act lbtg-none" aria-hidden="true" />}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -522,22 +541,27 @@ function PathsTab({ body, sort, setSort, onPick }: { body: LbBody; sort: string;
       {q.isLoading ? <Loading what="Grouping paths…" /> : q.error ? <div className="card-body"><ErrorCallout error={q.error} /></div>
         : !q.data?.items.length ? <Empty title="No requests match" /> : (
           <div className="table-scroll">
-            <table className="table htable">
+            <table className="table htable lbtg lbpaths">
               <thead>
-                <tr><th>Path</th><th className="num">Requests</th><th className="num">2xx</th><th className="num">4xx</th><th className="num">5xx</th><th className="num">p95</th><th>Most common status</th><th>Target groups</th></tr>
+                <tr><th>Path</th><th className="num">Requests</th><th className="num">2xx</th><th className="num">4xx</th><th className="num">5xx</th><th className="num">p95</th><th>Usual status</th><th>Target group</th></tr>
               </thead>
               <tbody>
                 {q.data.items.map((r) => (
                   <tr key={`${r.method} ${r.pathGroup}`} className="clickable" tabIndex={0} onClick={() => onPick(r.method ?? "", r.pathGroup ?? "")}
                     onKeyDown={(e) => { if (e.key === "Enter") onPick(r.method ?? "", r.pathGroup ?? ""); }}>
-                    <td className="mono lbpath" title={r.example ?? undefined}><strong>{r.method ?? "—"}</strong> {slashBreaks(r.pathGroup)}</td>
-                    <td className="num">{num(r.requests)}</td>
+                    <td className="lbtg-path" title={`${r.method ?? ""} ${r.pathGroup ?? ""}${r.example ? `\ne.g. ${r.example}` : ""}`}>
+                      <div className="lbp-line"><span className="lbp-method">{r.method ?? "—"}</span><span className="lbtg-pathtext">{r.pathGroup ?? "—"}</span></div>
+                    </td>
+                    <td className="num lbtg-big">{num(r.requests)}</td>
                     <td className="num">{num(r["2xx"])}</td>
                     <td className="num">{r["4xx"] ? <span className="warn-text">{num(r["4xx"])}</span> : <span className="hint">0</span>}</td>
                     <td className="num">{r["5xx"] ? <span className="danger-text">{num(r["5xx"])}</span> : <span className="hint">0</span>}</td>
                     <td className="num nowrap">{secs(r.p95)}</td>
                     <td><CodePill code={r.topCode} /></td>
-                    <td className="mono nowrap" style={{ fontSize: 12.5 }}>{r.targetGroups.map((t) => t ?? "(none)").join(", ")}</td>
+                    <td className="nowrap" title={r.targetGroups.map((t) => t ?? "(none)").join(", ")}>
+                      <span className="lbp-tg">{r.targetGroups.find((t) => t) ?? "(none)"}</span>
+                      {r.targetGroups.length > 1 && <span className="lbtg-more"> +{r.targetGroups.length - 1}</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>

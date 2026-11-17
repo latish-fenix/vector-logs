@@ -126,26 +126,61 @@ function niceStep(max: number, count: number): number {
 
 const TICK_STEPS = [5, 10, 15, 30, 60, 120, 180, 240, 360, 720, 1440, 2880, 4320, 10080].map((m) => m * 60_000);
 
-export function Legend({ series }: { series: Pick<LineSeries, "key" | "label" | "color" | "dashed">[] }) {
+/** Which series of a chart are switched off (legend clicks); at least one always stays on. */
+export function useHidden(initial: string[] = []) {
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set(initial));
+  const toggle = (key: string, keys: string[]) => setHidden((h) => {
+    const next = new Set(h);
+    if (next.has(key)) next.delete(key);
+    else if (keys.some((k) => k !== key && !next.has(k))) next.add(key);
+    return next;
+  });
+  return [hidden, toggle] as const;
+}
+
+export function Legend({ series, hidden, onToggle }: {
+  series: Pick<LineSeries, "key" | "label" | "color" | "dashed">[];
+  /** With onToggle each key is a button that shows / hides its line. */
+  hidden?: Set<string>;
+  onToggle?: (key: string) => void;
+}) {
+  if (!onToggle) {
+    return (
+      <div className="ops-legend" aria-hidden="true">
+        {series.map((s) => (
+          <span key={s.key}>
+            <svg width="18" height="8"><line x1="0" x2="18" y1="4" y2="4" stroke={s.color} strokeWidth="2.5" strokeDasharray={s.dashed ? "4 3" : undefined} /></svg>
+            {s.label}
+          </span>
+        ))}
+      </div>
+    );
+  }
   return (
-    <div className="ops-legend" aria-hidden="true">
-      {series.map((s) => (
-        <span key={s.key}>
-          <svg width="18" height="8"><line x1="0" x2="18" y1="4" y2="4" stroke={s.color} strokeWidth="2.5" strokeDasharray={s.dashed ? "4 3" : undefined} /></svg>
-          {s.label}
-        </span>
-      ))}
+    <div className="ops-legend ops-legend-btns" role="group" aria-label="Lines shown">
+      {series.map((s) => {
+        const off = hidden?.has(s.key) ?? false;
+        return (
+          <button key={s.key} type="button" className={`ops-lg ${off ? "off" : ""}`} aria-pressed={!off} onClick={() => onToggle(s.key)}
+            title={off ? `Show ${s.label}` : `Hide ${s.label}`}>
+            <svg width="18" height="8" aria-hidden="true"><line x1="0" x2="18" y1="4" y2="4" stroke={s.color} strokeWidth="2.5" strokeDasharray={s.dashed ? "4 3" : undefined} /></svg>
+            {s.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-export function LineChart({ start, step, series, height = 190, fmt, empty, label, legend = true, nowAt, zone = "ist" }: {
+export function LineChart({ start, step, series, height = 190, fmt, axisFmt, empty, label, legend = true, nowAt, zone = "ist" }: {
   start: number;
   /** ms per point */
   step: number;
   series: LineSeries[];
   height?: number;
   fmt: (v: number) => string;
+  /** Labels of the y axis (default fmt). */
+  axisFmt?: (v: number) => string;
   empty?: string;
   label: string;
   /** Draw the legend above the plot (off when the card shows it). */
@@ -163,7 +198,8 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
   const tickStep = Math.max(1, niceStep(top, 4));          // whole numbers: no "1, 1, 1" axis for small counts
   const max = Math.max(tickStep, Math.ceil(top / tickStep) * tickStep);
   const yTicks = Array.from({ length: Math.round(max / tickStep) + 1 }, (_, i) => i * tickStep);
-  const labelW = Math.max(30, ...yTicks.map((t) => fmt(t).length * 6.4 + 8));
+  const yFmt = axisFmt ?? fmt;
+  const labelW = Math.max(30, ...yTicks.map((t) => yFmt(t).length * 6.4 + 8));
   const PAD = { l: Math.ceil(labelW) + 6, r: 12, t: 10, b: 24 };
   const plotW = width - PAD.l - PAD.r;
   const plotH = height - PAD.t - PAD.b;
@@ -227,7 +263,7 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
         {yTicks.map((t) => (
           <g key={t}>
             {t > 0 && <line x1={PAD.l} x2={width - PAD.r} y1={y(t)} y2={y(t)} className="histo-grid" />}
-            <text x={PAD.l - 8} y={y(t) + 4} textAnchor="end" className="histo-axis">{fmt(t)}</text>
+            <text x={PAD.l - 8} y={y(t) + 4} textAnchor="end" className="histo-axis">{yFmt(t)}</text>
           </g>
         ))}
         {series.filter((s) => s.area).map((s) => <path key={`a-${s.key}`} d={areaPath(s.values)} fill={`url(#${gid}-${s.key})`} />)}
@@ -239,7 +275,9 @@ export function LineChart({ start, step, series, height = 190, fmt, empty, label
         {nowAt !== null && nowAt !== undefined && nowAt > start && nowAt < start + span && (
           <g>
             <line x1={xAt(nowAt)} x2={xAt(nowAt)} y1={PAD.t} y2={y(0)} className="ops-now-line" />
-            <text x={xAt(nowAt) + 4} y={PAD.t + 9} className="ops-now-label">now</text>
+            {xAt(nowAt) + 36 > width
+              ? <text x={xAt(nowAt) - 4} y={PAD.t + 9} textAnchor="end" className="ops-now-label">now</text>
+              : <text x={xAt(nowAt) + 4} y={PAD.t + 9} className="ops-now-label">now</text>}
           </g>
         )}
         {xTicks.map((t) => (

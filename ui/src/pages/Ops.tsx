@@ -1,12 +1,13 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
-import { get, type OpsHealth, type OpsRange, type OpsStatus, type OpsSummary } from "../api";
+import { Link, useSearchParams } from "react-router-dom";
+import { ApiError, get, type LbSlowest, type OpsHealth, type OpsRange, type OpsStatus, type OpsSummary } from "../api";
 import { Icon } from "../components/icons";
-import { bucket, clock, clockZ, cumulative, dateLabel, dayIn, Legend, LineChart, localStamp, offsetMs, Spark, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
+import { bucket, clock, clockZ, cumulative, dateLabel, dayIn, Legend, LineChart, localStamp, offsetMs, Spark, useHidden, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
-import { Callout, DateTime24, Empty, ErrorCallout, Loading, SearchSelect, downloadFile } from "../components/ui";
+import { Callout, DateTime24, Dialog, Empty, ErrorCallout, Loading, SearchSelect, downloadFile } from "../components/ui";
 import { ago, num } from "../format";
+import { secs } from "./LoadBalancers";
 import { useMe } from "../session";
 import "../ops.css";
 
@@ -22,6 +23,10 @@ const C_LW = "var(--faint)";
 const C_4XX = "var(--st-4xx)";
 const C_5XX = "var(--st-5xx)";
 const C_BACKEND = "#8b7fe0";
+const SVC_COLOR: Record<string, string> = { CRS: "var(--svc-1)", OMS: "var(--svc-2)", "OMS-11": "var(--svc-3)" };
+const svcColor = (name: string, i: number) => SVC_COLOR[name] ?? ["var(--svc-1)", "var(--svc-2)", "var(--svc-3)"][i % 3];
+/** CRS first (the most orders), then OMS, then the rest in config order. */
+const svcOrder = (names: string[]) => [...names].sort((a, b) => (a === "CRS" ? -1 : b === "CRS" ? 1 : 0));
 
 const ZoneCtx = createContext<ClockZone>("ist");
 const useZone = () => useContext(ZoneCtx);
@@ -38,6 +43,8 @@ function T({ ms }: { ms: number | null | undefined }) {
 const pct = (v: number | null | undefined, digits = 1) => (v === null || v === undefined ? "—" : `${v.toFixed(digits)}%`);
 const ms = (v: number | null | undefined) => (v === null || v === undefined ? "—" : v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${Math.round(v)} ms`);
 const share = (part: number, whole: number) => (whole ? (100 * part) / whole : null);
+/** Axis labels: 2.5k, 10k, 1.5M — one style on an axis. */
+const kAxis = (v: number) => (v >= 1e6 ? `${+(v / 1e6).toFixed(2)}M` : v >= 1000 ? `${+(v / 1e3).toFixed(1)}k` : String(v));
 const compact = (v: number | null | undefined) => {
   if (v === null || v === undefined || !Number.isFinite(v)) return "—";
   const a = Math.abs(v);
@@ -98,6 +105,92 @@ function Kpi({ label, value, note, tone, onClick, title }: { label: string; valu
     </>
   );
   return onClick ? <button type="button" className="ops-kpi" onClick={onClick} title={title}>{inner}</button> : <div className="ops-kpi" title={title}>{inner}</div>;
+}
+
+/** The service's three busiest stores today, in place of its cluster name. */
+function TopStores({ stores, cluster }: { stores: { name: string; store: string; count: number }[]; cluster: string }) {
+  const top = [...stores].sort((a, b) => b.count - a.count).slice(0, 3);
+  if (!top.length) return <span className="hint">{cluster}</span>;
+  return (
+    <span className="hint ops-topstores" title={`Busiest stores today (${cluster}): ${top.map((t) => `${t.name} ${num(t.count)}`).join(", ")}`}>
+      {top.map((t, i) => <span key={t.store}>{i > 0 && <span className="sep"> · </span>}{t.name}</span>)}
+    </span>
+  );
+}
+
+const SLOW_WINDOWS: [number, string][] = [[15, "15 min"], [60, "60 min"], [180, "3 h"], [360, "6 h"], [720, "12 h"], [1440, "24 h"]];
+const SLOW_KEY = "ops-slowest-minutes";
+const slowWindowText = (m: number) => SLOW_WINDOWS.find(([v]) => v === m)?.[1] ?? `${m} min`;
+
+/** The request a target took longest to answer (load balancer logs), last 60 minutes unless changed. */
+function SlowestKpi() {
+  const zone = useZone();
+  const [minutes, setMinutes] = useState(() => {
+    try { const v = Number(localStorage.getItem(SLOW_KEY)); return SLOW_WINDOWS.some(([m]) => m === v) ? v : 60; } catch { return 60; }
+  });
+  const [open, setOpen] = useState(false);
+  const q = useQuery({
+    queryKey: ["lb-slowest", minutes],
+    queryFn: () => get<LbSlowest>("/lb/_slowest", { minutes, limit: 10 }),
+    refetchInterval: 60_000, staleTime: 50_000, retry: false, placeholderData: keepPreviousData,
+  });
+  const pick = (m: number) => { setMinutes(m); try { localStorage.setItem(SLOW_KEY, String(m)); } catch { /* private window */ } };
+  const top = q.data?.hits[0];
+  const err = q.error instanceof ApiError && q.error.code === "LB_DISABLED" ? "load balancer logs are off" : q.error ? "could not read the load balancer logs" : null;
+  const tone = top ? (top.tgt_t >= 10 ? "bad" : top.tgt_t >= 3 ? "warn" : "") : "";
+  return (
+    <div className={`ops-kpi ops-slow ${q.isFetching && !q.isLoading ? "ops-fetching" : ""}`}>
+      <span className="l ops-slow-l">
+        <span>Max time taken · last</span>
+        <select aria-label="Max time taken over" className="ops-slow-pick" value={minutes} onChange={(e) => pick(Number(e.target.value))}>
+          {SLOW_WINDOWS.map(([m, l]) => <option key={m} value={m}>{l}</option>)}
+        </select>
+      </span>
+      {q.isLoading ? <><span className="v">…</span><span className="n">reading the load balancer logs</span></>
+        : err ? <><span className="v">—</span><span className="n">{err}</span></>
+        : !top ? <><span className="v">—</span><span className="n">no requests in the last {slowWindowText(minutes)}</span></> : (
+          <button type="button" className="ops-slow-btn" onClick={() => setOpen(true)} title="Show the slowest requests">
+            <span className={`v ${tone}`}>{secs(top.tgt_t)}<span className="ops-slow-who">{top.cluster ?? top.tg ?? top.lb} · {clock(top.ts_ms, zone)} {zoneName(top.ts_ms, zone)}</span></span>
+            <span className="n ops-slow-req"><b>{top.method}</b> {top.path}</span>
+          </button>
+        )}
+      {open && q.data && <SlowestDialog data={q.data} onClose={() => setOpen(false)} />}
+    </div>
+  );
+}
+
+function slowLink(h: LbSlowest["hits"][number]): string {
+  const p = new URLSearchParams({ tab: "requests", start: new Date(h.ts_ms - 60_000).toISOString(), end: new Date(h.ts_ms + 60_000).toISOString() });
+  if (h.tg) p.set("tg", h.tg);
+  if (h.trace_id) p.set("q", h.trace_id);
+  return `/lb?${p}`;
+}
+
+function SlowestDialog({ data, onClose }: { data: LbSlowest; onClose: () => void }) {
+  const zone = useZone();
+  return (
+    <Dialog wide title={`Slowest requests · last ${slowWindowText(data.minutes)}`} onClose={onClose}
+      subtitle={`Time the target took to answer, from the load balancer logs · ${num(data.requests)} requests looked at`}
+      footer={<button type="button" className="btn" onClick={onClose}>Close</button>}>
+      <div className="table-scroll" style={{ maxHeight: 460 }}>
+        <table className="table ops-slow-table">
+          <thead><tr><th className="num">Took</th><th>Request</th><th>Cluster · target group</th><th>Status</th><th>When</th><th><span className="sr-only">Open</span></th></tr></thead>
+          <tbody>
+            {data.hits.map((h, i) => (
+              <tr key={`${h.trace_id ?? ""}${h.ts_ms}${i}`}>
+                <td className="num nowrap"><strong className={h.tgt_t >= 10 ? "danger-text" : h.tgt_t >= 3 ? "warn-text" : ""}>{secs(h.tgt_t)}</strong></td>
+                <td className="ops-slow-path" title={h.url ?? h.path}><div className="ops-slow-line"><b>{h.method}</b> {h.path}</div><div className="hint">{h.domain}</div></td>
+                <td className="nowrap"><div>{h.cluster ?? "—"}</div><div className="hint mono">{h.tg ?? "(no target group)"}</div></td>
+                <td className="nowrap">{h.elb_code ?? "—"}{h.tgt_code !== undefined && h.tgt_code !== h.elb_code ? <span className="hint"> · target {h.tgt_code}</span> : null}</td>
+                <td className="nowrap">{clock(h.ts_ms, zone)} {zoneName(h.ts_ms, zone)}<div className="hint">{dateLabel(h.ts_ms, zone)}</div></td>
+                <td><Link className="btn btn-sm" to={slowLink(h)} title="Open this request in the load balancer dashboard">Open</Link></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Dialog>
+  );
 }
 
 function CardHead({ title, sub, right }: { title: string; sub?: ReactNode; right?: ReactNode }) {
@@ -261,7 +354,6 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
     return t ? w / t : null;
   };
   const p95 = { now: weighted((s) => s.recent.p95), lw: weighted((s) => s.recent.p95LastWeek) };
-  const seriesLegend = [{ key: "now", label: "Today", color: C_NOW }, { key: "lw", label: "Last week", color: C_LW, dashed: true }];
 
   return (
     <>
@@ -282,8 +374,7 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
               title="Today so far × (last week's whole day ÷ last week by this time)" />
             <Mini label="Busiest minute" value={a.peak ? `${num(a.peak.calls)}/min` : "—"} note={a.peak ? <>at <T ms={a.peak.t} /></> : ""} />
           </div>
-          <CardHead title="Running total" right={<Legend series={seriesLegend} />} />
-          <LineChart label="API calls added up through the day, today and last week" start={m.start} step={60_000} legend={false} height={150} fmt={compact} zone={zone}
+          <ToggleChart title="Running total" label="API calls added up through the day, today and last week" start={m.start} step={60_000} height={150} fmt={compact} axisFmt={kAxis}
             nowAt={a.asOf} series={[{ key: "now", label: "Today", color: C_NOW, values: callsCum.now, area: true },
               ...(m.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: callsCum.lw, dashed: true }] : [])]} />
           <div className="ops-hero-fill" />
@@ -302,9 +393,9 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
           )}
         </section>
 
-        <section className="ops-hero" aria-label="Orders today">
+        <section className="ops-hero" aria-label="CRS and OMS orders today">
           <div className="ops-hero-top">
-            <div className="ops-eyebrow"><span>Orders today</span><span className="grow" />{o.ready ? <Delta value={o.change} /> : null}</div>
+            <div className="ops-eyebrow"><span>CRS &amp; OMS orders today</span><span className="grow" />{o.ready ? <Delta value={o.change} /> : null}</div>
             <div className="ops-big-row">
               <span className="ops-big">{o.ready ? num(o.total) : "…"}</span>
               {o.ready && o.totalLastWeek !== null && <span className="ops-vs">vs <strong>{num(o.totalLastWeek)}</strong> by this time last week</span>}
@@ -319,8 +410,7 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
           </div>
           {ordersCum ? (
             <>
-              <CardHead title="Running total" right={<Legend series={seriesLegend} />} />
-              <LineChart label="Orders added up through the day, today and last week" start={o.minutes!.start} step={60_000} legend={false} height={150} fmt={compact} zone={zone}
+              <ToggleChart title="Running total" label="CRS and OMS orders added up through the day, today and last week" start={o.minutes!.start} step={60_000} height={150} fmt={compact} axisFmt={kAxis}
                 nowAt={o.asOf} series={[{ key: "now", label: "Today", color: C_NOW, values: ordersCum.now, area: true },
                   ...(o.minutes!.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: ordersCum.lw, dashed: true }] : [])]} />
             </>
@@ -329,7 +419,7 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
             <div className="ops-services">
               {o.services.map((s) => (
                 <div key={s.service} className="ops-svc">
-                  <span className="name">{s.service}<span className="hint">{s.cluster}</span></span>
+                  <span className="name">{s.service}<TopStores stores={o.stores.filter((x) => x.service === s.service)} cluster={s.cluster} /></span>
                   <Spark now={s.hours} lastWeek={s.lastWeekHours} />
                   <span className="n">{num(s.count)}</span>
                   <span className="d"><Chg value={s.change} base={s.lastWeek} /></span>
@@ -355,6 +445,7 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
         <Kpi label={`p95 latency · last ${a.windowMinutes} min`} value={ms(p95.now)} title="Average of the stages' p95, weighted by their calls"
           tone={p95.now !== null && p95.lw && p95.now >= 1.5 * p95.lw && p95.now >= 300 ? "warn" : undefined}
           note={p95.lw ? `last week ${ms(p95.lw)}` : "all stages, weighted by calls"} />
+        <SlowestKpi />
       </div>
 
       {problems.length > 0 && (
@@ -375,20 +466,18 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
       )}
 
       <div className="ops-charts">
-        <section className="card">
-          <CardHead title="API calls" sub="per 5 minutes, all stages" right={<Legend series={seriesLegend} />} />
-          <LineChart label="API calls per 5 minutes today and last week" start={m.start} step={300_000} legend={false} fmt={compact} nowAt={a.asOf} zone={zone}
-            series={[{ key: "now", label: "Today", color: C_NOW, values: bucket(m.calls, 5), area: true },
-              ...(m.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: bucket(m.lastWeek, 5), dashed: true }] : [])]} />
-        </section>
-        <section className="card">
-          <CardHead title="Orders" sub="per 15 minutes, every service" right={<Legend series={seriesLegend} />} />
-          {o.minutes ? (
-            <LineChart label="Orders per 15 minutes today and last week" start={o.minutes.start} step={900_000} legend={false} fmt={compact} nowAt={o.asOf} zone={zone}
-              series={[{ key: "now", label: "Today", color: C_NOW, values: bucket(o.minutes.counts, 15), area: true },
-                ...(o.minutes.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: bucket(o.minutes.lastWeek, 15), dashed: true }] : [])]} />
-          ) : <Empty title="Orders are being counted" />}
-        </section>
+        <ChartCard title="API calls" sub="per 5 minutes, all stages" label="API calls per 5 minutes today and last week" start={m.start} step={300_000} fmt={compact} axisFmt={kAxis} nowAt={a.asOf}
+          series={[{ key: "now", label: "Today", color: C_NOW, values: bucket(m.calls, 5), area: true },
+            ...(m.lastWeek ? [{ key: "lw", label: "Last week", color: C_LW, values: bucket(m.lastWeek, 5), dashed: true }] : [])]} />
+        {o.minutes ? (
+          <ChartCard title="CRS & OMS orders" sub="per 15 minutes · click a name to show or hide it" label="CRS and OMS orders per 15 minutes, per service, today and last week"
+            start={o.minutes.start} step={900_000} fmt={compact} axisFmt={kAxis} nowAt={o.asOf} initialHidden={["all", "lw"]}
+            series={[
+              ...svcOrder(Object.keys(o.minutes.services ?? {})).map((name, i) => ({ key: `svc-${name}`, label: name, color: svcColor(name, i), values: bucket(o.minutes!.services![name], 15) })),
+              { key: "all", label: "All today", color: C_NOW, values: bucket(o.minutes.counts, 15), area: true },
+              ...(o.minutes.lastWeek ? [{ key: "lw", label: "All last week", color: C_LW, values: bucket(o.minutes.lastWeek, 15), dashed: true }] : []),
+            ]} />
+        ) : <section className="card"><CardHead title="CRS & OMS orders" sub="per 15 minutes" /><Empty title="Orders are being counted" /></section>}
       </div>
 
       <section className="card" style={{ overflow: "hidden" }}>
@@ -425,7 +514,7 @@ function Live({ onStage, onHealth, onFresh }: { onStage: (id: string) => void; o
       </section>
 
       <section className="card" style={{ overflow: "hidden" }}>
-        <CardHead title="Orders by store" sub="Unique order ids per service · last week until the same time"
+        <CardHead title="CRS & OMS orders by store" sub="Unique order ids per service · last week until the same time"
           right={<Legend series={[{ key: "now", label: "Today (per hour)", color: C_NOW }, { key: "lw", label: "Last week", color: C_LW, dashed: true }]} />} />
         {!o.ready ? <Empty title="Orders are being counted" /> : o.stores.length === 0 ? <Empty title="No orders yet today" /> : (
           <div className="table-scroll" style={{ maxHeight: "none" }}>
@@ -550,14 +639,25 @@ function HealthTab({ params, set, onStage, onFresh }: {
 }
 
 // ------------------------------------------------------------------ history
-function ChartCard({ title, sub, series, ...rest }: { title: string; sub: string; series: LineSeries[] } & Omit<Parameters<typeof LineChart>[0], "series" | "label" | "legend" | "zone">) {
+/** Card head + chart whose legend keys show / hide their lines (the y axis follows what is shown). */
+function ToggleChart({ title, sub, series, initialHidden, label, ...rest }: { title: string; sub?: ReactNode; series: LineSeries[]; initialHidden?: string[]; label?: string }
+  & Omit<Parameters<typeof LineChart>[0], "series" | "label" | "legend" | "zone">) {
   const zone = useZone();
+  const [hidden, toggle] = useHidden(initialHidden);
+  const keys = series.map((s) => s.key);
+  let shown = series.filter((s) => !hidden.has(s.key));
+  if (!shown.length) shown = series;
+  const off = new Set(keys.filter((k) => !shown.some((s) => s.key === k)));
   return (
-    <section className="card">
-      <CardHead title={title} sub={sub} right={<Legend series={series} />} />
-      <LineChart label={`${title} ${sub}`} series={series} legend={false} zone={zone} {...rest} />
-    </section>
+    <>
+      <CardHead title={title} sub={sub} right={series.length > 1 ? <Legend series={series} hidden={off} onToggle={(k) => toggle(k, keys)} /> : <Legend series={series} />} />
+      <LineChart label={label ?? `${title} ${typeof sub === "string" ? sub : ""}`} series={shown} legend={false} zone={zone} {...rest} />
+    </>
   );
+}
+
+function ChartCard(props: Parameters<typeof ToggleChart>[0]) {
+  return <section className="card"><ToggleChart {...props} /></section>;
 }
 
 type Preset = "1h" | "6h" | "24h" | "today" | "yesterday" | "7d" | "30d" | "custom";
@@ -730,7 +830,7 @@ function History({ params, set, onFresh }: { params: URLSearchParams; set: (p: R
             <Mini label="4xx rate" value={pct(share(a.err4xx, a.calls), 2)} note={`${num(a.err4xx)} client errors`} />
             <Mini label="5xx rate" value={pct(share(a.err5xx, a.calls), 2)} note={`${num(a.err5xx)} server errors`} />
             <Mini label="p95 latency" value={ms(a.p95)} note="weighted by calls" />
-            <Mini label={`Orders · ${store ? storeOpts.find((s) => s.value === store)?.label.split(" · ")[0] ?? store : service || "all services"}`}
+            <Mini label={`CRS & OMS orders · ${store ? storeOpts.find((s) => s.value === store)?.label.split(" · ")[0] ?? store : service || "all services"}`}
               value={d.orders.counted ? num(d.orders.total) : "—"} note={d.orders.counted ? (d.orders.missingDays.length ? "part of the range" : "unique order ids") : `kept ${d.orders.keptDays} days`} />
           </div>
         )}
@@ -743,15 +843,19 @@ function History({ params, set, onFresh }: { params: URLSearchParams; set: (p: R
               <Callout tone="neutral" title="Orders are only counted for part of this range">Orders are kept for the last {d.orders.keptDays} days; not counted: {d.orders.missingDays[0]}{d.orders.missingDays.length > 1 ? ` to ${d.orders.missingDays[d.orders.missingDays.length - 1]}` : ""} (UTC days).</Callout>
             )}
             <div className={`ops-charts ${q.isFetching ? "ops-fetching" : ""}`}>
-              <ChartCard title="API calls" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} nowAt={nowAt}
+              <ChartCard title="API calls" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} axisFmt={kAxis} nowAt={nowAt}
                 series={[{ key: "now", label: sel ?? "All stages", color: C_NOW, values: a.series.calls, area: true }]} />
               {d.orders.series ? (
-                <ChartCard title="Orders" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} nowAt={nowAt}
-                  series={[{ key: "now", label: store || service || "All services", color: C_NOW, values: d.orders.series, area: true }]} />
+                <ChartCard key={`o-${service}-${store}`} title="CRS & OMS orders" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} axisFmt={kAxis} nowAt={nowAt}
+                  initialHidden={["all"]}
+                  series={store || service || !d.orders.serviceSeries ? [{ key: "now", label: store || service || "All services", color: service ? svcColor(service, 0) : C_NOW, values: d.orders.series, area: true }] : [
+                    ...svcOrder(Object.keys(d.orders.serviceSeries)).map((name, i) => ({ key: `svc-${name}`, label: name, color: svcColor(name, i), values: d.orders.serviceSeries![name] })),
+                    { key: "all", label: "All services", color: C_NOW, values: d.orders.series, area: true },
+                  ]} />
               ) : (
-                <section className="card"><CardHead title="Orders" sub={stepText(d.step)} /><Empty title="Orders were not counted for this range">Orders are kept for the last {d.orders.keptDays} days.</Empty></section>
+                <section className="card"><CardHead title="CRS & OMS orders" sub={stepText(d.step)} /><Empty title="Orders were not counted for this range">Orders are kept for the last {d.orders.keptDays} days.</Empty></section>
               )}
-              <ChartCard title="Errors" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} nowAt={nowAt}
+              <ChartCard title="Errors" sub={stepText(d.step)} start={d.start} step={d.step} fmt={compact} axisFmt={kAxis} nowAt={nowAt}
                 series={[{ key: "4xx", label: "4xx", color: C_4XX, values: a.series.err4xx }, { key: "5xx", label: "5xx", color: C_5XX, values: a.series.err5xx }]} />
               <ChartCard title="Latency p95" sub={`${stepText(d.step)}, weighted by calls`} start={d.start} step={d.step} fmt={(v) => ms(v)} nowAt={nowAt}
                 series={[{ key: "p95", label: "p95", color: C_NOW, values: a.series.p95 }, { key: "backend", label: "Backend", color: C_BACKEND, values: a.series.integrationP95 }]} />

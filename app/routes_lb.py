@@ -88,6 +88,14 @@ def requests_(body: RequestsBody, request: Request, user: User = Depends(current
     return _service(request).requests(body.query(), _access(user), body.offset, body.size, body.order)
 
 
+@router.get("/_slowest", summary="The requests the targets took longest to answer in the last N minutes")
+def slowest(request: Request, minutes: int = 60, limit: int = 5, user: User = Depends(current_user)):
+    if not 5 <= minutes <= 24 * 60:
+        raise ApiError(400, "INVALID_RANGE", "minutes must be between 5 and 1440")
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    return {"minutes": minutes, **_service(request).slowest(now - minutes * 60_000, now, _access(user), max(1, min(limit, 20)))}
+
+
 @router.post("/_export", summary="Download single requests (CSV, JSON, NDJSON)")
 def export(body: ExportBody, request: Request, user: User = Depends(current_user)):
     stream, rows = _service(request).export(body.query(), _access(user), body.format, body.limit)

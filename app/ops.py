@@ -703,6 +703,7 @@ class OpsService:
         minutes = [0] * n
         services, stores = {}, {}
         svc_hours: dict[str, list[int]] = {}
+        svc_minutes: dict[str, list[int]] = {}
         store_hours: dict[tuple[str, str], list[int]] = {}
         for name in [s.name for s in cfg.services]:
             svc = st["services"].get(name)
@@ -710,6 +711,7 @@ class OpsService:
                 continue
             total = 0
             sh = svc_hours[name] = [0] * n_h
+            sm = svc_minutes[name] = [0] * n
             for s, ids in svc.items():
                 if store and s != store:
                     continue
@@ -720,6 +722,7 @@ class OpsService:
                         continue
                     i = (ms - start) // MIN
                     minutes[i] += 1
+                    sm[i] += 1
                     hh[i // 60] += 1
                     sh[i // 60] += 1
                     c += 1
@@ -730,7 +733,7 @@ class OpsService:
             services[name] = total
         newest = st.get("newestMs")
         return {"minutes": minutes, "services": services, "stores": stores, "total": sum(services.values()),
-                "serviceHours": svc_hours, "storeHours": store_hours,
+                "serviceHours": svc_hours, "serviceMinutes": svc_minutes, "storeHours": store_hours,
                 "newestMs": min(newest, end - 1) if newest else None, "final": st.get("final"), "updated": st.get("updated")}
 
     # -- API metrics (read side)
@@ -898,6 +901,8 @@ class OpsService:
                 "services": services, "stores": stores,
                 "minutes": {"start": start, "step": MIN,
                             "counts": [v if i < n_shown else None for i, v in enumerate(cur["minutes"])],
+                            "services": {name: [v if i < n_shown else None for i, v in enumerate(arr)]
+                                         for name, arr in cur["serviceMinutes"].items()},
                             "lastWeek": lw_full["minutes"] if lw_full else None}}
 
     def health(self, minutes: int = 60) -> dict:
@@ -1131,9 +1136,11 @@ class OpsService:
             d += timedelta(days=1)
         counted = len(missing) < (d1 - d0).days + 1
         series = [0] * nb
+        per_service: dict[str, list[int]] = {}
         services, stores = [], {}
         for svc in cfg.services:
             n = 0
+            ss = per_service[svc.name] = [0] * nb
             for s_name, ids in merged.get(svc.name, {}).items():
                 c = 0
                 for ms in ids.values():
@@ -1143,6 +1150,7 @@ class OpsService:
                             b = (ms - first) // step
                             if 0 <= b < nb:
                                 series[b] += 1
+                                ss[b] += 1
                 if c:
                     stores[(svc.name, s_name)] = c
                 n += c
@@ -1157,6 +1165,8 @@ class OpsService:
         total = sum(c for (sv, st_n), c in stores.items() if (not service or sv == service) and (not store or st_n == store))
         return {"counted": counted, "missingDays": missing, "keptDays": KEEP_DAYS, "asOf": newest, "total": total if counted else None,
                 "services": services, "series": [v if shown(b) else None for b, v in enumerate(series)] if counted else None,
+                "serviceSeries": {name: [v if shown(b) else None for b, v in enumerate(arr)] for name, arr in per_service.items()
+                                  if (not service or name == service)} if counted else None,
                 "stores": sorted(({"service": k[0], "store": k[1], "name": cfg.name(k[1]), "count": c} for k, c in stores.items()),
                                  key=lambda r: -r["count"])}
 

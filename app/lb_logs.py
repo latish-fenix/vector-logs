@@ -1679,6 +1679,57 @@ class LbService:
         total, hits = self._run(go)
         return {"start": s, "end": e, "total": total, "hits": hits, "tookMs": int((time.monotonic() - t0) * 1000)}
 
+    SLOWEST_COLUMNS = ["time", "ts_ms", "lb", "tg", "cluster", "domain", "method", "path", "path_group", "url", "elb_code",
+                       "tgt_code", "target", "req_t", "tgt_t", "resp_t", "trace_id", "type"]
+
+    def slowest(self, start_ms: int, end_ms: int, access: Access | None, limit: int = 5) -> dict:
+        """The requests the targets took longest to answer in [start_ms, end_ms]. The per-minute files'
+        latency bins say which hour files can hold them, so only those are read (a day of every load
+        balancer stays cheap)."""
+        t0 = time.monotonic()
+        q = LbQuery(start=start_ms, end=end_ms)
+        s, e = self.resolve_range(start_ms, end_ms)
+        src = self.sources(s, e, [])
+        out = {"start": s, "end": e, "hits": [], "requests": 0, "files": 0}
+        if not src.count:
+            return {**out, "tookMs": int((time.monotonic() - t0) * 1000)}
+        wr = build_where(q, s, e, access, "rows")
+
+        def go():
+            con = self._db()
+            try:
+                read: list[Path] = list(src.raws)
+                total = 0
+                if src.minutes:
+                    w = build_where(q, s, e, access, "minute")
+                    rows = con.execute(f"SELECT filename, lat_bin, sum(n) FROM read_parquet({_sql_list(src.minutes)}, "
+                                       f"filename = true) WHERE {w.text()} GROUP BY 1, 2", w.params).fetchall()
+                    total = sum(int(n) for _, _, n in rows)
+                    bins = sorted({b for _, b, _ in rows if b is not None}, reverse=True)
+                    floor, seen = None, 0
+                    for b in bins:                         # highest bins until they hold `limit` requests
+                        seen += sum(int(n) for _, bb, n in rows if bb == b)
+                        floor = b
+                        if seen >= limit:
+                            break
+                    if floor is not None:
+                        items = sorted({(_lb_of_path(f), _hour_of_path(f)) for f, b, _ in rows if b is not None and b >= floor})
+                        read += self.local("hour", items)
+                if src.raws:                               # hours not merged yet: no minute file
+                    total += int(con.execute(f"SELECT count(*) FROM {self._rows_sql(src.raws)} WHERE {wr.text()}",
+                                             wr.params).fetchone()[0])
+                if not read:
+                    return total, [], 0
+                cur = con.execute(f"SELECT {', '.join(self.SLOWEST_COLUMNS)} FROM {self._rows_sql(read)} "
+                                  f"WHERE {wr.text()} AND tgt_t IS NOT NULL ORDER BY tgt_t DESC, ts_ms DESC LIMIT ?",
+                                  [*wr.params, limit])
+                names = [x[0] for x in cur.description]
+                return total, [{k: v for k, v in zip(names, r) if v is not None} for r in cur.fetchall()], len(read)
+            finally:
+                con.close()
+        total, hits, files = self._run(go)
+        return {**out, "hits": hits, "requests": total, "files": files, "tookMs": int((time.monotonic() - t0) * 1000)}
+
     def export(self, q: LbQuery, access: Access | None, fmt: str, limit: int) -> tuple[Iterator[bytes], int]:
         res = self.requests(q, access, 0, max(1, min(int(limit), self.settings.max_export_rows)))
         rows = [tuple(h.get(c) for c in REQUEST_COLUMNS) for h in res["hits"]]
