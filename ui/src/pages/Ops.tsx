@@ -924,6 +924,22 @@ function History({ params, set, onFresh }: { params: URLSearchParams; set: (p: R
               ))}
             </div>
 
+            <div className="ops-range-tables">
+              <RangeCounts title="CRS & OMS orders by store" what="store" unit="orders"
+                sub={d.orders.counted ? `Unique order ids first seen in this range${service ? ` · ${service} only` : ""} · click a row to chart only that store` : `Orders are kept for the last ${d.orders.keptDays} days`}
+                rows={(d.orders.counted ? d.orders.stores : []).filter((r) => !service || r.service === service)
+                  .map((r) => ({ key: r.store, name: r.name, sub: r.store, tag: r.service, count: r.count }))}
+                selected={store} onPick={(k) => set({ store: store === k ? null : k })}
+                csv={`ops-orders-by-store-${toInput(d.from, zone).replace(/[:T]/g, "")}-${toInput(d.to, zone).replace(/[:T]/g, "")}-${zone}.csv`} range={[d.from, d.to]} />
+              {d.inbound && (
+                <RangeCounts title="Inbound orders by tenant" what="tenant" unit="orders"
+                  sub={d.inbound.counted ? "New orders in the elkop2 order indexes in this range · click a row to chart only that tenant" : "No inbound order counts in this range"}
+                  rows={(d.inbound.counted ? d.inbound.tenants : []).map((r) => ({ key: r.tenant, name: r.name, sub: r.tenant, count: r.count }))}
+                  selected={store} onPick={(k) => set({ store: store === k ? null : k })}
+                  csv={`ops-inbound-by-tenant-${toInput(d.from, zone).replace(/[:T]/g, "")}-${toInput(d.to, zone).replace(/[:T]/g, "")}-${zone}.csv`} range={[d.from, d.to]} />
+              )}
+            </div>
+
             <section className="card" style={{ overflow: "hidden" }}>
               <CardHead title={`Stages · ${rows.length}`} sub={`${spanText(d.to - d.from)} · click a column to sort, a row to chart only that stage`}
                 right={<button type="button" className="btn btn-ghost btn-sm" onClick={exportCsv} disabled={!rows.length}><Icon name="download" size={15} /> CSV</button>} />
@@ -961,8 +977,60 @@ function History({ params, set, onFresh }: { params: URLSearchParams; set: (p: R
                 <div className="card-foot"><button type="button" className="btn btn-ghost btn-sm" onClick={() => setAll(!all)}>{all ? "Show the top 25" : `Show all ${rows.length} stages`}</button></div>
               )}
             </section>
+
           </>
         )}
     </>
+  );
+}
+
+/** Totals per store / tenant over a History range, with a share bar; a row click charts only that one. */
+function RangeCounts({ title, sub, rows, selected, onPick, what, unit, csv, range }: {
+  title: string; sub: string; what: string; unit: string; csv: string; range: [number, number];
+  rows: { key: string; name: string; sub: string; tag?: string; count: number }[];
+  selected: string; onPick: (key: string) => void;
+}) {
+  const zone = useZone();
+  const [all, setAll] = useState(false);
+  const total = rows.reduce((t, r) => t + r.count, 0);
+  const top = Math.max(1, ...rows.map((r) => r.count));
+  const tags = rows.some((r) => r.tag);
+  const shown = all ? rows : rows.slice(0, 15);
+  const exportCsv = () => {
+    const esc = (v: unknown) => { const t = v === null || v === undefined ? "" : String(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+    const head = ["from", "to", what, "name", ...(tags ? ["service"] : []), unit, "share_pct"];
+    const f = localStamp(range[0], zone), t = localStamp(range[1], zone);
+    const lines = [head.join(","), ...rows.map((r) => [f, t, r.key, r.name, ...(tags ? [r.tag ?? ""] : []), r.count,
+      total ? (100 * r.count / total).toFixed(2) : ""].map(esc).join(","))];
+    downloadFile(csv, lines.join("\n") + "\n", "text/csv");
+  };
+  return (
+    <section className="card" style={{ overflow: "hidden" }}>
+      <CardHead title={`${title} · ${rows.length}`} sub={sub}
+        right={<button type="button" className="btn btn-ghost btn-sm" onClick={exportCsv} disabled={!rows.length}><Icon name="download" size={15} /> CSV</button>} />
+      {rows.length === 0 ? <Empty title={`No ${unit} in this range`} /> : (
+        <div className="table-scroll" style={{ maxHeight: "none" }}>
+          <table className="table ops-table">
+            <thead><tr><th>{what === "store" ? "Store" : "Tenant"}</th>{tags && <th>Service</th>}<th className="num">Orders</th><th className="num">Share</th></tr></thead>
+            <tbody>
+              {shown.map((r) => (
+                <tr key={`${r.tag ?? ""}/${r.key}`} className={`clickable ${selected === r.key ? "selected" : ""}`} tabIndex={0} aria-selected={selected === r.key}
+                  onClick={() => onPick(r.key)} onKeyDown={(e) => { if (e.key === "Enter") onPick(r.key); }}
+                  title={selected === r.key ? "Show all again in the charts" : `Chart only this ${what}`}>
+                  <td><div className="stage"><div><div className="nm">{r.name}</div>{r.name !== r.sub && <div className="sub">{r.sub}</div>}</div></div></td>
+                  {tags && <td>{r.tag}</td>}
+                  <td className="num" style={{ fontWeight: 600 }}>{num(r.count)}</td>
+                  <td className="num"><span className="ops-share"><span className="ops-bar"><span style={{ width: `${Math.min(100, (100 * r.count) / top)}%` }} /></span>
+                    <span className="pc">{pct(total ? (100 * r.count) / total : null)}</span></span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {rows.length > 15 && (
+        <div className="card-foot"><button type="button" className="btn btn-ghost btn-sm" onClick={() => setAll(!all)}>{all ? "Show the top 15" : `Show all ${rows.length}`}</button></div>
+      )}
+    </section>
   );
 }
