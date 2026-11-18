@@ -32,6 +32,11 @@ Index names (tenant = everything before "-order-"):
     dermalogica-us.myshopify.com-s-order-2026.08     skipped (-s-)
     burnd.com-jg-order-2026                          skipped (-jg-)
 
+More clusters: --cluster NAME counts another cluster with its own files next to this script and its
+own place in S3 (elkop2, the default, keeps the plain names):
+    --cluster elkop3   login .env.elkop3, state .last_counts.elkop3, s3://<bucket>/es-order-counts/elkop3/…
+Run one cron line per cluster (each with its own lock), so one slow cluster never holds up the other.
+
 Login: a .env file next to this script (or the file ES_ORDERS_ENV_FILE names), readable only by its owner:
     ES_URL=http://node6.elkop2.prod.int.fenixcommerce.com:9200
     ES_USERNAME=...
@@ -88,6 +93,18 @@ INDEX_RE = re.compile(
     r"^(?P<tenant>.+?)(?:-(?P<variant>s|jg))?-order-(?P<year>\d{4})"
     r"(?:\.(?P<month>0[1-9]|1[0-2]))?(?:\.(?P<part>\d{3}))?$")
 SKIP_VARIANTS = {"s": "-s-", "jg": "-jg-"}
+
+
+def use_cluster(name: str) -> None:
+    """Count another cluster: its own .env.<name>, state file and S3 prefix (<prefix><name>/)."""
+    global CLUSTER, ENV_FILE, STATE_FILE, PREFIX
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,40}", name):
+        raise SystemExit(f"--cluster: '{name}' is not a valid name (letters, digits, - and _)")
+    here = Path(__file__).resolve().parent
+    CLUSTER = name
+    ENV_FILE = Path(os.environ.get("ES_ORDERS_ENV_FILE", str(here / f".env.{name}")))
+    STATE_FILE = Path(os.environ.get("ES_ORDERS_STATE", str(here / f".last_counts.{name}")))
+    PREFIX = os.environ.get("ES_ORDERS_PREFIX", f"es-order-counts/{name}/")
 
 
 def log(msg: str) -> None:
@@ -530,7 +547,10 @@ def main() -> int:
                    help=f"order date field(s) for --backfill-days / --compare; the first one an order has wins (default {DATE_FIELDS})")
     p.add_argument("--compare", metavar="DAY", help="print today's (or DAY's, YYYY-MM-DD) live windows per tenant against the order dates")
     p.add_argument("--insecure", action="store_true", help="https without certificate checks")
+    p.add_argument("--cluster", help="count another cluster (login .env.NAME, state .last_counts.NAME, S3 es-order-counts/NAME/)")
     a = p.parse_args()
+    if a.cluster:
+        use_cluster(a.cluster)
 
     if a.compare:
         import boto3

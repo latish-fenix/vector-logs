@@ -7,8 +7,8 @@ Where the numbers come from
     API Gateway  s3://LOGS_BUCKET/OPS_METRICS_PREFIX dt=YYYY-MM-DD/part-HH.csv.gz, one row per stage per
                  minute, written every 5 minutes by scripts/apigw_metrics_to_s3.py on another server
                  (6 files a day; HH = 00, 04, … 20; the newest file is rewritten until its 4 hours end).
-    Inbound      orders arriving in the elkop2 order indexes per tenant per 5 minutes:
-                 s3://LOGS_BUCKET/OPS_INBOUND_PREFIX dt=YYYY-MM-DD/part-HH.csv.gz (same layout), written every
+    Inbound      orders arriving in the elkop2 / elkop3 order indexes per tenant per 5 minutes:
+                 s3://LOGS_BUCKET/<each of OPS_INBOUND_PREFIXES> dt=YYYY-MM-DD/part-HH.csv.gz (same layout), written every
                  5 minutes by scripts/es_order_counts.py; an "_all" row marks every window that was counted.
     Orders       the Vector logs of the clusters in config/ops-dashboard.yaml, counted here: one unique
                  (store, order id) per service per UTC day, at the minute it is first seen. A day in
@@ -662,7 +662,10 @@ class OpsService:
         self.now = now
         self.config = ConfigFile(settings.ops_config_file)
         self.metrics = MetricFiles(settings, logs.source)
-        self.inbound_files = MetricFiles(settings, logs.source, settings.ops_inbound_prefix, "inbound")
+        # one set of inbound files per Elasticsearch cluster (elkop2, elkop3, …): added up per tenant and window
+        self.inbound_sources = [MetricFiles(settings, logs.source, prefix, "inbound" if i == 0 else
+                                            "inbound-" + re.sub(r"[^a-z0-9]+", "-", prefix.lower()).strip("-"))
+                                for i, prefix in enumerate(settings.ops_inbound_prefixes)]
         self.orders = OrderCounter(settings, logs, self.config, now=now)
         self._order_cache: dict[str, tuple[float, dict | None]] = {}
         self._cache_lock = threading.Lock()
@@ -940,52 +943,75 @@ class OpsService:
                             "lastWeek": lw_full["minutes"] if lw_full else None}}
 
     # -- inbound orders (read side)
-    def _inbound_rows(self, ranges: list[tuple[int, int]], now_ms: int) -> list[tuple[int, str, int]]:
-        """(window start ms, tenant, orders) of the inbound files inside the ranges; "_all" rows included."""
-        paths: list[str] = []
-        for a, b in ranges:
-            paths += self.inbound_files.paths(a, b, now_ms)
-        paths = sorted(set(paths))
-        if not paths:
-            return []
+    def _inbound_describe(self) -> str:
+        return ", ".join(src.describe() for src in self.inbound_sources)
+
+    def _inbound_error(self) -> str | None:
+        errs = [src.error for src in self.inbound_sources if src.error]
+        return "; ".join(errs) if errs else None
+
+    def _inbound_rows(self, ranges: list[tuple[int, int]], now_ms: int) -> list[tuple[int, str, int, int]]:
+        """(window start ms, tenant, orders, source index) of the inbound files of every cluster inside the
+        ranges; "_all" rows included (one per cluster per counted window)."""
+        out: list[tuple[int, str, int, int]] = []
         cond = " OR ".join("(t >= ? AND t < ?)" for _ in ranges)
-        params: list[Any] = [paths]
-        for a, b in ranges:
-            params += [a, b]
-        con = _db()
-        try:
-            return [(int(t), tn, int(o or 0)) for t, tn, o in con.execute(
-                f"SELECT t, tenant, orders FROM (SELECT epoch_ms(strptime(minute, '%Y-%m-%dT%H:%MZ')) AS t, tenant, "
-                f"coalesce(orders, 0) AS orders FROM read_csv(?, header=true, columns={INBOUND_COLUMNS}, "
-                f"compression='gzip')) WHERE {cond}", params).fetchall()]
-        finally:
-            con.close()
+        for i, src in enumerate(self.inbound_sources):
+            paths: list[str] = []
+            for a, b in ranges:
+                paths += src.paths(a, b, now_ms)
+            paths = sorted(set(paths))
+            if not paths:
+                continue
+            params: list[Any] = [paths]
+            for a, b in ranges:
+                params += [a, b]
+            con = _db()
+            try:
+                out += [(int(t), tn, int(o or 0), i) for t, tn, o in con.execute(
+                    f"SELECT t, tenant, orders FROM (SELECT epoch_ms(strptime(minute, '%Y-%m-%dT%H:%MZ')) AS t, tenant, "
+                    f"coalesce(orders, 0) AS orders FROM read_csv(?, header=true, columns={INBOUND_COLUMNS}, "
+                    f"compression='gzip')) WHERE {cond}", params).fetchall()]
+            finally:
+                con.close()
+        return out
+
+    @staticmethod
+    def _inbound_last(rows, a: int, b: int) -> int | None:
+        """Start of the newest window every cluster has counted in [a, b) (a cluster with no window there
+        at all does not hold the others back)."""
+        last: dict[int, int] = {}
+        for t, tn, _, i in rows:
+            if tn == INBOUND_ALL and a <= t < b and t > last.get(i, -1):
+                last[i] = t
+        return min(last.values()) if last else None
 
     def _inbound_summary(self, z: ZoneDay, lz: ZoneDay, is_today: bool, now_ms: int, cfg: OpsConfig) -> dict:
         """Inbound orders of one day, shaped like the orders block: today vs last week by this time,
         a per-minute array (each 5-minute window at its first minute) and the tenants."""
         base = {"ready": False, "lastWeekReady": False, "asOf": None, "ageMs": None, "stale": bool(is_today),
                 "total": None, "totalLastWeek": None, "totalLastWeekDay": None, "change": None, "minutes": None,
-                "stores": [], "services": [], "source": self.inbound_files.describe(), "error": None}
+                "stores": [], "services": [], "source": self._inbound_describe(), "error": None}
         if not self.settings.ops_enabled:
             return base
         rows = self._inbound_rows([(lz.start, lz.end), (z.start, z.end)], now_ms)
-        base["error"] = self.inbound_files.error
-        cover = [t for t, tn, _ in rows if tn == INBOUND_ALL and z.start <= t < z.end]
-        lw_ready = any(tn == INBOUND_ALL and lz.start <= t < lz.end for t, tn, _ in rows)
-        if not cover:
+        base["error"] = self._inbound_error()
+        last = self._inbound_last(rows, z.start, z.end)
+        lw_ready = any(tn == INBOUND_ALL and lz.start <= t < lz.end for t, tn, _, _ in rows)
+        if last is None:
             return base
         start, n, n_lw = z.start, z.minutes, lz.minutes
-        as_of = min(max(cover) + INBOUND_STEP - MIN, z.end - MIN) if is_today else z.end - MIN
+        as_of = min(last + INBOUND_STEP - MIN, z.end - MIN) if is_today else z.end - MIN
         upto = as_of + MIN
         cutoff = upto - (start - lz.start)              # last week by this time
         n_h, n_lw_h = -(-n // 60), -(-n_lw // 60)
         counts, lw = [0] * n, [0] * n_lw
         tenants: dict[str, dict] = {}
-        for t, tn, o in rows:
+        for t, tn, o, _ in rows:
             if tn == INBOUND_ALL or not cfg.inbound_counted(tn):
                 continue
             today_row = start <= t < z.end
+            if today_row and t >= upto:
+                continue                                   # a cluster that is ahead: shown on the next refresh
             rec = tenants.get(tn)
             if rec is None:
                 rec = tenants[tn] = {"count": 0, "lastWeek": 0, "hours": [0] * n_h, "lastWeekHours": [0] * n_lw_h}
@@ -1029,16 +1055,17 @@ class OpsService:
         first = (start + off) // step * step - off
         nb = -(-(end - first) // step)
         rows = self._inbound_rows([(start, end)], now_ms)
-        cover = [t for t, tn, _ in rows if tn == INBOUND_ALL]
+        cover = [t for t, tn, _, _ in rows if tn == INBOUND_ALL]
         series = [0] * nb
         tenants: dict[str, int] = {}
-        for t, tn, o in rows:
+        for t, tn, o, _ in rows:
             if tn == INBOUND_ALL or not cfg.inbound_counted(tn):
                 continue
             tenants[tn] = tenants.get(tn, 0) + o
             if (not store or tn == store) and 0 <= (t - first) // step < nb:
                 series[(t - first) // step] += o
-        as_of = max(cover) + INBOUND_STEP - MIN if cover else None
+        last = self._inbound_last(rows, start, end)
+        as_of = last + INBOUND_STEP - MIN if last is not None else None
         upto = None if as_of is None else min(end, as_of + MIN)
         lo = min(cover) if cover else None
 
@@ -1050,7 +1077,7 @@ class OpsService:
                 "series": [v if known(b) else None for b, v in enumerate(series)] if cover else None,
                 "tenants": sorted(({"tenant": tn, "name": cfg.tenant_name(tn), "count": n} for tn, n in tenants.items() if n),
                                   key=lambda r: -r["count"]),
-                "source": self.inbound_files.describe(), "error": self.inbound_files.error}
+                "source": self._inbound_describe(), "error": self._inbound_error()}
 
     def health(self, minutes: int = 60) -> dict:
         if not 5 <= minutes <= 24 * 60:
@@ -1321,7 +1348,7 @@ class OpsService:
     def status(self) -> dict:
         cfg = self.config.get()
         return {"metrics": {"source": self.metrics.describe(), "error": self.metrics.error},
-                "inbound": {"source": self.inbound_files.describe(), "error": self.inbound_files.error},
+                "inbound": {"source": self._inbound_describe(), "error": self._inbound_error()},
                 "orders": {**self.orders.read_status(), "configError": self.config.error,
                            "services": [{"service": s.name, "cluster": s.cluster} for s in cfg.services]},
                 "config": {"path": self.config.path, "exists": self.config.exists, "error": self.config.error}}

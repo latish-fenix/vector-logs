@@ -418,7 +418,7 @@ def test_range_leaves_out_partial_buckets(ops):
 
 
 # ------------------------------------------------------------------ inbound orders (elkop2, 5-minute windows)
-def write_inbound(root: Path, windows: dict) -> None:
+def write_inbound(root: Path, windows: dict, prefix: str = "es-order-counts/inbound") -> None:
     """windows: datetime (window start) -> {tenant: orders}; an _all row is added for each window."""
     blocks: dict[str, list[dict]] = {}
     for t, tenants in sorted(windows.items()):
@@ -432,7 +432,7 @@ def write_inbound(root: Path, windows: dict) -> None:
         w = csv.DictWriter(buf, fieldnames=["minute", "tenant", "orders", "docs", "span_min", "src"], lineterminator="\n")
         w.writeheader()
         w.writerows(rows)
-        p = root / "es-order-counts" / "inbound" / key
+        p = root / prefix / key
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(gzip.compress(buf.getvalue().encode()))
 
@@ -510,3 +510,16 @@ def test_tenant_names():
         parse_config("inbound:\n  exclude: ['(']\n")
     with pytest.raises(OpsConfigError, match="unknown setting"):
         parse_config("inbound:\n  skip: []\n")
+
+
+def test_inbound_from_two_clusters(ops, inbound):
+    # elkop3 (Bombas) one window behind elkop2: the card waits for it, so no window is half counted
+    write_inbound(inbound, windows(TODAY, datetime(2026, 11, 9, 10, 20, tzinfo=timezone.utc), {"bombas.myshopify.com": 10}),
+                  prefix="es-order-counts/elkop3/inbound")
+    ib = ops.summary(zone="UTC")["inbound"]
+    assert ib["asOf"] == MS(datetime(2026, 11, 9, 10, 19, tzinfo=timezone.utc))
+    assert ib["total"] == 4 * 124 + 10 * 124 and ib["stores"][0]["store"] == "bombas.myshopify.com"
+    assert ib["totalLastWeek"] == 3 * 124                                            # elkop3 has no last week yet
+    assert "elkop3" in ib["source"]
+    r = ops.time_range(MS(datetime(2026, 11, 9, 9, 0, tzinfo=timezone.utc)), MS(datetime(2026, 11, 9, 10, 0, tzinfo=timezone.utc)), "UTC")
+    assert r["inbound"]["series"] == [14] * 12 and r["inbound"]["total"] == 14 * 12

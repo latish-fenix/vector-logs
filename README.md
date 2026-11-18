@@ -131,7 +131,7 @@ All settings are environment variables in `.env` (see [.env.example](.env.exampl
 | `LB_WARM_DAYS`, `LB_RETENTION_DAYS`, `LB_POLL_SECONDS`, `LB_CONVERTER_MEMORY_MB` | `30`, `30`, `300`, `256` | Load balancer converter |
 | `CACHE_MAX_AGE_HOURS` | `24` | Downloaded log files and converted load balancer copies unused this long are deleted (read from S3 again when needed) |
 | `ALERTS_ENABLED`, `ALERTS_INTERVAL_SECONDS` | `true`, `60` | Alert checker (rules and the Slack webhook are set on the Alerts page) |
-| `OPS_ENABLED`, `OPS_METRICS_PREFIX`, `OPS_INBOUND_PREFIX`, `OPS_INTERVAL_SECONDS`, `OPS_BACKFILL_DAYS` | `true`, `apigw-metrics/`, `es-order-counts/inbound/`, `300`, `8` | Ops dashboard: where the API Gateway copies and the elkop2 inbound order counts (`scripts/es_order_counts.py`) are (in `LOGS_BUCKET`), how often orders are counted, how many days are counted back on start |
+| `OPS_ENABLED`, `OPS_METRICS_PREFIX`, `OPS_INBOUND_PREFIXES`, `OPS_INTERVAL_SECONDS`, `OPS_BACKFILL_DAYS` | `true`, `apigw-metrics/`, `es-order-counts/inbound/,es-order-counts/elkop3/inbound/`, `300`, `8` | Ops dashboard: where the API Gateway copies and the inbound order counts per cluster (elkop2, elkop3) (`scripts/es_order_counts.py`) are (in `LOGS_BUCKET`), how often orders are counted, how many days are counted back on start |
 | `OPS_CONFIG_FILE` | `/app/config/ops-dashboard.yaml` | Order lines, names, colour rules (read again when it changes) |
 | `S3_BUCKET` / `S3_PREFIX` / `AWS_REGION` | `fenix-es-config-api` / `vector-logs/` / `us-east-1` | App state |
 | `SECRETS_PREFIX` | `vector-logs/` | Secrets Manager names |

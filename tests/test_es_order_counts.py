@@ -338,3 +338,21 @@ def test_compare_lines_up_live_and_dates(monkeypatch):
                     ("kuiu-shop.myshopify.com", 0, 2)]
     with pytest.raises(RuntimeError, match="no live windows"):
         eoc.compare(s3, {}, eoc.DATE_FIELDS, "2026-11-16")
+
+
+def test_another_cluster_gets_its_own_files(monkeypatch):
+    saved = (eoc.CLUSTER, eoc.ENV_FILE, eoc.STATE_FILE, eoc.PREFIX)
+    for k in ("ES_ORDERS_ENV_FILE", "ES_ORDERS_STATE", "ES_ORDERS_PREFIX"):
+        monkeypatch.delenv(k, raising=False)
+    try:
+        eoc.use_cluster("elkop3")
+        assert eoc.CLUSTER == "elkop3" and eoc.ENV_FILE.name == ".env.elkop3" and eoc.STATE_FILE.name == ".last_counts.elkop3"
+        assert eoc.block_key("2026-11-18T07:20Z") == "es-order-counts/elkop3/inbound/dt=2026-11-18/part-04.csv.gz"
+        s3 = FakeS3()
+        runs(s3, (0, cat()), (300, cat({V3: 19400})))
+        assert "es-order-counts/elkop3/inbound/dt=2026-11-17/part-04.csv.gz" in s3.files
+        assert "es-order-counts/elkop3/status.json" in s3.files and s3.json("status.json")["cluster"] == "elkop3"
+        with pytest.raises(SystemExit):
+            eoc.use_cluster("../x")
+    finally:
+        eoc.CLUSTER, eoc.ENV_FILE, eoc.STATE_FILE, eoc.PREFIX = saved

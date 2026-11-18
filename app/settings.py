@@ -79,7 +79,8 @@ class Settings:
     ops_enabled: bool = True
     ops_background: bool = True               # run the order counter thread (off in tests)
     ops_metrics_prefix: str = "apigw-metrics/"  # in LOGS_BUCKET: dt=YYYY-MM-DD/part-HH.csv.gz (6 a day)
-    ops_inbound_prefix: str = "es-order-counts/inbound/"  # in LOGS_BUCKET: same layout, scripts/es_order_counts.py
+    # in LOGS_BUCKET, one per Elasticsearch cluster (scripts/es_order_counts.py writes each); comma-separated
+    ops_inbound_prefixes: tuple = ("es-order-counts/inbound/", "es-order-counts/elkop3/inbound/")
     ops_config_file: str = str(Path(__file__).resolve().parent.parent / "config" / "ops-dashboard.yaml")
     ops_interval_seconds: int = 300           # how often new log files are counted for orders
     ops_backfill_days: int = 8                # days counted back on start (last week's comparison needs 7)
@@ -163,7 +164,8 @@ class Settings:
             ops_enabled=_bool(env("OPS_ENABLED"), True),
             ops_background=_bool(env("OPS_BACKGROUND"), True),
             ops_metrics_prefix=_slash(env("OPS_METRICS_PREFIX", "apigw-metrics/").lstrip("/")),
-            ops_inbound_prefix=_slash(env("OPS_INBOUND_PREFIX", "es-order-counts/inbound/").lstrip("/")),
+            ops_inbound_prefixes=tuple(_slash(p.strip().lstrip("/")) for p in env(
+                "OPS_INBOUND_PREFIXES", "es-order-counts/inbound/,es-order-counts/elkop3/inbound/").split(",") if p.strip()),
             ops_config_file=env("OPS_CONFIG_FILE", "") or str(Path(__file__).resolve().parent.parent / "config"
                                                               / "ops-dashboard.yaml"),
             ops_interval_seconds=int(env("OPS_INTERVAL_SECONDS", "300")),
