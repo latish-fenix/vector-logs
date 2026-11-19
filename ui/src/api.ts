@@ -566,3 +566,34 @@ export interface LbSlowHit {
   resp_t?: number; trace_id?: string; type?: string;
 }
 export interface LbSlowest { minutes: number; start: number; end: number; hits: LbSlowHit[]; requests: number; files: number; tookMs: number }
+
+// ------------------------------------------------------------------ A/B test page (scripts/ab_session_counts.py)
+export type AbSource = "session" | "cop";
+export interface AbStoreRow {
+  store: string; entries: number; pages: Record<string, number>; oc: number; ocBad: number; ocBadPct: number | null;
+  cop: number; copBad: number; copBadPct: number | null; health: number; abTest: boolean;
+}
+export interface AbCategory { category: string; count: number; pct: number | null }
+export interface AbPageRow { page: string; total: number; shoppers: number; valid: number; bad: number; badPct: number | null; health: number; categories: AbCategory[] }
+export interface AbStoreDetail extends Partial<Omit<AbStoreRow, "pages">> {
+  store: string; found: boolean;
+  series?: Record<string, (number | null)[]>; badOc?: (number | null)[] | null;
+  sessionCheck?: AbPageRow[]; copCheck?: AbPageRow[];
+  variants?: { page: string; variant: string; count: number; pct: number | null }[];
+  variantSeries?: Record<string, (number | null)[]>;
+}
+export interface AbCollectorStatus {
+  ok?: boolean; lastRun?: string; lastOk?: string | null; lastError?: string | null; lastErrorAt?: string | null;
+  doneTo?: string | null; first?: string | null; readError?: string;
+}
+export interface AbSummary {
+  from: number; to: number; zone: string; step: number; start: number; n: number;
+  asOf: number | null; countedFrom: number | null; windows: Record<AbSource, number>;
+  stores: AbStoreRow[]; store: AbStoreDetail | null; status: AbCollectorStatus; error: string | null;
+}
+export interface AbIds {
+  from: number; to: number; store: string; source: AbSource; page: string | null; category: string | null;
+  total: number; truncated: boolean; values: { value: string; count: number }[];
+  rows: { at: string; page: string; category: string; sessionId: string; orderId: string; docId: string }[];
+  error: string | null;
+}

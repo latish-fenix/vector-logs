@@ -82,6 +82,8 @@ class Settings:
     # in LOGS_BUCKET, one per Elasticsearch cluster (scripts/es_order_counts.py writes each); comma-separated
     ops_inbound_prefixes: tuple = ("es-order-counts/inbound/", "es-order-counts/elkop3/inbound/")
     ops_config_file: str = str(Path(__file__).resolve().parent.parent / "config" / "ops-dashboard.yaml")
+    # A/B test page: counts / ids / status.json written by scripts/ab_session_counts.py (in LOGS_BUCKET)
+    abtest_prefix: str = "es-ab-test/"
     ops_interval_seconds: int = 300           # how often new log files are counted for orders
     ops_backfill_days: int = 8                # days counted back on start (last week's comparison needs 7)
 
@@ -169,6 +171,7 @@ class Settings:
             ops_config_file=env("OPS_CONFIG_FILE", "") or str(Path(__file__).resolve().parent.parent / "config"
                                                               / "ops-dashboard.yaml"),
             ops_interval_seconds=int(env("OPS_INTERVAL_SECONDS", "300")),
+            abtest_prefix=_slash(env("ABTEST_PREFIX", "es-ab-test/").lstrip("/")),
             ops_backfill_days=int(env("OPS_BACKFILL_DAYS", "8")),
             storage_backend=storage,
             s3_bucket=env("S3_BUCKET", ""),

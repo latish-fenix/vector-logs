@@ -1,6 +1,7 @@
 import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { Page, Shell } from "./components/Shell";
 import { Empty, Loading } from "./components/ui";
+import { AbTest } from "./pages/AbTest";
 import { Alerts } from "./pages/Alerts";
 import { Clusters } from "./pages/admin/Clusters";
 import { Users } from "./pages/admin/Users";
@@ -58,6 +59,7 @@ export function App() {
         <Route path="lb-logs" element={<LbLogs />} />
         <Route path="alerts" element={<Alerts />} />
         <Route path="ops" element={<Ops />} />
+        <Route path="abtest" element={<AbTest />} />
         <Route path="account/password" element={<ChangePassword />} />
         <Route path="admin/clusters" element={<RequireAdmin><Clusters /></RequireAdmin>} />
         <Route path="admin/users" element={<RequireAdmin><Users /></RequireAdmin>} />

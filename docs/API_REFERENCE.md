@@ -234,6 +234,23 @@ long as the day. Last week = the same date 7 days back in that zone.
 
 `OPS_DISABLED` (404) when `OPS_ENABLED=false`; `INVALID_DAY`, `INVALID_ZONE`, `INVALID_TIME`, `INVALID_RANGE`, `RANGE_TOO_LARGE` (over 31 days), `UNKNOWN_SERVICE` (400).
 
+## A/B test sessions
+
+Entries in the EDD session indexes of eddsderrh1 per store and page, and whether their session ID can be put
+in an A/B group (it starts with M). Counted every 5 minutes by `scripts/ab_session_counts.py` (cron on
+172.0.23.77) into `ABTEST_PREFIX` (`es-ab-test/`) in `LOGS_BUCKET`: `counts/` (per store, page and session ID
+kind), `ids/` (the entries with a bad session ID: order confirmations of `<store>-session_history-*`, every entry
+of `<store>-cop-derrh-*`) and `status.json`. Health checks (`fenix-health-…` session IDs) are left out of the
+entries, the charts and the bad share.
+
+| Method | Path | What it returns |
+| --- | --- | --- |
+| GET | `/api/v1/abtest/summary?from=&to=&zone=&store=` | Every store with entries in the range (up to 31 days), busiest first: entries per page (PDP, CART, COP, OC), order confirmations and COP DI entries with a bad session ID (count and %), `abTest` when its entries carry A/B variants. With `store`: entries per page over time (buckets of 5 min ≤ 6 h, 15 min ≤ 2 days, 1 h ≤ 8 days, then 3 h, on round times in `zone`; a bucket not fully counted is `null`), OC with a bad session ID over time, the session ID tables `sessionCheck` (session_history) and `copCheck` (cop-derrh) per page and category (valid, NA, ORDER_LOOKUP_CALL, xyz123, novalue, empty, missing, numbers, uuid, other, health) and the entries per A/B test / variant |
+| GET | `/api/v1/abtest/ids?store=&from=&to=&source=session&page=OC&category=&limit=500` | The entries with a bad session ID, newest first: time, page, category, session ID, order ID, document id; `values` = the session ID values and how often (`category=bad` or empty = every bad one; `source=cop` for cop-derrh) |
+| GET | `/api/v1/abtest/status` | Where the files are and the collector's last run (`status.json`) |
+
+`ABTEST_DISABLED` (404) when `OPS_ENABLED=false`; `INVALID_TIME`, `INVALID_ZONE`, `INVALID_RANGE`, `RANGE_TOO_LARGE`, `INVALID_SOURCE` (400).
+
 ## Errors
 
 Every error is `{"error": {"code", "message", "details"}}`. The common codes:
