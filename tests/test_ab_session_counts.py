@@ -165,7 +165,7 @@ def test_bad_ids_rows(monkeypatch):
     assert rows[0]["page"] == "COP" and rows[0]["order_id"] == "7798832857326" and rows[0]["category"] == "xyz123"
 
 
-def test_bad_ids_query_keeps_oc_only_for_sessions():
+def test_bad_ids_query_takes_every_page_but_not_health_checks():
     q = []
 
     def fake(cred, pattern, body, what):
@@ -178,7 +178,7 @@ def test_bad_ids_query_keeps_oc_only_for_sessions():
         ab.bad_ids({}, "cop", T, T + dt.timedelta(minutes=5))
     finally:
         ab.search = old
-    assert {"terms": {"pageType.keyword": ["OC", "oc"]}} in q[0]["query"]["bool"]["filter"]
+    assert len(q[0]["query"]["bool"]["filter"]) == 1                    # every page
     assert len(q[1]["query"]["bool"]["filter"]) == 1
     assert {"prefix": {"sessionTrackId.keyword": "fenix-health-"}} in q[1]["query"]["bool"]["must_not"]
 

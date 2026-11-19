@@ -23,8 +23,8 @@ and a backfill never add up twice.
         2026-11-19T10:00Z,session,shoppremiumoutlets.myshopify.com,OC,ORDER_LOOKUP_CALL,,5
         2026-11-19T10:00Z,session,shoppremiumoutlets.myshopify.com,OC,variant,EDD-ShipCost AB Test (45/45/5/5) / EDD-Original/ShipCost-Test,12
     s3://<bucket>/es-ab-test/ids/dt=YYYY-MM-DD/part-HH.csv.gz       the entries with a bad session ID, for the list
-        minute,source,store,page,category,session_id,order_id,doc_id,at   behind a click: OC entries of session, every
-                                                                           entry of cop
+        minute,source,store,page,category,session_id,order_id,doc_id,at   behind a click: every page of session and of
+                                                                           cop (health checks left out)
     s3://<bucket>/es-ab-test/status.json                           every run: last run, last success, last error
 
   page      upper case (cop and COP are the same page)
@@ -84,7 +84,7 @@ ID_COLUMNS = ["minute", "source", "store", "page", "category", "session_id", "or
 SOURCES = {
     "session": {"pattern": "*-session_history-*", "ts": "requestDttm", "page": "pageType", "sid": "sessionId",
                 "order": ["orderInfo.orderId", "orderId"], "test": "splitTestInfo.testName",
-                "variant": "splitTestInfo.variantName", "id_pages": ["OC", "oc"]},
+                "variant": "splitTestInfo.variantName", "id_pages": None},
     "cop": {"pattern": "*-cop-derrh-*", "ts": "triggeredDateTime", "page": "request.pageType", "sid": "sessionTrackId",
             "order": ["orderId", "request.orderId"], "test": None, "variant": None, "id_pages": None},
 }

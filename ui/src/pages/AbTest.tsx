@@ -65,8 +65,8 @@ const CAT_TITLE: Record<string, string> = {
 };
 const catLabel = (c: string) => CAT_LABEL[c] ?? c;
 const isBad = (c: string) => c !== "valid" && c !== "health";
-/** The ID list exists for order confirmations of session_history and every cop-derrh entry. */
-const listable = (source: AbSource, page: string) => source === "cop" || page === "OC";
+/** The ID list exists for every page (bad session IDs of session_history and cop-derrh). */
+const listable = (_source: AbSource, _page: string) => true;
 
 function CardHead({ title, sub, right }: { title: ReactNode; sub?: ReactNode; right?: ReactNode }) {
   return (
@@ -252,7 +252,7 @@ export function AbTest() {
                   ))}
                 </div>
                 <CheckTable title="Session ID check · session history" source="session" rows={st.sessionCheck ?? []} onOpen={openIds}
-                  sub="Entries per page by session ID · a click on an OC count lists those orders" />
+                  sub="Entries per page by session ID · a click on a count lists those entries with their session ID and order ID" />
               </>
             )}
 
@@ -391,6 +391,7 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose }: {
     const rows = await everything();
     if (!rows) return;
     const ids = [...new Set(rows.map((r) => r.orderId).filter(Boolean))];
+    if (!ids.length) { toast?.("These entries have no order ID"); return; }
     await copyText(ids.join("\n"));
     toast?.(`${num(ids.length)} order IDs copied`);
   };
