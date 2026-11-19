@@ -15,6 +15,8 @@ import "../ops.css";
 // A/B group; a click on a count lists the orders that have it.
 
 const H = 3600_000;
+/** Page types shown (COP is left out for now). */
+const PAGES = ["PDP", "CART", "OC"];
 const ZONE_KEY = "ops-zone";                       // shared with the Ops dashboard
 function storedZone(): ClockZone {
   try { const v = localStorage.getItem(ZONE_KEY); return ZONES.includes(v as ClockZone) ? (v as ClockZone) : "ist"; } catch { return "ist"; }
@@ -134,26 +136,33 @@ export function AbTest() {
   // no store picked: the busiest store in an A/B test, else the busiest
   useEffect(() => {
     if (!d || store || !d.stores.length) return;
-    const pick = d.stores.find((s) => s.abTest) ?? d.stores[0];
+    const list = [...d.stores].sort((a, b) => PAGES.reduce((t, p) => t + (b.pages[p] ?? 0), 0) - PAGES.reduce((t, p) => t + (a.pages[p] ?? 0), 0));
+    const pick = list.find((s) => s.abTest) ?? list[0];
     set({ store: pick.store });
   }, [d, store]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const storeOpts = useMemo(() => (d?.stores ?? []).map((s) => ({ value: s.store, label: `${s.store}${s.abTest ? " · A/B test" : ""}` })), [d]);
+  // entries without COP, busiest first; stores with only COP entries left out
+  const stores = useMemo(() => (d?.stores ?? [])
+    .map((s) => ({ ...s, entries: PAGES.reduce((t, p) => t + (s.pages[p] ?? 0), 0) }))
+    .filter((s) => s.entries > 0)
+    .sort((a, b) => b.entries - a.entries || a.store.localeCompare(b.store)), [d]);
+  const row = stores.find((s) => s.store === store);
+  const storeOpts = useMemo(() => stores.map((s) => ({ value: s.store, label: `${s.store}${s.abTest ? " · A/B test" : ""}` })), [stores]);
   const st = d?.store && d.store.store === store ? d.store : null;
   const nowAt = live ? d?.asOf ?? null : null;
   const status = d?.status;
   const ageMin = d?.asOf ? Math.round((Date.now() - d.asOf) / 60_000) : null;
   const late = ageMin !== null && ageMin > 20;
-  const shownStores = all ? d?.stores ?? [] : (d?.stores ?? []).slice(0, 15);
+  const shownStores = all ? stores : stores.slice(0, 15);
   const openIds = (source: AbSource, page: string, category: string) => set({ ids: `${source}|${page}|${category}` });
   const [idSource, idPage, idCat] = (ids ?? "").split("|");
 
   const exportStores = () => {
     if (!d) return;
-    const head = ["from", "to", "store", "ab_test", "entries", "pdp", "cart", "cop", "oc", "oc_bad", "oc_bad_pct", "cop_di", "cop_di_bad", "cop_di_bad_pct"];
+    const head = ["from", "to", "store", "ab_test", "entries", "pdp", "cart", "oc", "oc_bad", "oc_bad_pct"];
     const f = localStamp(d.from, zone), t = localStamp(d.to, zone);
-    const lines = [head.join(","), ...d.stores.map((s) => [f, t, s.store, s.abTest ? "yes" : "no", s.entries, s.pages.PDP ?? 0, s.pages.CART ?? 0, s.pages.COP ?? 0,
-      s.pages.OC ?? 0, s.ocBad, s.ocBadPct ?? "", s.cop, s.copBad, s.copBadPct ?? ""].join(","))];
+    const lines = [head.join(","), ...stores.map((s) => [f, t, s.store, s.abTest ? "yes" : "no", s.entries, s.pages.PDP ?? 0, s.pages.CART ?? 0,
+      s.pages.OC ?? 0, s.ocBad, s.ocBadPct ?? ""].join(","))];
     downloadFile(`abtest-stores-${stamp(d.from, zone)}-${stamp(d.to, zone)}-${zone}.csv`, lines.join("\n") + "\n", "text/csv");
   };
 
@@ -193,12 +202,10 @@ export function AbTest() {
           {status?.lastRun && <span className="hint">Collector: last run {ago(status.lastRun)}{status.ok === false ? " · failed" : ""}</span>}
         </div>
         {st?.found && (
-          <div className="ops-stats ops-stats-5">
-            <Mini label="Shopper entries" value={num(st.entries ?? 0)} note={`PDP, CART, COP and OC${st.health ? ` · ${num(st.health)} health checks left out` : ""}`} />
+          <div className="ops-stats ab-stats-3">
+            <Mini label="Shopper entries" value={num(row?.entries ?? 0)} note={`PDP, CART and OC${st.health ? ` · ${num(st.health)} health checks left out` : ""}`} />
             <Mini label="Order confirmations (OC)" value={num(st.oc ?? 0)} note={st.abTest ? "store is in an A/B test" : "no A/B test info on its entries"} />
             <Mini label="OC with a bad session ID" value={<BadPct v={st.ocBadPct} />} note={`${num(st.ocBad ?? 0)} orders`} title="Order confirmations whose session ID can't be put in an A/B group" />
-            <Mini label="COP DI entries" value={num(st.cop ?? 0)} note="cop-derrh index" />
-            <Mini label="COP DI with a bad session ID" value={<BadPct v={st.copBadPct} />} note={`${num(st.copBad ?? 0)} entries`} />
           </div>
         )}
       </section>
@@ -215,7 +222,7 @@ export function AbTest() {
               <>
                 <h2 className="ab-h2">Session history index <span className="hint mono">{store}-session_history-*</span></h2>
                 <div className="ops-charts">
-                  {Object.entries(st.series ?? {}).map(([page, values]) => (
+                  {Object.entries(st.series ?? {}).filter(([page]) => page !== "COP").map(([page, values]) => (
                     <Chart key={page} title={PAGE_NAME[page] ?? page} sub={`entries ${stepText(d.step)}`} start={d.start} step={d.step} zone={zone} nowAt={nowAt}
                       series={page === "OC" && st.badOc ? [
                         { key: "all", label: "All", color: PAGE_COLOR.OC, values, area: true },
@@ -223,25 +230,20 @@ export function AbTest() {
                       ] : [{ key: "all", label: page, color: PAGE_COLOR[page] ?? "var(--accent)", values, area: true }]} />
                   ))}
                 </div>
-                <CheckTable title="Session ID check · session history" source="session" rows={st.sessionCheck ?? []} onOpen={openIds}
+                <CheckTable title="Session ID check · session history" source="session" rows={(st.sessionCheck ?? []).filter((r) => r.page !== "COP")} onOpen={openIds}
                   sub="Entries per page by session ID · a click on an OC count lists those orders" />
-                {(st.variants?.length ?? 0) > 0 && <Variants st={st} d={d} zone={zone} nowAt={nowAt} />}
-
-                <h2 className="ab-h2">COP DI index <span className="hint mono">{store}-cop-derrh-*</span></h2>
-                <CheckTable title="Session ID check · COP DI" source="cop" rows={st.copCheck ?? []} onOpen={openIds}
-                  sub="Unique checkout entries by session ID · a click on a count lists those entries" empty="No COP DI entries for this store in this range" />
               </>
             )}
 
             <section className="card" style={{ overflow: "hidden" }}>
-              <CardHead title={`Stores · ${d.stores.length}`} sub="Every store with session entries in this range, busiest first · click a row to show that store"
-                right={<button type="button" className="btn btn-ghost btn-sm" onClick={exportStores} disabled={!d.stores.length}><Icon name="download" size={15} /> CSV</button>} />
-              {d.stores.length === 0 ? <Empty title="No session entries in this range" /> : (
+              <CardHead title={`Stores · ${stores.length}`} sub="Every store with session entries in this range, busiest first · click a row to show that store"
+                right={<button type="button" className="btn btn-ghost btn-sm" onClick={exportStores} disabled={!stores.length}><Icon name="download" size={15} /> CSV</button>} />
+              {stores.length === 0 ? <Empty title="No session entries in this range" /> : (
                 <div className="table-scroll" style={{ maxHeight: "none" }}>
                   <table className="table ops-table">
                     <thead><tr>
-                      <th>Store</th><th className="num">Entries</th><th className="num">PDP</th><th className="num">CART</th><th className="num">COP</th><th className="num">OC</th>
-                      <th className="num" title="Order confirmations with a bad session ID">OC bad</th><th className="num" title="cop-derrh entries with a bad session ID">COP DI bad</th>
+                      <th>Store</th><th className="num">Entries</th><th className="num">PDP</th><th className="num">CART</th><th className="num">OC</th>
+                      <th className="num" title="Order confirmations with a bad session ID">OC bad</th>
                     </tr></thead>
                     <tbody>
                       {shownStores.map((s: AbStoreRow) => (
@@ -249,17 +251,16 @@ export function AbTest() {
                           onClick={() => set({ store: s.store, ids: null })} onKeyDown={(e) => { if (e.key === "Enter") set({ store: s.store, ids: null }); }}>
                           <td><div className="nm">{s.store} {s.abTest && <Badge tone="blue">A/B test</Badge>}</div></td>
                           <td className="num" style={{ fontWeight: 600 }}>{num(s.entries)}</td>
-                          {["PDP", "CART", "COP", "OC"].map((p) => <td key={p} className="num">{s.pages[p] ? num(s.pages[p]) : <span className="dim">0</span>}</td>)}
+                          {PAGES.map((p) => <td key={p} className="num">{s.pages[p] ? num(s.pages[p]) : <span className="dim">0</span>}</td>)}
                           <td className="num"><BadPct v={s.ocBadPct} n={s.ocBad} /></td>
-                          <td className="num"><BadPct v={s.copBadPct} n={s.copBad} /></td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
               )}
-              {d.stores.length > 15 && (
-                <div className="card-foot"><button type="button" className="btn btn-ghost btn-sm" onClick={() => setAll(!all)}>{all ? "Show the top 15" : `Show all ${d.stores.length} stores`}</button></div>
+              {stores.length > 15 && (
+                <div className="card-foot"><button type="button" className="btn btn-ghost btn-sm" onClick={() => setAll(!all)}>{all ? "Show the top 15" : `Show all ${stores.length} stores`}</button></div>
               )}
             </section>
           </div>
@@ -323,36 +324,6 @@ function CheckTable({ title, sub, source, rows, onOpen, empty }: {
         </div>
       )}
     </section>
-  );
-}
-
-function Variants({ st, d, zone, nowAt }: { st: NonNullable<AbSummary["store"]>; d: AbSummary; zone: ClockZone; nowAt: number | null }) {
-  const colors = ["var(--svc-1)", "var(--svc-2)", "var(--svc-3)", "var(--accent)", "#8b7fe0", "var(--st-4xx)"];
-  const oc = (st.variants ?? []).filter((v) => v.page === "OC");
-  const names = Object.keys(st.variantSeries ?? {});
-  return (
-    <div className="ops-range-tables">
-      <section className="card" style={{ overflow: "hidden" }}>
-        <CardHead title="A/B variants" sub="Entries per test / variant (splitTestInfo on the entry)" />
-        <div className="table-scroll" style={{ maxHeight: "none" }}>
-          <table className="table ops-table">
-            <thead><tr><th>Page</th><th>Test / variant</th><th className="num">Entries</th><th className="num">Share</th></tr></thead>
-            <tbody>
-              {(st.variants ?? []).map((v) => (
-                <tr key={`${v.page}/${v.variant}`}>
-                  <td>{v.page}</td><td className="ab-variant">{v.variant}</td><td className="num" style={{ fontWeight: 600 }}>{num(v.count)}</td>
-                  <td className="num"><span className="ops-share"><span className="ops-bar"><span style={{ width: `${Math.min(100, v.pct ?? 0)}%` }} /></span><span className="pc">{pct(v.pct)}</span></span></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-      {oc.length > 0 && names.length > 0 && (
-        <Chart title="Orders (OC) per variant" sub={stepText(d.step)} start={d.start} step={d.step} zone={zone} nowAt={nowAt}
-          series={names.map((n, i) => ({ key: n, label: n.split(" / ").slice(1).join(" / ") || n, color: colors[i % colors.length], values: st.variantSeries![n] }))} />
-      )}
-    </div>
   );
 }
 

@@ -272,6 +272,8 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .ops-range-tables > :only-child { grid-column: 1 / -1; }
 
 /* ---- A/B test sessions page */
+.ab-stats-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 900px) { .ab-stats-3 { grid-template-columns: minmax(0, 1fr); } }
 .ab-stack { display: flex; flex-direction: column; gap: 16px; }
 .ab-stack > .ab-h2 { margin: 8px 0 -4px; }
 .ab-h2 { font-size: 15px; font-weight: 650; margin: 22px 0 10px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
