@@ -5,7 +5,7 @@ import { get, type AbIds, type AbPageRow, type AbSource, type AbStoreRow, type A
 import { Icon } from "../components/icons";
 import { clock, clockZ, dateLabel, dayIn, Legend, LineChart, localStamp, offsetMs, useHidden, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
-import { Badge, Callout, copyText, Dialog, Empty, ErrorCallout, Loading, SearchSelect, downloadFile, useToast } from "../components/ui";
+import { Callout, copyText, Dialog, Empty, ErrorCallout, Loading, SearchSelect, downloadFile, useToast } from "../components/ui";
 import { ago, num } from "../format";
 import "../ops.css";
 
@@ -14,9 +14,10 @@ import "../ops.css";
 // session ID is usable (starts with M). Bad ones (NA, ORDER_LOOKUP_CALL, xyz123, …) can't be put in an
 // A/B group; a click on a count lists the orders that have it.
 
+type SortKey = "store" | "entries" | "PDP" | "CART" | "COP" | "OC" | "ocBadPct";
 const H = 3600_000;
-/** Page types shown (COP is left out for now). */
-const PAGES = ["PDP", "CART", "OC"];
+/** Page types of the session history index. */
+const PAGES = ["PDP", "CART", "COP", "OC"];
 const ZONE_KEY = "ops-zone";                       // shared with the Ops dashboard
 function storedZone(): ClockZone {
   try { const v = localStorage.getItem(ZONE_KEY); return ZONES.includes(v as ClockZone) ? (v as ClockZone) : "ist"; } catch { return "ist"; }
@@ -137,31 +138,51 @@ export function AbTest() {
   useEffect(() => {
     if (!d || store || !d.stores.length) return;
     const list = [...d.stores].sort((a, b) => PAGES.reduce((t, p) => t + (b.pages[p] ?? 0), 0) - PAGES.reduce((t, p) => t + (a.pages[p] ?? 0), 0));
-    const pick = list.find((s) => s.abTest) ?? list[0];
+    const pick = list[0];
     set({ store: pick.store });
   }, [d, store]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // entries without COP, busiest first; stores with only COP entries left out
+  // entries of the session history index, busiest first
   const stores = useMemo(() => (d?.stores ?? [])
     .map((s) => ({ ...s, entries: PAGES.reduce((t, p) => t + (s.pages[p] ?? 0), 0) }))
     .filter((s) => s.entries > 0)
     .sort((a, b) => b.entries - a.entries || a.store.localeCompare(b.store)), [d]);
   const row = stores.find((s) => s.store === store);
-  const storeOpts = useMemo(() => stores.map((s) => ({ value: s.store, label: `${s.store}${s.abTest ? " · A/B test" : ""}` })), [stores]);
+  const storeOpts = useMemo(() => stores.map((s) => ({ value: s.store, label: s.store })), [stores]);
   const st = d?.store && d.store.store === store ? d.store : null;
   const nowAt = live ? d?.asOf ?? null : null;
   const status = d?.status;
   const ageMin = d?.asOf ? Math.round((Date.now() - d.asOf) / 60_000) : null;
   const late = ageMin !== null && ageMin > 20;
-  const shownStores = all ? stores : stores.slice(0, 15);
+  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "entries", desc: true });
+  const sorted = useMemo(() => {
+    const val = (s: AbStoreRow & { entries: number }): string | number | null => sort.key === "store" ? s.store : sort.key === "entries" ? s.entries
+      : sort.key === "ocBadPct" ? s.ocBadPct : s.pages[sort.key] ?? 0;
+    return [...stores].sort((x, y) => {
+      const a = val(x), b = val(y);
+      if (a === b) return y.entries - x.entries;
+      if (a === null) return 1;                       // no OC: always last
+      if (b === null) return -1;
+      const c = typeof a === "string" ? a.localeCompare(b as string) : a - (b as number);
+      return sort.desc ? -c : c;
+    });
+  }, [stores, sort]);
+  const shownStores = all ? sorted : sorted.slice(0, 15);
+  const Th = ({ k, children, title }: { k: SortKey; children: ReactNode; title?: string }) => (
+    <th className={k === "store" ? undefined : "num"} title={title} aria-sort={sort.key === k ? (sort.desc ? "descending" : "ascending") : "none"}>
+      <button type="button" className={`ops-sort ${sort.key === k ? "on" : ""}`} onClick={() => setSort({ key: k, desc: sort.key === k ? !sort.desc : k !== "store" })}>
+        {children}<span className="ar" aria-hidden="true">{sort.key === k ? (sort.desc ? "↓" : "↑") : "↕"}</span>
+      </button>
+    </th>
+  );
   const openIds = (source: AbSource, page: string, category: string) => set({ ids: `${source}|${page}|${category}` });
   const [idSource, idPage, idCat] = (ids ?? "").split("|");
 
   const exportStores = () => {
     if (!d) return;
-    const head = ["from", "to", "store", "ab_test", "entries", "pdp", "cart", "oc", "oc_bad", "oc_bad_pct"];
+    const head = ["from", "to", "store", "entries", "pdp", "cart", "cop", "oc", "oc_bad", "oc_bad_pct"];
     const f = localStamp(d.from, zone), t = localStamp(d.to, zone);
-    const lines = [head.join(","), ...stores.map((s) => [f, t, s.store, s.abTest ? "yes" : "no", s.entries, s.pages.PDP ?? 0, s.pages.CART ?? 0,
+    const lines = [head.join(","), ...stores.map((s) => [f, t, s.store, s.entries, s.pages.PDP ?? 0, s.pages.CART ?? 0, s.pages.COP ?? 0,
       s.pages.OC ?? 0, s.ocBad, s.ocBadPct ?? ""].join(","))];
     downloadFile(`abtest-stores-${stamp(d.from, zone)}-${stamp(d.to, zone)}-${zone}.csv`, lines.join("\n") + "\n", "text/csv");
   };
@@ -203,8 +224,8 @@ export function AbTest() {
         </div>
         {st?.found && (
           <div className="ops-stats ab-stats-3">
-            <Mini label="Shopper entries" value={num(row?.entries ?? 0)} note={`PDP, CART and OC${st.health ? ` · ${num(st.health)} health checks left out` : ""}`} />
-            <Mini label="Order confirmations (OC)" value={num(st.oc ?? 0)} note={st.abTest ? "store is in an A/B test" : "no A/B test info on its entries"} />
+            <Mini label="Shopper entries" value={num(row?.entries ?? 0)} note={`PDP, CART, COP and OC${st.health ? ` · ${num(st.health)} health checks left out` : ""}`} />
+            <Mini label="Order confirmations (OC)" value={num(st.oc ?? 0)} note="orders in this range" />
             <Mini label="OC with a bad session ID" value={<BadPct v={st.ocBadPct} />} note={`${num(st.ocBad ?? 0)} orders`} title="Order confirmations whose session ID can't be put in an A/B group" />
           </div>
         )}
@@ -222,7 +243,7 @@ export function AbTest() {
               <>
                 <h2 className="ab-h2">Session history index <span className="hint mono">{store}-session_history-*</span></h2>
                 <div className="ops-charts">
-                  {Object.entries(st.series ?? {}).filter(([page]) => page !== "COP").map(([page, values]) => (
+                  {Object.entries(st.series ?? {}).map(([page, values]) => (
                     <Chart key={page} title={PAGE_NAME[page] ?? page} sub={`entries ${stepText(d.step)}`} start={d.start} step={d.step} zone={zone} nowAt={nowAt}
                       series={page === "OC" && st.badOc ? [
                         { key: "all", label: "All", color: PAGE_COLOR.OC, values, area: true },
@@ -230,29 +251,35 @@ export function AbTest() {
                       ] : [{ key: "all", label: page, color: PAGE_COLOR[page] ?? "var(--accent)", values, area: true }]} />
                   ))}
                 </div>
-                <CheckTable title="Session ID check · session history" source="session" rows={(st.sessionCheck ?? []).filter((r) => r.page !== "COP")} onOpen={openIds}
+                <CheckTable title="Session ID check · session history" source="session" rows={st.sessionCheck ?? []} onOpen={openIds}
                   sub="Entries per page by session ID · a click on an OC count lists those orders" />
               </>
             )}
 
             <section className="card" style={{ overflow: "hidden" }}>
-              <CardHead title={`Stores · ${stores.length}`} sub="Every store with session entries in this range, busiest first · click a row to show that store"
+              <CardHead title={`Stores · ${stores.length}`} sub="Every store with session entries in this range · click a column to sort, a row to show that store, an OC bad percentage to list those orders"
                 right={<button type="button" className="btn btn-ghost btn-sm" onClick={exportStores} disabled={!stores.length}><Icon name="download" size={15} /> CSV</button>} />
               {stores.length === 0 ? <Empty title="No session entries in this range" /> : (
                 <div className="table-scroll" style={{ maxHeight: "none" }}>
                   <table className="table ops-table">
                     <thead><tr>
-                      <th>Store</th><th className="num">Entries</th><th className="num">PDP</th><th className="num">CART</th><th className="num">OC</th>
-                      <th className="num" title="Order confirmations with a bad session ID">OC bad</th>
+                      <Th k="store">Store</Th><Th k="entries">Entries</Th><Th k="PDP">PDP</Th><Th k="CART">CART</Th><Th k="COP">COP</Th><Th k="OC">OC</Th>
+                      <Th k="ocBadPct" title="Order confirmations with a bad session ID · click a percentage to list the orders">OC bad</Th>
                     </tr></thead>
                     <tbody>
                       {shownStores.map((s: AbStoreRow) => (
                         <tr key={s.store} className={`clickable ${store === s.store ? "selected" : ""}`} tabIndex={0} aria-selected={store === s.store}
                           onClick={() => set({ store: s.store, ids: null })} onKeyDown={(e) => { if (e.key === "Enter") set({ store: s.store, ids: null }); }}>
-                          <td><div className="nm">{s.store} {s.abTest && <Badge tone="blue">A/B test</Badge>}</div></td>
+                          <td><div className="nm">{s.store}</div></td>
                           <td className="num" style={{ fontWeight: 600 }}>{num(s.entries)}</td>
                           {PAGES.map((p) => <td key={p} className="num">{s.pages[p] ? num(s.pages[p]) : <span className="dim">0</span>}</td>)}
-                          <td className="num"><BadPct v={s.ocBadPct} n={s.ocBad} /></td>
+                          <td className="num">
+                            {s.ocBad ? (
+                              <button type="button" className="ab-link" title={`List the ${num(s.ocBad)} orders with a bad session ID`}
+                                onClick={(e) => { e.stopPropagation(); set({ store: s.store, ids: "session|OC|bad" }); }}
+                                onKeyDown={(e) => e.stopPropagation()}><BadPct v={s.ocBadPct} n={s.ocBad} /></button>
+                            ) : <BadPct v={s.ocBadPct} n={s.ocBad} />}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -328,35 +355,51 @@ function CheckTable({ title, sub, source, rows, onOpen, empty }: {
 }
 
 // ------------------------------------------------------------------ the list behind a count
+const SHOW = 500;                                   // rows read and drawn in the dialog
+const ALL_ROWS = 500_000;                           // Copy order IDs / CSV read every row (up to this)
+
 function IdDialog({ store, source, page, category, from, to, zone, onClose }: {
   store: string; source: AbSource; page: string; category: string; from: number; to: number; zone: ClockZone; onClose: () => void;
 }) {
   const toast = useToast();
   const q = useQuery({
     queryKey: ["abtest-ids", store, source, page, category, from, to],
-    queryFn: () => get<AbIds>("/abtest/ids", { store, source, page, category, from, to, limit: 2000 }),
+    queryFn: () => get<AbIds>("/abtest/ids", { store, source, page, category, from, to, limit: SHOW }),
     retry: false, staleTime: 60_000,
   });
+  const [busy, setBusy] = useState(false);
+  /** Every row (the dialog only reads the newest SHOW). */
+  const everything = async (): Promise<AbIds["rows"] | null> => {
+    if (!d) return null;
+    if (!d.truncated) return d.rows;
+    setBusy(true);
+    try { return (await get<AbIds>("/abtest/ids", { store, source, page, category, from: d.from, to: d.to, limit: ALL_ROWS })).rows; }
+    catch { toast?.("Couldn't read the full list"); return null; }
+    finally { setBusy(false); }
+  };
   const d = q.data;
   const what = category === "bad" ? "a bad session ID" : catLabel(category);
-  const csv = () => {
-    if (!d) return;
+  const csv = async () => {
+    const rows = await everything();
+    if (!rows) return;
     const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
     const lines = ["time,store,source,page,category,session_id,order_id,doc_id",
-      ...d.rows.map((r) => [localStamp(Date.parse(r.at), zone), store, source, r.page, r.category, r.sessionId, r.orderId, r.docId].map(esc).join(","))];
+      ...rows.map((r) => [localStamp(Date.parse(r.at), zone), store, source, r.page, r.category, r.sessionId, r.orderId, r.docId].map(esc).join(","))];
     downloadFile(`abtest-${store}-${source}-${page}-${category}-${stamp(from, zone)}-${stamp(to, zone)}.csv`, lines.join("\n") + "\n", "text/csv");
   };
   const copyOrders = async () => {
-    if (!d) return;
-    await copyText([...new Set(d.rows.map((r) => r.orderId).filter(Boolean))].join("\n"));
-    toast?.("Order IDs copied");
+    const rows = await everything();
+    if (!rows) return;
+    const ids = [...new Set(rows.map((r) => r.orderId).filter(Boolean))];
+    await copyText(ids.join("\n"));
+    toast?.(`${num(ids.length)} order IDs copied`);
   };
   return (
     <Dialog wide title={`${page} entries with ${what}`} onClose={onClose}
       subtitle={`${store} · ${source === "session" ? "session_history" : "cop-derrh (COP DI)"} · ${dateLabel(from, zone)} ${clock(from, zone)} – ${dateLabel(to, zone)} ${clock(to, zone)} ${zoneName(to, zone)}`}
       footer={<>
-        <button type="button" className="btn" onClick={copyOrders} disabled={!d?.rows.length}><Icon name="copy" size={15} /> Copy order IDs</button>
-        <button type="button" className="btn" onClick={csv} disabled={!d?.rows.length}><Icon name="download" size={15} /> CSV</button>
+        <button type="button" className="btn" onClick={copyOrders} disabled={!d?.rows.length || busy}><Icon name="copy" size={15} /> {busy ? "Reading…" : d?.truncated ? `Copy all ${num(d.total)} order IDs` : "Copy order IDs"}</button>
+        <button type="button" className="btn" onClick={csv} disabled={!d?.rows.length || busy}><Icon name="download" size={15} /> CSV</button>
         <button type="button" className="btn btn-primary" onClick={onClose}>Close</button>
       </>}>
       {q.isLoading ? <Loading what="Reading the list…" /> : q.error || !d ? <ErrorCallout error={q.error} /> : d.rows.length === 0 ? (
@@ -364,8 +407,8 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose }: {
       ) : (
         <>
           <p className="hint" style={{ margin: "0 0 10px" }}>
-            {num(d.total)} entries{d.truncated ? `; the newest ${num(d.rows.length)} are shown and in the CSV` : ""}.
-            {d.values.length > 1 && <> Values: {d.values.slice(0, 8).map((v) => `${v.value || "(empty)"} × ${num(v.count)}`).join(" · ")}{d.values.length > 8 ? " …" : ""}</>}
+            {num(d.total)} entries{d.truncated ? `; the newest ${num(d.rows.length)} are shown below. Copy order IDs and CSV have all of them.` : "."}
+            {d.values.length > 1 && d.values.length <= 10 && <> Values: {d.values.slice(0, 8).map((v) => `${v.value || "(empty)"} × ${num(v.count)}`).join(" · ")}{d.values.length > 8 ? " …" : ""}</>}
           </p>
           <div className="table-scroll" style={{ maxHeight: 460 }}>
             <table className="table ops-table">

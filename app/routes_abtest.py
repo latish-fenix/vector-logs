@@ -37,7 +37,7 @@ def ids(request: Request,
         source: str = Query("session", description="session (session_history) or cop (cop-derrh)"),
         page: str | None = Query(None, description="Page type, e.g. OC"),
         category: str | None = Query(None, description="NA, ORDER_LOOKUP_CALL, xyz123, empty, missing, numbers, uuid, other … or bad (all of them)"),
-        limit: int = Query(500, ge=1, le=5000),
+        limit: int = Query(500, ge=1, le=500_000),
         user: User = Depends(current_user)):
     return _ab(request).id_list(_ms(start), _ms(end), store, source, page or None, category or None, limit)
 
