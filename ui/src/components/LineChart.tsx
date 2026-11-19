@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 // Times are shown in IST, PST or EST (the page's switch). IST has no daylight saving (UTC + 5:30);
 // PST and EST turn into PDT and EDT in summer, so the offset is looked up for each time.
 export type ClockZone = "ist" | "pst" | "est";
@@ -192,6 +192,13 @@ export function LineChart({ start, step, series, height = 190, fmt, axisFmt, emp
 }) {
   const [ref, width] = useWidth<HTMLDivElement>(260);
   const [hover, setHover] = useState<number | null>(null);
+  // the tooltip's own width, so it can be kept inside the chart at both edges
+  const tipRef = useRef<HTMLDivElement>(null);
+  const [tipW, setTipW] = useState(240);
+  useLayoutEffect(() => {
+    const w = tipRef.current?.offsetWidth;
+    if (w && w !== tipW) setTipW(w);
+  });
   const n = Math.max(0, ...series.map((s) => s.values.length));
   const top = useMemo(() => Math.max(0, ...series.flatMap((s) => s.values.filter((v): v is number => v !== null))), [series]);
   const any = series.some((s) => s.values.some((v) => v !== null && v !== 0));
@@ -294,7 +301,7 @@ export function LineChart({ start, step, series, height = 190, fmt, axisFmt, emp
         {!any && !legend && <text x={PAD.l + plotW / 2} y={PAD.t + plotH / 2} textAnchor="middle" className="histo-axis">{empty ?? "No data"}</text>}
       </svg>
       {hover !== null && (
-        <div className="histo-tip" style={{ left: Math.min(Math.max(x(hover), 110), width - 110), top: legend ? 34 : 8 }}>
+        <div ref={tipRef} className="histo-tip" style={{ left: Math.max(0, Math.min(x(hover) - tipW / 2, width - tipW)), top: legend ? 34 : 8, transform: "none", maxWidth: width }}>
           <div className="t">
             {hoverLabel(start + hover * step)}{step > 60_000 ? `–${clock(start + (hover + 1) * step, zone)}` : ""} {zoneName(start + hover * step, zone)}
             <span style={{ opacity: 0.7 }}>{ZONES.filter((z) => z !== zone).map((z) => ` · ${clock(start + hover * step, z)} ${zoneName(start + hover * step, z)}`).join("")}</span>

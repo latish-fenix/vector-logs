@@ -70,8 +70,9 @@ class AbTestService:
         self.now = now
         self.prefix = settings.abtest_prefix
         src = logs.source
-        self.counts = MetricFiles(settings, src, self.prefix + "counts/", "abtest-counts")
-        self.ids = MetricFiles(settings, src, self.prefix + "ids/", "abtest-ids")
+        # a backfill can rewrite finished files: checked again every 5 minutes
+        self.counts = MetricFiles(settings, src, self.prefix + "counts/", "abtest-counts", revalidate_seconds=300)
+        self.ids = MetricFiles(settings, src, self.prefix + "ids/", "abtest-ids", revalidate_seconds=300)
         self.s3 = getattr(src, "s3", None)
         self.bucket = getattr(src, "bucket", None)
         self.local_dir = settings.logs_local_dir if self.s3 is None else None

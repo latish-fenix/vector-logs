@@ -301,8 +301,12 @@ class MetricFiles:
     """Local copies of the per-stage metric files. Finished 4-hour files are kept; the one still being
     written is read from S3 again when the copy is older than a minute."""
 
-    def __init__(self, settings: Settings, logs_source, prefix: str | None = None, cache_name: str = "apigw"):
+    def __init__(self, settings: Settings, logs_source, prefix: str | None = None, cache_name: str = "apigw",
+                 revalidate_seconds: int = 0):
         self.prefix = settings.ops_metrics_prefix if prefix is None else prefix
+        # > 0: a finished file is still checked (HEAD) this often and copied again when S3 has a newer one
+        # (files a backfill can rewrite after they were finished)
+        self.revalidate_seconds = revalidate_seconds
         self.root = Path(settings.cache_dir) / "ops" / cache_name
         self.s3 = getattr(logs_source, "s3", None)
         self.bucket = getattr(logs_source, "bucket", None)
@@ -336,7 +340,15 @@ class MetricFiles:
             try:
                 st = path.stat()
                 if final and st.st_mtime * 1000 > start + BLOCK_HOURS * 3600_000 + SETTLE_MS:
-                    return str(path)              # copied after the file was finished: never changes again
+                    if not self.revalidate_seconds or time.time() - st.st_mtime < self.revalidate_seconds:
+                        return str(path)          # copied after the file was finished: never changes again
+                    try:
+                        head = self.s3.head_object(Bucket=self.bucket, Key=key)
+                        if head["LastModified"].timestamp() <= st.st_mtime:
+                            os.utime(path)        # unchanged: check again later
+                            return str(path)
+                    except (ClientError, EndpointConnectionError):
+                        return str(path)
                 if time.time() - st.st_mtime < REFRESH_SECONDS:
                     return str(path)
                 have = True

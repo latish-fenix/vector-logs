@@ -161,3 +161,39 @@ def test_api(tmp_path, data, monkeypatch):
     assert res.status_code == 200 and res.json()["total"] == 3
     assert c.get("/api/v1/abtest/ids", params={"from": A, "to": B, "store": SPO, "source": "x"}, headers=ROOT_H).status_code == 400
     assert c.get("/api/v1/abtest/status", headers=ROOT_H).json()["collector"]["ok"] is True
+
+
+def test_finished_files_are_copied_again_when_a_backfill_rewrote_them(tmp_path):
+    """A finished 4-hour file is kept locally, but with revalidate_seconds it is checked (HEAD) again and
+    copied anew when S3 has a newer one (a backfill rewrote it after the page first read it)."""
+    import os
+    import time as _time
+    from datetime import date
+    from types import SimpleNamespace
+    from app.ops import MetricFiles
+
+    class S3:
+        def __init__(self):
+            self.body, self.modified, self.gets, self.heads = b"v1", datetime(2026, 11, 10, tzinfo=UTC), 0, 0
+
+        def get_object(self, Bucket, Key):
+            self.gets += 1
+            return {"Body": io.BytesIO(self.body)}
+
+        def head_object(self, Bucket, Key):
+            self.heads += 1
+            return {"LastModified": self.modified}
+
+    s3 = S3()
+    s = make_settings(tmp_path, tmp_path / "logs")
+    f = MetricFiles(s, SimpleNamespace(s3=s3, bucket="b"), "es-ab-test/counts/", "t", revalidate_seconds=300)
+    now = MS(datetime(2026, 11, 19, 12, tzinfo=UTC))
+    p = f.get(date(2026, 11, 12), 0, now)
+    assert Path(p).read_bytes() == b"v1" and s3.gets == 1
+    assert f.get(date(2026, 11, 12), 0, now) == p and s3.heads == 0           # finished, checked a moment ago
+    old = _time.time() - 600
+    os.utime(p, (old, old))
+    assert f.get(date(2026, 11, 12), 0, now) == p and s3.heads == 1 and s3.gets == 1   # unchanged in S3
+    os.utime(p, (old, old))
+    s3.body, s3.modified = b"v2", datetime.now(UTC)                           # the backfill rewrote it
+    assert Path(f.get(date(2026, 11, 12), 0, now)).read_bytes() == b"v2" and s3.gets == 2
