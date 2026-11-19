@@ -194,11 +194,25 @@ export function LineChart({ start, step, series, height = 190, fmt, axisFmt, emp
   const [hover, setHover] = useState<number | null>(null);
   // the tooltip's own width, so it can be kept inside the chart at both edges
   const tipRef = useRef<HTMLDivElement>(null);
-  const [tipW, setTipW] = useState(240);
+  const [tip, setTip] = useState({ w: 240, h: 60 });
+  const tipW = tip.w;
   useLayoutEffect(() => {
-    const w = tipRef.current?.offsetWidth;
-    if (w && w !== tipW) setTipW(w);
+    const el = tipRef.current;
+    if (el && (el.offsetWidth !== tip.w || el.offsetHeight !== tip.h)) setTip({ w: el.offsetWidth, h: el.offsetHeight });
   });
+  /** Away from the line: at the bottom of the plot when the hovered values are in its top half, else at the top. */
+  const tipTop = (i: number) => {
+    const svgTop = legend ? 26 : 0;
+    const vals = series.map((s) => s.values[i]).filter((v): v is number => v !== null && v !== undefined);
+    const high = vals.length > 0 && y(Math.max(...vals)) < PAD.t + plotH / 2;
+    return high ? svgTop + Math.max(8, PAD.t + plotH - tip.h - 4) : svgTop + 8;
+  };
+  /** Beside the hovered time (right of it, or left when there is no room), never over it, inside the chart. */
+  const tipLeft = (hx: number) => {
+    const gap = 14;
+    const left = hx + gap + tipW <= width ? hx + gap : hx - gap - tipW;
+    return Math.max(0, Math.min(left, width - tipW));
+  };
   const n = Math.max(0, ...series.map((s) => s.values.length));
   const top = useMemo(() => Math.max(0, ...series.flatMap((s) => s.values.filter((v): v is number => v !== null))), [series]);
   const any = series.some((s) => s.values.some((v) => v !== null && v !== 0));
@@ -301,7 +315,7 @@ export function LineChart({ start, step, series, height = 190, fmt, axisFmt, emp
         {!any && !legend && <text x={PAD.l + plotW / 2} y={PAD.t + plotH / 2} textAnchor="middle" className="histo-axis">{empty ?? "No data"}</text>}
       </svg>
       {hover !== null && (
-        <div ref={tipRef} className="histo-tip" style={{ left: Math.max(0, Math.min(x(hover) - tipW / 2, width - tipW)), top: legend ? 34 : 8, transform: "none", maxWidth: width }}>
+        <div ref={tipRef} className="histo-tip" style={{ left: tipLeft(x(hover)), top: tipTop(hover), transform: "none", maxWidth: width }}>
           <div className="t">
             {hoverLabel(start + hover * step)}{step > 60_000 ? `–${clock(start + (hover + 1) * step, zone)}` : ""} {zoneName(start + hover * step, zone)}
             <span style={{ opacity: 0.7 }}>{ZONES.filter((z) => z !== zone).map((z) => ` · ${clock(start + hover * step, z)} ${zoneName(start + hover * step, z)}`).join("")}</span>
