@@ -291,3 +291,21 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .ab-sid { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ab-variant { word-break: break-word; }
 .ops-range-card .ops-range-top .ops-toolbar { margin: 0; }
+
+.ab-ua-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 1100px) { .ab-ua-grid { grid-template-columns: minmax(0, 1fr); } }
+.ab-ua-legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); padding: 0 16px 8px; }
+.ab-ua-legend i { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.ab-ua-legend i.e, .ab-ua-bar span { background: color-mix(in srgb, var(--accent) 28%, var(--surface)); }
+.ab-ua-legend i.b, .ab-ua-bar b { background: var(--st-5xx); }
+.ab-ua-barcell { width: 38%; }
+.ab-ua-bar { position: relative; height: 14px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); min-width: 90px; }
+.ab-ua-bar span, .ab-ua-bar b { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
+.ab-ua-bar b { border-radius: 4px 0 0 4px; opacity: 0.85; }
+.ab-tag { display: inline-block; margin-left: 6px; font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
+.ab-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.ab-chip { font-size: 12px; background: var(--surface-2); border-radius: 999px; padding: 3px 10px; color: var(--text); }
+.ab-chip b { color: var(--danger-text); }
+.dialog.wide:has(.ab-ids) { width: 1100px; }
+.ab-ids td { white-space: nowrap; }
+.ab-ids .ab-sid { max-width: 300px; }

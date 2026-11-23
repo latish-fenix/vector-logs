@@ -80,8 +80,8 @@ def agg(windows):
 
 
 class FakeES:
-    def __init__(self, session=None, cop=None, hits=None):
-        self.session, self.cop, self.hits = session or {}, cop or {}, hits or {}
+    def __init__(self, session=None, cop=None, hits=None, ua=None):
+        self.session, self.cop, self.hits, self.ua = session or {}, cop or {}, hits or {}, ua or {}
         self.calls = []
 
     def __call__(self, cred, pattern, body, what):
@@ -90,6 +90,16 @@ class FakeES:
         r = next(iter(rng.values()))
         a, b = ab.from_ms(r["gte"]), ab.from_ms(r["lt"])
         self.calls.append((name, body["size"], a, b))
+        if body["size"] == 0 and "idx" in body["aggs"]:          # browser / device counts
+            field = body["aggs"]["idx"]["aggs"]["pt"]["aggs"]["v"]["terms"]["field"]
+            dim = next(d for d, f in ab.UA_DIMS.items() if field.endswith("." + f + ".keyword"))
+            idx = {}
+            for (ix, page), (total, total_bad, vals) in self.ua.get((a, dim), {}).items():
+                idx.setdefault(ix, []).append({"key": page, "doc_count": total, "bad": {"doc_count": total_bad},
+                                               "v": {"buckets": [{"key": k, "doc_count": n, "bad": {"doc_count": bd}}
+                                                                 for k, n, bd in vals]}})
+            return {"_shards": {"failed": 0}, "aggregations": {"idx": {"buckets": [
+                {"key": ix, "doc_count": 0, "pt": {"buckets": pts}} for ix, pts in idx.items()]}}}
         if body["size"] == 0:
             src = self.session if name == "session" else self.cop
             return agg({m: v for m, v in src.items() if a <= m < b})
@@ -98,7 +108,9 @@ class FakeES:
 
 
 def hit(name, index, at, sid, page, order, _id="d1"):
-    src = {"sessionId": sid, "pageType": page, "orderInfo": {"orderId": order}, "orderId": None} if name == "session" else \
+    src = {"sessionId": sid, "pageType": page, "orderInfo": {"orderId": order}, "orderId": None,
+           "request": {"userAgentInfo": {"browserName": "Instagram", "osName": "iOS", "osVersion": "??", "deviceName": "Apple iPhone",
+                                         "deviceBrand": "Apple", "webviewAppName": "Instagram"}}} if name == "session" else \
           {"sessionTrackId": sid, "request": {"pageType": page, "orderId": order}, "orderId": order}
     return {"_index": index, "_id": _id, "_source": src, "sort": [ab.ms(at)]}
 
@@ -160,7 +172,8 @@ def test_bad_ids_rows(monkeypatch):
     assert left == 0
     assert rows == [{"minute": "2026-11-19T10:05Z", "source": "session", "store": SPO, "page": "OC",
                      "category": "ORDER_LOOKUP_CALL", "session_id": "ORDER_LOOKUP_CALL", "order_id": "19004270313532",
-                     "doc_id": "d1", "at": "2026-11-19T10:05:40Z"}]
+                     "doc_id": "d1", "at": "2026-11-19T10:05:40Z", "browser": "Instagram", "os": "iOS",
+                     "device": "Apple iPhone", "brand": "Apple", "app": "Instagram"}]
     rows, _ = ab.bad_ids({}, "cop", T, T + dt.timedelta(minutes=15))
     assert rows[0]["page"] == "COP" and rows[0]["order_id"] == "7798832857326" and rows[0]["category"] == "xyz123"
 
@@ -253,3 +266,34 @@ def test_another_cluster_gets_its_own_files(monkeypatch):
         assert ab.PREFIX == "es-ab-test/"
     finally:
         ab.CLUSTER, ab.ENV_FILE, ab.STATE_FILE, ab.PREFIX = old
+
+
+def test_ua_counts_keep_the_top_values_and_add_the_rest_as_other(monkeypatch):
+    h = T
+    es = FakeES(ua={(h, "browser"): {(SH, "COP"): (100, 30, [("Safari", 50, 20), ("Instagram", 30, 9)]),
+                                     (f"{SPO}-session_history-2026.10", "cop"): (10, 1, [("Safari", 10, 1)])},
+                    (h, "os"): {(SH, "COP"): (100, 30, [("iOS", 100, 30)])}})
+    monkeypatch.setattr(ab, "search", es)
+    rows = {(r["page"], r["dim"], r["value"]): (r["entries"], r["bad"]) for r in ab.ua_counts({}, h, h + dt.timedelta(hours=1))}
+    assert rows[("COP", "browser", "Safari")] == (60, 21)               # two indexes of one store, cop = COP
+    assert rows[("COP", "browser", "_other")] == (20, 1)                # 100 - 50 - 30 entries, 30 - 20 - 9 bad
+    assert rows[("COP", "os", "iOS")] == (100, 30) and ("COP", "os", "_other") not in rows
+    assert len([c for c in es.calls if c[1] == 0]) == len(ab.UA_DIMS)    # one query per dimension
+    q = ab.ua_query("app", h, h + dt.timedelta(hours=1))
+    assert q["aggs"]["idx"]["aggs"]["pt"]["aggs"]["v"]["terms"]["field"] == "request.userAgentInfo.webviewAppName.keyword"
+    assert {"prefix": {"sessionId.keyword": "fenix-health-"}} in q["query"]["bool"]["must_not"]
+
+
+def test_run_writes_hourly_browser_rows_and_rewrites_the_current_hour(monkeypatch):
+    es = FakeES(ua={(T, "browser"): {(SH, "OC"): (10, 2, [("Safari", 10, 2)])}})
+    monkeypatch.setattr(ab, "search", es)
+    s3 = FakeS3()
+    st, state = ab.run(s3, lambda: {}, now=T + dt.timedelta(minutes=15, seconds=20), state={})
+    rows = s3.rows("ua/dt=2026-11-19/part-08.csv.gz")
+    assert rows == [{"minute": "2026-11-19T10:00Z", "store": SPO, "page": "OC", "dim": "browser", "value": "Safari",
+                     "entries": "10", "bad": "2"}]
+    assert st["counted"]["uaRows"] == 1
+    ab.run(s3, lambda: {}, now=T + dt.timedelta(minutes=35), state=state)       # same hour again: replaced, not added
+    assert len(s3.rows("ua/dt=2026-11-19/part-08.csv.gz")) == 1
+    ua_spans = sorted({(c[2], c[3]) for c in es.calls if c[0] == "session" and c[1] == 0})
+    assert (T, T + dt.timedelta(minutes=35)) in ua_spans                 # the current hour up to the run, from its start

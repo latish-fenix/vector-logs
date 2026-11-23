@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
-import { get, type AbIds, type AbPageRow, type AbSource, type AbStoreRow, type AbSummary } from "../api";
+import { get, type AbIds, type AbPageRow, type AbSource, type AbStoreRow, type AbSummary, type AbUaDim, type AbUaItem } from "../api";
 import { Icon } from "../components/icons";
 import { clock, clockZ, dateLabel, dayIn, Legend, LineChart, localStamp, offsetMs, useHidden, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
@@ -175,8 +175,10 @@ export function AbTest() {
       </button>
     </th>
   );
-  const openIds = (source: AbSource, page: string, category: string) => set({ ids: `${source}|${page}|${category}` });
-  const [idSource, idPage, idCat] = (ids ?? "").split("|");
+  const openIds = (source: AbSource, page: string, category: string, dim?: AbUaDim, value?: string) =>
+    set({ ids: [source, page, category, ...(dim && value !== undefined ? [dim, value] : [])].join("|") });
+  const [idSource, idPage, idCat, idDim, ...idRest] = (ids ?? "").split("|");
+  const idValue = idRest.length ? idRest.join("|") : undefined;
 
   const exportStores = () => {
     if (!d) return;
@@ -253,6 +255,7 @@ export function AbTest() {
                 </div>
                 <CheckTable title="Session ID check · session history" source="session" rows={st.sessionCheck ?? []} onOpen={openIds}
                   sub="Entries per page by session ID · a click on a count lists those entries with their session ID and order ID" />
+                {st.ua && <BrowserSection ua={st.ua} store={store} zone={zone} onOpen={(page, dim, value) => openIds("session", page, "bad", dim, value)} />}
               </>
             )}
 
@@ -293,7 +296,8 @@ export function AbTest() {
           </div>
         )}
       {ids && store && (idSource === "session" || idSource === "cop") && (
-        <IdDialog store={store} source={idSource} page={idPage} category={idCat} from={from} to={to} zone={zone} onClose={() => set({ ids: null })} />
+        <IdDialog store={store} source={idSource} page={idPage} category={idCat} from={from} to={to} zone={zone} onClose={() => set({ ids: null })}
+          dim={(["browser", "os", "brand", "app"] as string[]).includes(idDim) ? idDim as AbUaDim : undefined} value={idValue} />
       )}
     </Page>
   );
@@ -354,17 +358,104 @@ function CheckTable({ title, sub, source, rows, onOpen, empty }: {
   );
 }
 
+// ------------------------------------------------------------------ browser / device of the shoppers
+const UA_TITLE: Record<AbUaDim, string> = { browser: "Browser", os: "OS", brand: "Device brand", app: "In-app browser" };
+const UA_SUB: Record<AbUaDim, string> = {
+  browser: "Top 10 by entries, the rest in Other", os: "Operating system of the shopper",
+  brand: "Device maker (the full device name is in the list)", app: "Shoppers inside an app (webview) vs a normal browser",
+};
+/** A browser / device value as shown, and a tag for the ones that are not shoppers. */
+function uaLabel(dim: AbUaDim | string, v: string): { text: string; tag?: string } {
+  if (v === "_other") return { text: "Other" };
+  if (v === "(unknown)" || v === "") return { text: "Unknown", tag: "no browser data" };
+  if (dim === "browser" && /^java$/i.test(v)) return { text: "Server call (Java)", tag: "not a shopper" };
+  if (dim === "os" && /^cloud$/i.test(v)) return { text: "Cloud (server)", tag: "not a shopper" };
+  if (dim === "app" && /^unknown$/i.test(v)) return { text: "None (normal browser)" };
+  if (dim === "brand" && /^unknown$/i.test(v)) return { text: "Unknown / PC" };
+  return { text: v };
+}
+
+function BrowserSection({ ua, store, zone, onOpen }: {
+  ua: NonNullable<NonNullable<AbSummary["store"]>["ua"]>; store: string; zone: ClockZone;
+  onOpen: (page: string, dim: AbUaDim, value: string) => void;
+}) {
+  const pages = Object.keys(ua.pages);
+  // the page with the most bad session IDs first (usually COP or OC)
+  const badOf = (p: string) => (ua.pages[p]?.browser ?? []).reduce((t, x) => t + x.bad, 0);
+  const best = [...pages].sort((a, b) => badOf(b) - badOf(a))[0];
+  const [pick, setPick] = useState<string | null>(null);
+  const page = pick && pages.includes(pick) ? pick : best;
+  return (
+    <>
+      <h2 className="ab-h2">Bad session IDs by browser <span className="hint mono">{store}-session_history-*{ua.from ? ` · counted per hour, ${dateLabel(ua.from, zone)} ${clock(ua.from, zone)} – ${ua.to ? `${dateLabel(ua.to, zone)} ${clock(ua.to, zone)}` : ""}` : ""}</span></h2>
+      <section className="card">
+        <CardHead title="Which browsers lose the session ID" sub="Entries and bad session IDs per browser for the selected page · click a bad count to list those entries"
+          right={pages.length > 0 && (
+            <div className="tabs" role="group" aria-label="Page">
+              {PAGES.filter((p) => pages.includes(p)).concat(pages.filter((p) => !PAGES.includes(p))).map((p) => (
+                <button key={p} type="button" className="tab" aria-pressed={page === p} aria-selected={page === p} onClick={() => setPick(p)}>{p}</button>
+              ))}
+            </div>
+          )} />
+        {!pages.length && <Empty title="No browser counts in this range yet">They are counted per hour from the collector's next run on.</Empty>}
+      </section>
+      {page && (
+        <div className="ab-ua-grid">
+          {(["browser", "os", "brand", "app"] as AbUaDim[]).map((dim) => (
+            <UaCard key={dim} dim={dim} items={ua.pages[page]?.[dim] ?? []} onOpen={(v) => onOpen(page, dim, v)} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function UaCard({ dim, items, onOpen }: { dim: AbUaDim; items: AbUaItem[]; onOpen: (value: string) => void }) {
+  const top = Math.max(1, ...items.map((x) => x.entries));
+  return (
+    <section className="card" style={{ overflow: "hidden" }}>
+      <CardHead title={`Bad session IDs by ${dim === "os" ? "OS" : UA_TITLE[dim].toLowerCase()}`} sub={UA_SUB[dim]} />
+      <div className="ab-ua-legend" aria-hidden="true"><span><i className="e" />Entries</span><span><i className="b" />Bad session ID</span></div>
+      {items.length === 0 ? <Empty title="No entries" /> : (
+        <table className="table ops-table ab-ua">
+          <thead><tr><th>{UA_TITLE[dim]}</th><th aria-hidden="true" /><th className="num">Entries</th><th className="num">Bad</th><th className="num">Bad %</th></tr></thead>
+          <tbody>
+            {items.map((x) => {
+              const l = uaLabel(dim, x.value);
+              const w = (100 * x.entries) / top;
+              const can = x.bad > 0 && x.value !== "_other";
+              const open = () => onOpen(x.value);
+              return (
+                <tr key={x.value}>
+                  <td><div className="nm">{l.text}{l.tag && <span className="ab-tag">{l.tag}</span>}</div></td>
+                  <td className="ab-ua-barcell" aria-hidden="true">
+                    <div className="ab-ua-bar"><span style={{ width: `${w}%` }} /><b style={{ width: `${x.entries ? (w * x.bad) / x.entries : 0}%` }} /></div>
+                  </td>
+                  <td className="num">{num(x.entries)}</td>
+                  <td className="num">{can ? <button type="button" className="ab-link" onClick={open} title={`List the ${num(x.bad)} entries with a bad session ID`}>{num(x.bad)}</button> : num(x.bad)}</td>
+                  <td className="num">{can ? <button type="button" className="ab-link" onClick={open}><BadPct v={x.pct} /></button> : <BadPct v={x.pct} />}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
 // ------------------------------------------------------------------ the list behind a count
 const SHOW = 500;                                   // rows read and drawn in the dialog
 const ALL_ROWS = 500_000;                           // Copy order IDs / CSV read every row (up to this)
 
-function IdDialog({ store, source, page, category, from, to, zone, onClose }: {
+function IdDialog({ store, source, page, category, from, to, zone, onClose, dim, value }: {
   store: string; source: AbSource; page: string; category: string; from: number; to: number; zone: ClockZone; onClose: () => void;
+  dim?: AbUaDim; value?: string;
 }) {
   const toast = useToast();
   const q = useQuery({
-    queryKey: ["abtest-ids", store, source, page, category, from, to],
-    queryFn: () => get<AbIds>("/abtest/ids", { store, source, page, category, from, to, limit: SHOW }),
+    queryKey: ["abtest-ids", store, source, page, category, from, to, dim, value],
+    queryFn: () => get<AbIds>("/abtest/ids", { store, source, page, category, from, to, limit: SHOW, dim, value: dim ? value : undefined }),
     retry: false, staleTime: 60_000,
   });
   const [busy, setBusy] = useState(false);
@@ -373,18 +464,20 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose }: {
     if (!d) return null;
     if (!d.truncated) return d.rows;
     setBusy(true);
-    try { return (await get<AbIds>("/abtest/ids", { store, source, page, category, from: d.from, to: d.to, limit: ALL_ROWS })).rows; }
+    try { return (await get<AbIds>("/abtest/ids", { store, source, page, category, from: d.from, to: d.to, limit: ALL_ROWS, dim, value: dim ? value : undefined })).rows; }
     catch { toast?.("Couldn't read the full list"); return null; }
     finally { setBusy(false); }
   };
   const d = q.data;
   const what = category === "bad" ? "a bad session ID" : catLabel(category);
+  const by = dim && value !== undefined ? ` · ${UA_TITLE[dim]}: ${uaLabel(dim, value).text}` : "";
   const csv = async () => {
     const rows = await everything();
     if (!rows) return;
     const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
-    const lines = ["time,store,source,page,category,session_id,order_id,doc_id",
-      ...rows.map((r) => [localStamp(Date.parse(r.at), zone), store, source, r.page, r.category, r.sessionId, r.orderId, r.docId].map(esc).join(","))];
+    const lines = ["time,store,source,page,category,session_id,order_id,doc_id,browser,os,device,brand,in_app",
+      ...rows.map((r) => [localStamp(Date.parse(r.at), zone), store, source, r.page, r.category, r.sessionId, r.orderId, r.docId,
+        r.browser ?? "", r.os ?? "", r.device ?? "", r.brand ?? "", r.app ?? ""].map(esc).join(","))];
     downloadFile(`abtest-${store}-${source}-${page}-${category}-${stamp(from, zone)}-${stamp(to, zone)}.csv`, lines.join("\n") + "\n", "text/csv");
   };
   const copyOrders = async () => {
@@ -396,7 +489,7 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose }: {
     toast?.(`${num(ids.length)} order IDs copied`);
   };
   return (
-    <Dialog wide title={`${page} entries with ${what}`} onClose={onClose}
+    <Dialog wide title={`${page} entries with ${what}${by}`} onClose={onClose}
       subtitle={`${store} · ${source === "session" ? "session_history" : "cop-derrh (COP DI)"} · ${dateLabel(from, zone)} ${clock(from, zone)} – ${dateLabel(to, zone)} ${clock(to, zone)} ${zoneName(to, zone)}`}
       footer={<>
         <button type="button" className="btn" onClick={copyOrders} disabled={!d?.rows.length || busy}><Icon name="copy" size={15} /> {busy ? "Reading…" : d?.truncated ? `Copy all ${num(d.total)} order IDs` : "Copy order IDs"}</button>
@@ -407,13 +500,19 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose }: {
         <Empty title="No entries listed">The list starts when the collector started writing it; counts from before can't be listed.</Empty>
       ) : (
         <>
+          {d.mix && (d.mix.browser.length > 0 || d.mix.os.length > 0) && (
+            <div className="ab-chips">
+              {d.mix.browser.slice(0, 3).map((m, i) => <span key={`b${m.value}`} className="ab-chip">{i === 0 ? "Browser: " : ""}{uaLabel("browser", m.value).text} <b>{pct(m.pct, 0)}</b></span>)}
+              {d.mix.os.slice(0, 2).map((m, i) => <span key={`o${m.value}`} className="ab-chip">{i === 0 ? "OS: " : ""}{uaLabel("os", m.value).text} <b>{pct(m.pct, 0)}</b></span>)}
+            </div>
+          )}
           <p className="hint" style={{ margin: "0 0 10px" }}>
             {num(d.total)} entries{d.truncated ? `; the newest ${num(d.rows.length)} are shown below. Copy order IDs and CSV have all of them.` : "."}
             {d.values.length > 1 && d.values.length <= 10 && <> Values: {d.values.slice(0, 8).map((v) => `${v.value || "(empty)"} × ${num(v.count)}`).join(" · ")}{d.values.length > 8 ? " …" : ""}</>}
           </p>
-          <div className="table-scroll" style={{ maxHeight: 460 }}>
+          <div className="table-scroll ab-ids" style={{ maxHeight: 460 }}>
             <table className="table ops-table">
-              <thead><tr><th>Time</th><th>Order ID</th><th>Session ID</th><th>Kind</th></tr></thead>
+              <thead><tr><th>Time</th><th>Order ID</th><th>Session ID</th><th>Browser</th><th>OS</th><th>Device</th><th>In-app</th></tr></thead>
               <tbody>
                 {d.rows.map((r, i) => {
                   const t = Date.parse(r.at);
@@ -421,8 +520,12 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose }: {
                     <tr key={`${r.docId}${i}`}>
                       <td className="nowrap">{clock(t, zone)} {zoneName(t, zone)}<span className="hint"> · {dateLabel(t, zone)}</span></td>
                       <td className="mono">{r.orderId || <span className="dim">—</span>}</td>
-                      <td className="mono ab-sid" title={r.sessionId}>{r.sessionId === "" ? <span className="dim">(empty)</span> : r.sessionId}</td>
-                      <td>{catLabel(r.category)}</td>
+                      <td className="mono ab-sid" title={r.sessionId}>{r.sessionId === "" ? <span className="dim">(empty)</span> : r.sessionId}
+                        {r.sessionId !== r.category && <span className="hint"> · {catLabel(r.category)}</span>}</td>
+                      <td>{r.browser ? uaLabel("browser", r.browser).text : <span className="dim">—</span>}</td>
+                      <td>{r.os || <span className="dim">—</span>}</td>
+                      <td>{r.device || r.brand || <span className="dim">—</span>}</td>
+                      <td>{r.app && !/^unknown$/i.test(r.app) ? r.app : <span className="dim">—</span>}</td>
                     </tr>
                   );
                 })}

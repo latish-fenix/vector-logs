@@ -197,3 +197,47 @@ def test_finished_files_are_copied_again_when_a_backfill_rewrote_them(tmp_path):
     os.utime(p, (old, old))
     s3.body, s3.modified = b"v2", datetime.now(UTC)                           # the backfill rewrote it
     assert Path(f.get(date(2026, 11, 12), 0, now)).read_bytes() == b"v2" and s3.gets == 2
+
+
+UA = ["minute", "store", "page", "dim", "value", "entries", "bad"]
+IDS_NEW = IDS + ["browser", "os", "device", "brand", "app"]
+
+
+def test_browser_breakdown_and_lists_by_browser(tmp_path, data):
+    def u(m, page, dim, value, n, bad):
+        return dict(minute=m, store=SPO, page=page, dim=dim, value=value, entries=n, bad=bad)
+    write(data, "ua", UA, [
+        u("2026-11-19T09:00Z", "COP", "browser", "Safari", 100, 20), u("2026-11-19T10:00Z", "COP", "browser", "Safari", 50, 10),
+        u("2026-11-19T10:00Z", "COP", "browser", "Instagram", 40, 16), u("2026-11-19T10:00Z", "COP", "browser", "_other", 5, 1),
+        u("2026-11-19T10:00Z", "COP", "app", "Instagram", 40, 16), u("2026-11-19T10:00Z", "OC", "os", "iOS", 9, 1),
+        dict(minute="2026-11-19T10:00Z", store=BOM, page="OC", dim="browser", value="Java", entries=20, bad=20)])
+    # a newer bad-ID file with browser columns (04:00 block) next to the older one without them (08:00 block)
+    write(data, "ids", IDS_NEW, [
+        dict(minute="2026-11-19T04:30Z", source="session", store=SPO, page="COP", category="NA", session_id="NA",
+             order_id="", doc_id="x1", at="2026-11-19T04:31:00Z", browser="Instagram", os="iOS", device="Apple iPhone",
+             brand="Apple", app="Instagram"),
+        dict(minute="2026-11-19T04:35Z", source="session", store=SPO, page="COP", category="NA", session_id="NA",
+             order_id="", doc_id="x2", at="2026-11-19T04:36:00Z", browser="Safari", os="iOS", device="Apple iPhone",
+             brand="Apple", app="")])
+    s = make_settings(tmp_path, data)
+    svc = AbTestService(s, LogService(s), now=lambda: NOW)
+    a = MS(datetime(2026, 11, 19, 4, 0, tzinfo=UTC))
+    ua = svc.summary(a, B, "UTC", SPO)["store"]["ua"]
+    cop = {x["value"]: x for x in ua["pages"]["COP"]["browser"]}
+    assert (cop["Safari"]["entries"], cop["Safari"]["bad"], cop["Safari"]["pct"]) == (150, 30, 20.0)
+    assert cop["Instagram"]["pct"] == 40.0 and cop["_other"]["entries"] == 5
+    assert [x["value"] for x in ua["pages"]["COP"]["browser"]] == ["Safari", "Instagram", "_other"]
+    assert ua["pages"]["COP"]["os"] == [] and ua["pages"]["OC"]["os"][0]["value"] == "iOS"
+    assert ua["from"] == MS(datetime(2026, 11, 19, 9, tzinfo=UTC)) and ua["to"] == MS(datetime(2026, 11, 19, 11, tzinfo=UTC))
+    # lists: old and new files together, browser columns filled where known, filter by browser
+    x = svc.id_list(a, B, SPO, "session", None, "bad")
+    assert x["total"] == 5 and x["rows"][-1]["browser"] == "Instagram" and x["rows"][0]["browser"] == ""
+    assert x["mix"]["browser"] == [{"value": "Instagram", "count": 1, "pct": 50.0}, {"value": "Safari", "count": 1, "pct": 50.0}]
+    y = svc.id_list(a, B, SPO, "session", "COP", "bad", dim="browser", value="Safari")
+    assert [r["docId"] for r in y["rows"]] == ["x2"] and y["rows"][0]["os"] == "iOS"
+    z = svc.id_list(a, B, SPO, "session", "COP", "bad", dim="app", value="(unknown)")
+    assert [r["docId"] for r in z["rows"]] == ["x2"]                    # no in-app value = (unknown)
+    with pytest.raises(Exception):
+        svc.id_list(a, B, SPO, "session", "COP", "bad", dim="browser", value="_other")
+    with pytest.raises(Exception):
+        svc.id_list(a, B, SPO, "session", "COP", "bad", dim="nope", value="x")

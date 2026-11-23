@@ -38,8 +38,11 @@ def ids(request: Request,
         page: str | None = Query(None, description="Page type, e.g. OC"),
         category: str | None = Query(None, description="NA, ORDER_LOOKUP_CALL, xyz123, empty, missing, numbers, uuid, other … or bad (all of them)"),
         limit: int = Query(500, ge=1, le=500_000),
+        dim: str | None = Query(None, description="browser, os, brand or app: only entries with this browser / device value"),
+        value: str | None = Query(None, description="The value of `dim` ((unknown) = no browser data)"),
         user: User = Depends(current_user)):
-    return _ab(request).id_list(_ms(start), _ms(end), store, source, page or None, category or None, limit)
+    return _ab(request).id_list(_ms(start), _ms(end), store, source, page or None, category or None, limit, dim or None,
+                                value if dim else None)
 
 
 @router.get("/status", summary="Where the numbers come from and the collector's last run")

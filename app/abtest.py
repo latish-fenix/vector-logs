@@ -40,6 +40,13 @@ COUNT_COLUMNS = ("{'minute': 'VARCHAR', 'source': 'VARCHAR', 'store': 'VARCHAR',
                  "'category': 'VARCHAR', 'value': 'VARCHAR', 'count': 'BIGINT'}")
 ID_COLUMNS = ("{'minute': 'VARCHAR', 'source': 'VARCHAR', 'store': 'VARCHAR', 'page': 'VARCHAR', 'category': 'VARCHAR', "
               "'session_id': 'VARCHAR', 'order_id': 'VARCHAR', 'doc_id': 'VARCHAR', 'at': 'VARCHAR'}")
+UA_COLUMNS = ("{'minute': 'VARCHAR', 'store': 'VARCHAR', 'page': 'VARCHAR', 'dim': 'VARCHAR', 'value': 'VARCHAR', "
+              "'entries': 'BIGINT', 'bad': 'BIGINT'}")
+UA_DIMS = ("browser", "os", "brand", "app")      # browser, operating system, device brand, in-app (webview) app
+UA_TOP = 10
+UA_OTHER = "_other"
+UA_UNKNOWN = "(unknown)"
+ID_UA = ("browser", "os", "device", "brand", "app")   # extra columns of the bad-ID files (newer files only)
 SOURCES = ("session", "cop")
 STATUS_SECONDS = 60
 
@@ -73,6 +80,7 @@ class AbTestService:
         # a backfill can rewrite finished files: checked again every 5 minutes
         self.counts = MetricFiles(settings, src, self.prefix + "counts/", "abtest-counts", revalidate_seconds=300)
         self.ids = MetricFiles(settings, src, self.prefix + "ids/", "abtest-ids", revalidate_seconds=300)
+        self.ua = MetricFiles(settings, src, self.prefix + "ua/", "abtest-ua", revalidate_seconds=300)
         self.s3 = getattr(src, "s3", None)
         self.bucket = getattr(src, "bucket", None)
         self.local_dir = settings.logs_local_dir if self.s3 is None else None
@@ -101,6 +109,26 @@ class AbTestService:
                 f"SELECT {select} FROM (SELECT epoch_ms(strptime(minute, '%Y-%m-%dT%H:%MZ')) AS t, * "
                 f"FROM read_csv(?, header=true, columns={columns}, compression='gzip', nullstr='\\x01')) "
                 f"WHERE t >= ? AND t < ? {where}", [paths, start, end, *params]).fetchall()
+        finally:
+            con.close()
+
+    def _id_rows(self, where: str, params: list, start: int, end: int, now_ms: int) -> list[tuple]:
+        """Bad-ID rows (at, page, category, session, order, doc, browser, os, device, brand, app). Files written before
+        the browser columns existed are read too (those columns come back empty)."""
+        paths = self.ids.paths(start, end, now_ms)
+        if not paths:
+            return []
+        con = duckdb.connect(config={"threads": 2, "memory_limit": "512MB"})
+        try:
+            files = "[" + ", ".join("'" + str(p).replace("'", "''") + "'" for p in paths) + "]"   # our own cache paths
+            con.execute("CREATE TEMP VIEW i AS SELECT epoch_ms(strptime(minute, '%Y-%m-%dT%H:%MZ')) AS t, * FROM read_csv("
+                        f"{files}, header=true, all_varchar=true, union_by_name=true, compression='gzip', nullstr='\\x01')")
+            have = {r[0] for r in con.execute("DESCRIBE i").fetchall()}
+            ua = ", ".join(f"coalesce({c}, '')" if c in have else "''" for c in ID_UA)
+            where = where.format(**{c: (f"coalesce({c}, '')" if c in have else "''") for c in ID_UA})
+            return con.execute(f"SELECT \"at\", page, category, coalesce(session_id, ''), coalesce(order_id, ''), "
+                               f"coalesce(doc_id, ''), {ua} FROM i WHERE t >= ? AND t < ? {where}",
+                               [start, end, *params]).fetchall()
         finally:
             con.close()
 
@@ -262,6 +290,7 @@ class AbTestService:
                          for (p, v), n in sorted(var_rows.items(), key=lambda x: (_page_key(x[0][0]), -x[1]))],
             "variantSeries": {v: masked(vals) for v, vals in sorted(var_series.items())},
         }
+        out["store"]["ua"] = self._ua(store, start, end, now_ms)
         for page in {r["page"] for r in out["store"]["variants"]}:
             tot = sum(r["count"] for r in out["store"]["variants"] if r["page"] == page)
             for r in out["store"]["variants"]:
@@ -269,8 +298,40 @@ class AbTestService:
                     r["pct"] = _pct(r["count"], tot)
         return out
 
+    def _ua(self, store: str, start: int, end: int, now_ms: int) -> dict:
+        """Shopper entries and bad session IDs of one store per page, dimension (browser, os, brand, app) and value,
+        from the hourly files: every hour that starts in the range (hourly counts: the range is widened to whole hours).
+        Top UA_TOP values per page and dimension; the rest in "_other"."""
+        ua_start = start // 3600_000 * 3600_000
+        rows = self._rows(self.ua, UA_COLUMNS, "page, dim, value, sum(entries), sum(bad), min(t), max(t)",
+                          "AND store = ? GROUP BY page, dim, value", [store], ua_start, end, now_ms)
+        acc: dict[str, dict[str, dict[str, list[int]]]] = {}
+        first = last = None
+        for page, dim, value, n, bad, t0, t1 in rows:
+            e = acc.setdefault(page, {}).setdefault(dim, {}).setdefault(value, [0, 0])
+            e[0] += int(n or 0)
+            e[1] += int(bad or 0)
+            first = t0 if first is None else min(first, t0)
+            last = t1 if last is None else max(last, t1)
+        pages: dict[str, dict[str, list[dict]]] = {}
+        for page in sorted(acc, key=_page_key):
+            pages[page] = {}
+            for dim in UA_DIMS:
+                vals = acc[page].get(dim, {})
+                ranked = sorted(((v, nb) for v, nb in vals.items() if v != UA_OTHER), key=lambda x: -x[1][0])
+                top, rest = ranked[:UA_TOP], ranked[UA_TOP:]
+                other = list(vals.get(UA_OTHER, [0, 0]))
+                for _, (n, bad) in rest:
+                    other[0] += n
+                    other[1] += bad
+                items = [{"value": v, "entries": n, "bad": bad, "pct": _pct(bad, n)} for v, (n, bad) in top]
+                if other[0]:
+                    items.append({"value": UA_OTHER, "entries": other[0], "bad": other[1], "pct": _pct(other[1], other[0])})
+                pages[page][dim] = items
+        return {"pages": pages, "from": first, "to": last + 3600_000 if last is not None else None}
+
     def id_list(self, start_ms: int, end_ms: int, store: str, source: str = "session", page: str | None = None,
-                category: str | None = None, limit: int = 500) -> dict:
+                category: str | None = None, limit: int = 500, dim: str | None = None, value: str | None = None) -> dict:
         """The entries with a bad session ID (OC of session_history, every entry of cop-derrh), newest first."""
         if source not in SOURCES:
             raise bad_request("INVALID_SOURCE", f"source must be one of {', '.join(SOURCES)}")
@@ -282,17 +343,35 @@ class AbTestService:
         if category and category != "bad":
             where += " AND category = ?"
             params.append(category)
-        rows = self._rows(self.ids, ID_COLUMNS, "\"at\", page, category, coalesce(session_id, ''), coalesce(order_id, ''), "
-                          "coalesce(doc_id, '')", where, params, start, end, now_ms)
+        if dim:
+            if dim not in UA_DIMS:
+                raise bad_request("INVALID_DIM", f"dim must be one of {', '.join(UA_DIMS)}")
+            if value is None or value == UA_OTHER:
+                raise bad_request("INVALID_VALUE", "Pick one value of the dimension (not Other)")
+            where += " AND {" + dim + "} = ?"
+            params.append("" if value == UA_UNKNOWN else value)
+        rows = self._id_rows(where, params, start, end, now_ms)
         rows.sort(key=lambda r: r[0] or "", reverse=True)
         values: dict[str, int] = {}
         for r in rows:
             values[r[3]] = values.get(r[3], 0) + 1
+
+        def mix(col: int) -> list[dict]:
+            """Share of the listed entries per browser / OS (entries without browser data left out)."""
+            m: dict[str, int] = {}
+            for r in rows:
+                if r[col]:
+                    m[r[col]] = m.get(r[col], 0) + 1
+            n = sum(m.values())
+            return [{"value": v, "count": c, "pct": _pct(c, n)} for v, c in sorted(m.items(), key=lambda x: (-x[1], x[0]))[:5]]
         return {
             "from": start, "to": end, "store": store, "source": source, "page": page, "category": category,
             "total": len(rows), "truncated": len(rows) > limit,
             "values": [{"value": v, "count": n} for v, n in sorted(values.items(), key=lambda x: -x[1])[:50]],
-            "rows": [{"at": a, "page": p, "category": c, "sessionId": s, "orderId": o, "docId": d}
-                     for a, p, c, s, o, d in rows[:limit]],
+            "rows": [{"at": a, "page": p, "category": c, "sessionId": s, "orderId": o, "docId": d,
+                      "browser": br, "os": os_, "device": dv, "brand": bd, "app": ap}
+                     for a, p, c, s, o, d, br, os_, dv, bd, ap in rows[:limit]],
+            "mix": {"browser": mix(6), "os": mix(7)},
+            "dim": dim, "value": value,
             "error": self.ids.error,
         }

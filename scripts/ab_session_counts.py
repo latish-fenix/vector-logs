@@ -25,6 +25,11 @@ and a backfill never add up twice.
     s3://<bucket>/es-ab-test/ids/dt=YYYY-MM-DD/part-HH.csv.gz       the entries with a bad session ID, for the list
         minute,source,store,page,category,session_id,order_id,doc_id,at   behind a click: every page of session and of
                                                                            cop (health checks left out)
+    s3://<bucket>/es-ab-test/ua/dt=YYYY-MM-DD/part-HH.csv.gz        browser / device of the shoppers, per hour
+        minute,store,page,dim,value,entries,bad                     (session_history only, health checks left out):
+                                                                    dim = browser, os, brand, app (in-app webview);
+                                                                    the top 10 values per store / page / hour, the
+                                                                    rest as _other; the current hour is rewritten
     s3://<bucket>/es-ab-test/status.json                           every run: last run, last success, last error
 
   page      upper case (cop and COP are the same page)
@@ -79,14 +84,22 @@ ALL = "_all"
 KNOWN = [v for v in (x.strip() for x in os.environ.get("AB_KNOWN_VALUES", "NA,ORDER_LOOKUP_CALL,xyz123,novalue").split(","))
          if v and not v.startswith("M") and not v.startswith("fenix-health-")]
 COUNT_COLUMNS = ["minute", "source", "store", "page", "category", "value", "count"]
-ID_COLUMNS = ["minute", "source", "store", "page", "category", "session_id", "order_id", "doc_id", "at"]
+ID_COLUMNS = ["minute", "source", "store", "page", "category", "session_id", "order_id", "doc_id", "at",
+              "browser", "os", "device", "brand", "app"]
+UA_COLUMNS = ["minute", "store", "page", "dim", "value", "entries", "bad"]
+# browser / device of the shopper (session_history only): dimension -> field under userAgentInfo
+UA_DIMS = {"browser": "browserName", "os": "osName", "brand": "deviceBrand", "app": "webviewAppName"}
+UA_TOP = 10                                    # values kept per store / page / dimension and hour; the rest = "_other"
+UA_OTHER = "_other"
+UA_UNKNOWN = "(unknown)"
 
 SOURCES = {
     "session": {"pattern": "*-session_history-*", "ts": "requestDttm", "page": "pageType", "sid": "sessionId",
                 "order": ["orderInfo.orderId", "orderId"], "test": "splitTestInfo.testName",
-                "variant": "splitTestInfo.variantName", "id_pages": None},
+                "variant": "splitTestInfo.variantName", "id_pages": None, "ua": "request.userAgentInfo."},
     "cop": {"pattern": "*-cop-derrh-*", "ts": "triggeredDateTime", "page": "request.pageType", "sid": "sessionTrackId",
-            "order": ["orderId", "request.orderId"], "test": None, "variant": None, "id_pages": None},
+            "order": ["orderId", "request.orderId"], "test": None, "variant": None, "id_pages": None,
+            "ua": "userAgentDetail."},
 }
 INDEX_RE = re.compile(r"^(?P<store>.+?)-(?P<kind>session_history|cop-derrh)-(?P<y>\d{4})[.-](?P<period>W?\d{2})"
                       r"(?:[.-]\d{2})?(?:[.-]\d{3,6})?$")
@@ -298,7 +311,8 @@ def bad_ids(cred: dict, name: str, a: dt.datetime, b: dt.datetime) -> tuple[list
         flt.append({"terms": {src["page"] + ".keyword": src["id_pages"]}})
     sid = src["sid"] + ".keyword"
     body = {"size": MAX_IDS, "track_total_hits": True, "sort": [{src["ts"]: "asc"}],
-            "_source": [src["sid"], src["page"], *src["order"]],
+            "_source": [src["sid"], src["page"], *src["order"],
+                        *(src["ua"] + f for f in ("browserName", "osName", "deviceName", "deviceBrand", "webviewAppName"))],
             "query": {"bool": {"filter": flt, "must_not": [{"prefix": {sid: "M"}}, {"prefix": {sid: "fenix-health-"}}]}}}
     res = search(cred, src["pattern"], body, f"{name} bad IDs {iso(a)} to {iso(b)}")
     rows = []
@@ -310,9 +324,76 @@ def bad_ids(cred: dict, name: str, a: dt.datetime, b: dt.datetime) -> tuple[list
         rows.append({"minute": minute_key(slot(at)), "source": name, "store": store_of(h["_index"]),
                      "page": str(_get(s, src["page"]) or "(none)").upper(), "category": classify(v),
                      "session_id": "" if v is None else str(v)[:120], "order_id": order, "doc_id": h.get("_id", ""),
-                     "at": iso(at)})
+                     "at": iso(at), **_ua(s, src["ua"])})
     total = (res["hits"].get("total") or {}).get("value", len(rows))
     return rows, max(0, total - len(rows))
+
+
+def _ua(doc: dict, prefix: str) -> dict:
+    """Browser, OS, device, brand and in-app (webview) app of one entry, as short strings."""
+    def g(f):
+        v = _get(doc, prefix + f)
+        return "" if v in (None, "", "??") else str(v)[:60]
+    return {"browser": g("browserName"), "os": g("osName"), "device": g("deviceName"), "brand": g("deviceBrand"),
+            "app": g("webviewAppName")}
+
+
+def ua_query(dim: str, a: dt.datetime, b: dt.datetime) -> dict:
+    src = SOURCES["session"]
+    field = src["ua"] + UA_DIMS[dim] + ".keyword"
+    sid = src["sid"] + ".keyword"
+    bad = {"bool": {"must_not": [{"prefix": {sid: "M"}}]}}
+    return {"size": 0, "track_total_hits": False,
+            "query": {"bool": {"filter": [_range(src, a, b)], "must_not": [{"prefix": {sid: "fenix-health-"}}]}},
+            "aggs": {"idx": {"terms": {"field": "_index", "size": 2000},
+                             "aggs": {"pt": {"terms": {"field": src["page"] + ".keyword", "size": 20, "missing": "(none)"},
+                                             "aggs": {"bad": {"filter": bad},
+                                                      "v": {"terms": {"field": field, "size": UA_TOP, "missing": UA_UNKNOWN},
+                                                            "aggs": {"bad": {"filter": bad}}}}}}}}}
+
+
+def ua_counts(cred: dict, a: dt.datetime, b: dt.datetime) -> list[dict]:
+    """Shopper entries (health checks left out) and bad session IDs of session_history in [a, b) (inside one hour)
+    per store, page, dimension and value: the top UA_TOP values, the rest as "_other". One query per dimension."""
+    hour = minute_key(a.replace(minute=0))
+    acc: dict[tuple, list[int]] = {}
+    for dim in UA_DIMS:
+        res = search(cred, SOURCES["session"]["pattern"], ua_query(dim, a, b), f"{dim} counts {iso(a)} to {iso(b)}")
+        for ib in res["aggregations"]["idx"]["buckets"]:
+            store = store_of(ib["key"])
+            for pb in ib["pt"]["buckets"]:
+                page = str(pb["key"]).upper()
+                n_top = b_top = 0
+                for vb in pb["v"]["buckets"]:
+                    k = (store, page, dim, str(vb["key"])[:60] or UA_UNKNOWN)
+                    e = acc.setdefault(k, [0, 0])
+                    e[0] += vb["doc_count"]
+                    e[1] += vb["bad"]["doc_count"]
+                    n_top += vb["doc_count"]
+                    b_top += vb["bad"]["doc_count"]
+                if pb["doc_count"] > n_top:
+                    e = acc.setdefault((store, page, dim, UA_OTHER), [0, 0])
+                    e[0] += pb["doc_count"] - n_top
+                    e[1] += max(0, pb["bad"]["doc_count"] - b_top)
+    return [{"minute": hour, "store": st, "page": pg, "dim": d, "value": v, "entries": n, "bad": bd}
+            for (st, pg, d, v), (n, bd) in acc.items() if n]
+
+
+def ua_range(s3, cred: dict, a: dt.datetime, b: dt.datetime, dry_run: bool = False) -> int:
+    """Hourly browser / device counts from the hour a falls in up to b (the last hour may be partial; it is counted
+    again by the next run). Replaces those hours in S3. Returns the rows written."""
+    a = a.replace(minute=0, second=0, microsecond=0)
+    n = 0
+    for lo, hi in pieces(a, b):
+        rows: list[dict] = []
+        h = lo
+        while h < hi:
+            rows += ua_counts(cred, h, min(h + dt.timedelta(hours=1), hi))
+            h += dt.timedelta(hours=1)
+        n += len(rows)
+        if not dry_run:
+            replace_rows(s3, "ua", UA_COLUMNS, minute_key(lo), minute_key(hi), rows)
+    return n
 
 
 # ------------------------------------------------------------------ S3 files
@@ -349,6 +430,8 @@ def replace_rows(s3, kind: str, columns: list[str], lo: str, hi: str, rows: list
     allr = kept + rows
     if kind == "counts":
         allr.sort(key=lambda r: (r["minute"], r["source"], r["store"] != ALL, r["store"], r["page"], r["category"], r["value"]))
+    elif kind == "ua":
+        allr.sort(key=lambda r: (r["minute"], r["store"], r["page"], r["dim"], -int(r["entries"] or 0)))
     else:
         allr.sort(key=lambda r: (r["at"], r["source"], r["store"]))
     write_rows(s3, key, columns, allr)
@@ -450,7 +533,9 @@ def run(s3, cred_fn, now: dt.datetime | None = None, state: dict | None = None) 
               "lastError": None, "lastErrorAt": state.get("lastErrorAt"), "first": state.get("first"),
               "doneTo": state.get("doneTo"), "knownValues": KNOWN}
     try:
-        tot = count_range(s3, cred_fn(), start, end)
+        cred = cred_fn()
+        tot = count_range(s3, cred, start, end)
+        tot["uaRows"] = ua_range(s3, cred, start, end)
     except Exception as e:                                       # noqa: BLE001
         status.update(ok=False, lastError=str(e)[:500], lastErrorAt=iso(now), tookMs=int((time.monotonic() - t0) * 1000))
         log(f"failed: {status['lastError']}")
@@ -467,7 +552,8 @@ def run(s3, cred_fn, now: dt.datetime | None = None, state: dict | None = None) 
     put_json(s3, "status.json", status)
     log(f"ok: {minute_key(start)} to {minute_key(end)}: session {tot['entries']['session']:,}, cop {tot['entries']['cop']:,} "
         f"entries, {tot['bad']:,} bad session IDs, {tot['ids']:,} listed"
-        + (f" ({tot['idsLeftOut']:,} left out)" if tot["idsLeftOut"] else "") + f" ({took} ms)")
+        + (f" ({tot['idsLeftOut']:,} left out)" if tot["idsLeftOut"] else "")
+        + f", {tot['uaRows']:,} browser / device rows ({took} ms)")
     return status, state
 
 
@@ -484,7 +570,17 @@ def main() -> int:
     if a.dry_run:
         try:
             end = slot(now)
-            tot = count_range(None, credentials(), end - LOOKBACK, end, dry_run=True, verbose=True)
+            cred = credentials()
+            tot = count_range(None, cred, end - LOOKBACK, end, dry_run=True, verbose=True)
+            ua = [r for h in (end - LOOKBACK,) for r in ua_counts(cred, h, end)]
+            by: dict[tuple, list[int]] = {}
+            for r in ua:
+                e = by.setdefault((r["dim"], r["value"]), [0, 0])
+                e[0] += r["entries"]
+                e[1] += r["bad"]
+            for dim in UA_DIMS:
+                top = sorted(((v, n) for (d, v), n in by.items() if d == dim), key=lambda x: -x[1][0])[:6]
+                print(f"{dim:8} " + ", ".join(f"{v} {n:,} ({bd:,} bad)" for v, (n, bd) in top))
         except Exception as e:                                   # noqa: BLE001
             log(f"failed: {e}")
             return 1
@@ -498,7 +594,10 @@ def main() -> int:
             p.error("--backfill-days must be 1 to 31")
         start = (now - dt.timedelta(days=a.backfill_days)).replace(hour=0, minute=0, second=0, microsecond=0)
         try:
-            tot = count_range(s3, credentials(), start, slot(now), verbose=True)
+            cred = credentials()
+            tot = count_range(s3, cred, start, slot(now), verbose=True)
+            log("browser / device counts per hour …")
+            tot["uaRows"] = ua_range(s3, cred, start, slot(now))
         except Exception as e:                                   # noqa: BLE001
             log(f"backfill failed: {e}")
             return 1
@@ -507,7 +606,8 @@ def main() -> int:
             state["first"] = minute_key(start)
             write_state(state)
         log(f"backfill done: {tot['windows']} windows, {tot['entries']}, {tot['bad']:,} bad session IDs, "
-            f"{tot['ids']:,} listed" + (f", {tot['idsLeftOut']:,} left out" if tot["idsLeftOut"] else ""))
+            f"{tot['ids']:,} listed" + (f", {tot['idsLeftOut']:,} left out" if tot["idsLeftOut"] else "")
+            + f", {tot['uaRows']:,} browser / device rows")
         return 0
 
     status, state = run(s3, credentials, now, read_state())
