@@ -43,10 +43,13 @@ ID_COLUMNS = ("{'minute': 'VARCHAR', 'source': 'VARCHAR', 'store': 'VARCHAR', 'p
 UA_COLUMNS = ("{'minute': 'VARCHAR', 'store': 'VARCHAR', 'page': 'VARCHAR', 'dim': 'VARCHAR', 'value': 'VARCHAR', "
               "'entries': 'BIGINT', 'bad': 'BIGINT'}")
 UA_DIMS = ("browser", "os", "brand", "app")      # browser, operating system, device brand, in-app (webview) app
+LIST_DIMS = UA_DIMS + ("edd",)                   # filters of the bad-ID list (edd = hidden / shown / none)
+EDD_GROUPS = ("shown", "hidden", "none")
+CONV_COLUMNS = ("{'minute': 'VARCHAR', 'store': 'VARCHAR', 'page': 'VARCHAR', 'group': 'VARCHAR', 'sessions': 'BIGINT'}")
 UA_TOP = 10
 UA_OTHER = "_other"
 UA_UNKNOWN = "(unknown)"
-ID_UA = ("browser", "os", "device", "brand", "app")   # extra columns of the bad-ID files (newer files only)
+ID_UA = ("browser", "os", "device", "brand", "app", "edd", "cart", "ship")   # extra columns of newer bad-ID files
 SOURCES = ("session", "cop")
 STATUS_SECONDS = 60
 
@@ -81,6 +84,7 @@ class AbTestService:
         self.counts = MetricFiles(settings, src, self.prefix + "counts/", "abtest-counts", revalidate_seconds=300)
         self.ids = MetricFiles(settings, src, self.prefix + "ids/", "abtest-ids", revalidate_seconds=300)
         self.ua = MetricFiles(settings, src, self.prefix + "ua/", "abtest-ua", revalidate_seconds=300)
+        self.conv = MetricFiles(settings, src, self.prefix + "conv/", "abtest-conv", revalidate_seconds=300)
         self.s3 = getattr(src, "s3", None)
         self.bucket = getattr(src, "bucket", None)
         self.local_dir = settings.logs_local_dir if self.s3 is None else None
@@ -184,6 +188,8 @@ class AbTestService:
             if cat == "variant":
                 variants[(st, page, value)] = variants.get((st, page, value), 0) + int(n)
                 continue
+            if cat.startswith("edd"):
+                continue
             d = per.setdefault((source, st, page), {})
             d[cat] = d.get(cat, 0) + int(n)
 
@@ -238,11 +244,20 @@ class AbTestService:
         tables: dict[str, dict[str, dict[str, int]]] = {s: {} for s in SOURCES}
         var_rows: dict[tuple[str, str], int] = {}
         var_series: dict[str, list[int]] = {}
+        edd: dict[str, dict[str, int]] = {}             # group -> {orders, cart, ship (cents), <kind>: n}
+        edd_series: dict[str, list[int]] = {}
         for t, source, st, page, cat, value, n in rows:
             if st != store:
                 continue
             n = int(n)
             i = (int(t) - first) // step
+            if cat.startswith("edd"):
+                g = edd.setdefault(value, {})
+                key = {"edd": "orders", "edd_cart": "cart", "edd_ship": "ship"}.get(cat, cat[4:])
+                g[key] = g.get(key, 0) + n
+                if cat == "edd" and 0 <= i < nb:
+                    edd_series.setdefault(value, [0] * nb)[i] += n
+                continue
             if cat == "variant":
                 var_rows[(page, value)] = var_rows.get((page, value), 0) + n
                 if source == "session" and page == "OC" and 0 <= i < nb:
@@ -291,12 +306,63 @@ class AbTestService:
             "variantSeries": {v: masked(vals) for v, vals in sorted(var_series.items())},
         }
         out["store"]["ua"] = self._ua(store, start, end, now_ms)
+        out["store"]["edd"] = self._edd_block(edd, {g: masked(v) for g, v in edd_series.items()})
+        out["store"]["conversion"] = self._conversion(store, start, end, now_ms)
         for page in {r["page"] for r in out["store"]["variants"]}:
             tot = sum(r["count"] for r in out["store"]["variants"] if r["page"] == page)
             for r in out["store"]["variants"]:
                 if r["page"] == page:
                     r["pct"] = _pct(r["count"], tot)
         return out
+
+    @staticmethod
+    def _edd_block(edd: dict[str, dict[str, int]], series: dict[str, list]) -> dict | None:
+        """Order confirmations per EDD group: orders, share (of shown + hidden), cart total and shipping cost (dollars)
+        with averages per order, and the session ID kinds per group (bad share)."""
+        if not edd:
+            return None
+        both = sum(edd.get(g, {}).get("orders", 0) for g in ("shown", "hidden"))
+        groups = []
+        for g in EDD_GROUPS:
+            d = edd.get(g)
+            if not d or not d.get("orders"):
+                continue
+            o = d["orders"]
+            kinds = {k: v for k, v in d.items() if k not in ("orders", "cart", "ship")}
+            bad = _bad(kinds)
+            groups.append({
+                "group": g, "orders": o, "share": _pct(o, both) if g != "none" else None,
+                "cart": round(d.get("cart", 0) / 100, 2), "avgCart": round(d.get("cart", 0) / 100 / o, 2),
+                "ship": round(d.get("ship", 0) / 100, 2), "avgShip": round(d.get("ship", 0) / 100 / o, 2),
+                "valid": kinds.get("valid", 0), "bad": bad, "badPct": _pct(bad, o - kinds.get("health", 0)),
+                "categories": [{"category": c, "count": kinds[c], "pct": _pct(kinds[c], o)}
+                               for c in sorted(kinds, key=_cat_key) if kinds[c] and c != "health"],
+            })
+        return {"groups": groups, "series": {g: series[g] for g in EDD_GROUPS if g in series}}
+
+    def _conversion(self, store: str, start: int, end: int, now_ms: int) -> dict | None:
+        """Unique valid session IDs per page and EDD group over the UTC days the range touches (whole days), and the
+        step rates PDP → COP → OC per group."""
+        day0 = start // DAY * DAY
+        rows = self._rows(self.conv, CONV_COLUMNS, "page, \"group\", sum(sessions), min(t), max(t)",
+                          "AND store = ? GROUP BY page, \"group\"", [store], day0, end, now_ms)
+        if not rows:
+            return None
+        u: dict[str, dict[str, int]] = {}
+        first = last = None
+        for page, grp, n, t0, t1 in rows:
+            u.setdefault(grp, {})[page] = u.setdefault(grp, {}).get(page, 0) + int(n or 0)
+            first = t0 if first is None else min(first, t0)
+            last = t1 if last is None else max(last, t1)
+        groups = []
+        for g in EDD_GROUPS:
+            d = u.get(g)
+            if not d:
+                continue
+            pdp, cop, oc = d.get("PDP", 0), d.get("COP", 0), d.get("OC", 0)
+            groups.append({"group": g, "pdp": pdp, "cop": cop, "oc": oc,
+                           "pdpToCop": _pct(cop, pdp), "copToOc": _pct(oc, cop), "pdpToOc": _pct(oc, pdp)})
+        return {"groups": groups, "fromDay": first, "toDay": last + DAY if last is not None else None}
 
     def _ua(self, store: str, start: int, end: int, now_ms: int) -> dict:
         """Shopper entries and bad session IDs of one store per page, dimension (browser, os, brand, app) and value,
@@ -344,8 +410,8 @@ class AbTestService:
             where += " AND category = ?"
             params.append(category)
         if dim:
-            if dim not in UA_DIMS:
-                raise bad_request("INVALID_DIM", f"dim must be one of {', '.join(UA_DIMS)}")
+            if dim not in LIST_DIMS:
+                raise bad_request("INVALID_DIM", f"dim must be one of {', '.join(LIST_DIMS)}")
             if value is None or value == UA_OTHER:
                 raise bad_request("INVALID_VALUE", "Pick one value of the dimension (not Other)")
             where += " AND {" + dim + "} = ?"
@@ -369,8 +435,9 @@ class AbTestService:
             "total": len(rows), "truncated": len(rows) > limit,
             "values": [{"value": v, "count": n} for v, n in sorted(values.items(), key=lambda x: -x[1])[:50]],
             "rows": [{"at": a, "page": p, "category": c, "sessionId": s, "orderId": o, "docId": d,
-                      "browser": br, "os": os_, "device": dv, "brand": bd, "app": ap}
-                     for a, p, c, s, o, d, br, os_, dv, bd, ap in rows[:limit]],
+                      "browser": br, "os": os_, "device": dv, "brand": bd, "app": ap, "edd": ed,
+                      "cart": float(ct) if ct else None, "ship": float(sh) if sh else None}
+                     for a, p, c, s, o, d, br, os_, dv, bd, ap, ed, ct, sh in rows[:limit]],
             "mix": {"browser": mix(6), "os": mix(7)},
             "dim": dim, "value": value,
             "error": self.ids.error,

@@ -241,3 +241,48 @@ def test_browser_breakdown_and_lists_by_browser(tmp_path, data):
         svc.id_list(a, B, SPO, "session", "COP", "bad", dim="browser", value="_other")
     with pytest.raises(Exception):
         svc.id_list(a, B, SPO, "session", "COP", "bad", dim="nope", value="x")
+
+
+CONV = ["minute", "store", "page", "group", "sessions"]
+
+
+def test_oc_edd_groups_and_conversion(tmp_path, data):
+    def e(m, cat, g, n):
+        return dict(minute=m, source="session", store=SPO, page="OC", category=cat, value=g, count=n)
+    m1, m2 = "2026-11-19T10:00Z", "2026-11-19T10:05Z"
+    extra = [e(m1, "edd", "shown", 6), e(m1, "edd", "hidden", 4), e(m2, "edd", "shown", 6), e(m2, "edd", "hidden", 4),
+             e(m1, "edd_cart", "shown", 85000), e(m1, "edd_cart", "hidden", 56000), e(m1, "edd_ship", "hidden", 600),
+             e(m1, "edd:valid", "shown", 6), e(m1, "edd:valid", "hidden", 2), e(m1, "edd:NA", "hidden", 2),
+             e(m2, "edd:valid", "shown", 6), e(m2, "edd:valid", "hidden", 3), e(m2, "edd:ORDER_LOOKUP_CALL", "hidden", 1),
+             e(m1, "edd", "none", 1)]
+    # the EDD rows sit next to the existing ones in the 08:00 block
+    p = data / "es-ab-test" / "counts" / "dt=2026-11-19" / "part-08.csv.gz"
+    old = list(csv.DictReader(io.StringIO(gzip.decompress(p.read_bytes()).decode())))
+    p.unlink()
+    write(data, "counts", COUNTS, old + extra)
+    write(data, "conv", CONV, [dict(minute="2026-11-19T00:00Z", store=SPO, page=pg, group=g, sessions=n) for pg, g, n in (
+        ("PDP", "shown", 1000), ("COP", "shown", 80), ("OC", "shown", 36),
+        ("PDP", "hidden", 1000), ("COP", "hidden", 70), ("OC", "hidden", 28))])
+    s = make_settings(tmp_path, data)
+    svc = AbTestService(s, LogService(s), now=lambda: NOW)
+    st = svc.summary(A, B, "UTC", SPO)["store"]
+    g = {x["group"]: x for x in st["edd"]["groups"]}
+    assert (g["shown"]["orders"], g["hidden"]["orders"], g["shown"]["share"]) == (12, 8, 60.0)
+    assert (g["shown"]["cart"], g["shown"]["avgCart"], g["hidden"]["avgShip"]) == (850.0, 70.83, 0.75)
+    assert (g["hidden"]["bad"], g["hidden"]["badPct"], g["shown"]["badPct"]) == (3, 37.5, 0.0)
+    assert [c["category"] for c in g["hidden"]["categories"]] == ["valid", "NA", "ORDER_LOOKUP_CALL"]
+    assert g["none"]["share"] is None and list(st["edd"]["series"]) == ["shown", "hidden", "none"]
+    # the EDD rows do not leak into the session ID check or the bad share
+    oc = next(x for x in st["sessionCheck"] if x["page"] == "OC")
+    assert oc["bad"] == 6 and st["ocBad"] == 6
+    c = {x["group"]: x for x in st["conversion"]["groups"]}
+    assert (c["shown"]["pdpToCop"], c["shown"]["copToOc"], c["shown"]["pdpToOc"]) == (8.0, 45.0, 3.6)
+    assert c["hidden"]["copToOc"] == 40.0 and st["conversion"]["fromDay"] == MS(datetime(2026, 11, 19, tzinfo=UTC))
+    # lists filtered by EDD group (newer files carry edd / cart / ship)
+    write(data, "ids", IDS + ["browser", "os", "device", "brand", "app", "edd", "cart", "ship"], [
+        dict(minute="2026-11-19T05:00Z", source="session", store=SPO, page="OC", category="NA", session_id="NA", order_id="9001",
+             doc_id="h1", at="2026-11-19T05:01:00Z", browser="Safari", os="iOS", device="", brand="Apple", app="",
+             edd="hidden", cart="141.50", ship="0.00")])
+    svc2 = AbTestService(s, LogService(s), now=lambda: NOW)
+    x = svc2.id_list(MS(datetime(2026, 11, 19, 4, tzinfo=UTC)), B, SPO, "session", "OC", "bad", dim="edd", value="hidden")
+    assert [r["orderId"] for r in x["rows"]] == ["9001"] and x["rows"][0]["cart"] == 141.5 and x["rows"][0]["ship"] == 0.0

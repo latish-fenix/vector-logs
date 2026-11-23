@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
-import { get, type AbIds, type AbPageRow, type AbSource, type AbStoreRow, type AbSummary, type AbUaDim, type AbUaItem } from "../api";
+import { get, type AbConvGroup, type AbEddGroup, type AbEddName, type AbIds, type AbPageRow, type AbSource, type AbStoreRow, type AbSummary, type AbUaDim, type AbUaItem } from "../api";
 import { Icon } from "../components/icons";
 import { clock, clockZ, dateLabel, dayIn, Legend, LineChart, localStamp, offsetMs, useHidden, ZONE_LABEL, ZONE_TITLE, ZONES, zoneName, type ClockZone, type LineSeries } from "../components/LineChart";
 import { Page } from "../components/Shell";
@@ -175,7 +175,7 @@ export function AbTest() {
       </button>
     </th>
   );
-  const openIds = (source: AbSource, page: string, category: string, dim?: AbUaDim, value?: string) =>
+  const openIds = (source: AbSource, page: string, category: string, dim?: ListDim, value?: string) =>
     set({ ids: [source, page, category, ...(dim && value !== undefined ? [dim, value] : [])].join("|") });
   const [idSource, idPage, idCat, idDim, ...idRest] = (ids ?? "").split("|");
   const idValue = idRest.length ? idRest.join("|") : undefined;
@@ -249,12 +249,18 @@ export function AbTest() {
                     <Chart key={page} title={PAGE_NAME[page] ?? page} sub={`entries ${stepText(d.step)}`} start={d.start} step={d.step} zone={zone} nowAt={nowAt}
                       series={page === "OC" && st.badOc ? [
                         { key: "all", label: "All", color: PAGE_COLOR.OC, values, area: true },
+                        ...(st.edd?.series.shown ? [{ key: "shown", label: "EDD shown", color: EDD_COLOR.shown, values: st.edd.series.shown }] : []),
+                        ...(st.edd?.series.hidden ? [{ key: "hidden", label: "EDD hidden", color: EDD_COLOR.hidden, values: st.edd.series.hidden }] : []),
                         { key: "bad", label: "Bad session ID", color: "var(--st-5xx)", values: st.badOc },
                       ] : [{ key: "all", label: page, color: PAGE_COLOR[page] ?? "var(--accent)", values, area: true }]} />
                   ))}
                 </div>
                 <CheckTable title="Session ID check · session history" source="session" rows={st.sessionCheck ?? []} onOpen={openIds}
                   sub="Entries per page by session ID · a click on a count lists those entries with their session ID and order ID" />
+                {(st.edd || st.conversion) && (
+                  <EddSection edd={st.edd ?? null} conversion={st.conversion ?? null} store={store}
+                    onOpen={(category, group) => openIds("session", "OC", category, "edd", group)} />
+                )}
                 {st.ua && <BrowserSection ua={st.ua} store={store} zone={zone} onOpen={(page, dim, value) => openIds("session", page, "bad", dim, value)} />}
               </>
             )}
@@ -297,7 +303,7 @@ export function AbTest() {
         )}
       {ids && store && (idSource === "session" || idSource === "cop") && (
         <IdDialog store={store} source={idSource} page={idPage} category={idCat} from={from} to={to} zone={zone} onClose={() => set({ ids: null })}
-          dim={(["browser", "os", "brand", "app"] as string[]).includes(idDim) ? idDim as AbUaDim : undefined} value={idValue} />
+          dim={(["browser", "os", "brand", "app", "edd"] as string[]).includes(idDim) ? idDim as ListDim : undefined} value={idValue} />
       )}
     </Page>
   );
@@ -358,6 +364,168 @@ function CheckTable({ title, sub, source, rows, onOpen, empty }: {
   );
 }
 
+// ------------------------------------------------------------------ order confirmations: EDD shown vs hidden
+type ListDim = AbUaDim | "edd";
+const EDD_LABEL: Record<AbEddName, string> = { shown: "EDD shown", hidden: "EDD hidden", none: "No EDD" };
+const EDD_COLOR: Record<AbEddName, string> = { shown: "#2563eb", hidden: "#d97706", none: "var(--faint)" };
+const usd = (v: number) => `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const usdShort = (v: number) => (v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : v >= 1e4 ? `$${(v / 1e3).toFixed(1)}k` : usd(v));
+const pts = (v: number) => `${v > 0 ? "+" : v < 0 ? "−" : "±"}${Math.abs(v).toFixed(1)} pts`;
+
+function EddSection({ edd, conversion, store, onOpen }: {
+  edd: NonNullable<NonNullable<AbSummary["store"]>["edd"]> | null;
+  conversion: NonNullable<NonNullable<AbSummary["store"]>["conversion"]> | null;
+  store: string; onOpen: (category: string, group: AbEddName) => void;
+}) {
+  const main = (edd?.groups ?? []).filter((g) => g.group !== "none");
+  return (
+    <>
+      <h2 className="ab-h2">Order confirmations: EDD shown vs hidden <span className="hint mono">{store}-session_history-* · pageType OC</span></h2>
+      {edd && edd.groups.length > 0 ? (
+        <div className="ab-edd-row">
+          <section className="card" style={{ overflow: "hidden" }}>
+            <CardHead title="Orders, cart total and shipping cost" sub="Hidden = the response hid the EDD (eddsHidden) · shown = an EDD was shown · amounts from billingInfo" />
+            <div className="table-scroll" style={{ maxHeight: "none" }}>
+              <table className="table ops-table">
+                <thead><tr><th>Group</th><th className="num">Orders</th><th className="num">Share</th><th className="num">Cart total</th><th className="num">Avg cart</th>
+                  <th className="num">Shipping cost</th><th className="num">Avg shipping</th></tr></thead>
+                <tbody>
+                  {edd.groups.map((g) => (
+                    <tr key={g.group}>
+                      <td className="nowrap"><span className="ab-dot" style={{ background: EDD_COLOR[g.group] }} />{EDD_LABEL[g.group]}</td>
+                      <td className="num" style={{ fontWeight: 600 }}>{num(g.orders)}</td>
+                      <td className="num">{g.share === null ? <span className="dim">–</span> : pct(g.share, 0)}</td>
+                      <td className="num">{g.group === "none" ? <span className="dim">–</span> : usdShort(g.cart)}</td>
+                      <td className="num">{g.group === "none" ? <span className="dim">–</span> : usd(g.avgCart)}</td>
+                      <td className="num">{g.group === "none" ? <span className="dim">–</span> : usdShort(g.ship)}</td>
+                      <td className="num">{g.group === "none" ? <span className="dim">–</span> : usd(g.avgShip)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <AvgBars groups={main} />
+        </div>
+      ) : <section className="card"><Empty title="No EDD split for this range yet">Counted from the collector's next run on (and by a backfill for past days).</Empty></section>}
+      {edd && main.length > 0 && <EddBadTable groups={edd.groups} onOpen={onOpen} />}
+      {conversion && conversion.groups.length > 0 && <ConversionCard conv={conversion} />}
+    </>
+  );
+}
+
+function AvgBars({ groups }: { groups: AbEddGroup[] }) {
+  const metrics: [string, (g: AbEddGroup) => number][] = [["Avg cart", (g) => g.avgCart], ["Avg shipping", (g) => g.avgShip]];
+  return (
+    <section className="card">
+      <CardHead title="Averages per order" sub="EDD shown vs hidden" />
+      <div className="ab-avg">
+        {metrics.map(([label, f]) => {
+          const top = Math.max(0.01, ...groups.map(f));
+          return (
+            <div key={label} className="ab-avg-group">
+              <div className="ab-avg-bars">
+                {groups.map((g) => (
+                  <div key={g.group} className="ab-avg-col">
+                    <span className="v">{usd(f(g))}</span>
+                    <span className="bar" style={{ height: `${(120 * f(g)) / top}px`, background: EDD_COLOR[g.group] }} title={`${EDD_LABEL[g.group]}: ${usd(f(g))}`} />
+                  </div>
+                ))}
+              </div>
+              <div className="ab-avg-label">{label}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="ab-ua-legend">{groups.map((g) => <span key={g.group}><i style={{ background: EDD_COLOR[g.group] }} />{EDD_LABEL[g.group]}</span>)}</div>
+    </section>
+  );
+}
+
+const EDD_BAD_COLOR: Record<string, string> = { NA: "#dc2626", ORDER_LOOKUP_CALL: "#f97316", xyz123: "#eab308", numbers: "#a855f7", uuid: "#0ea5e9" };
+
+function EddBadTable({ groups, onOpen }: { groups: AbEddGroup[]; onOpen: (category: string, group: AbEddName) => void }) {
+  const cats = useMemo(() => {
+    const seen = new Set<string>();
+    for (const g of groups) for (const c of g.categories) if (c.category !== "valid") seen.add(c.category);
+    const order = ["NA", "ORDER_LOOKUP_CALL", "xyz123", "novalue", "empty", "missing", "numbers", "uuid", "other"];
+    return [...seen].sort((a, b) => (order.indexOf(a) < 0 ? 98 : order.indexOf(a)) - (order.indexOf(b) < 0 ? 98 : order.indexOf(b)));
+  }, [groups]);
+  return (
+    <section className="card" style={{ overflow: "hidden" }}>
+      <CardHead title="Bad session IDs by EDD group" sub="Order confirmations per group by session ID kind · a click on a count lists those orders with session ID, order ID, cart total and shipping cost" />
+      <div className="table-scroll" style={{ maxHeight: "none" }}>
+        <table className="table ops-table ab-check">
+          <thead><tr><th>Group</th><th className="num">Orders</th><th aria-hidden="true" /><th className="num">Valid (M…)</th>
+            {cats.map((c) => <th key={c} className="num" title={CAT_TITLE[c]}>{catLabel(c)}</th>)}<th className="num">Bad %</th></tr></thead>
+          <tbody>
+            {groups.map((g) => {
+              const by = Object.fromEntries(g.categories.map((c) => [c.category, c]));
+              return (
+                <tr key={g.group}>
+                  <td className="nowrap"><span className="ab-dot" style={{ background: EDD_COLOR[g.group] }} />{EDD_LABEL[g.group]}</td>
+                  <td className="num" style={{ fontWeight: 600 }}>{num(g.orders)}</td>
+                  <td aria-hidden="true">
+                    <div className="ab-stack-bar">
+                      <span style={{ width: `${(100 * g.valid) / Math.max(1, g.orders)}%`, background: "color-mix(in srgb, var(--accent) 28%, var(--surface))" }} />
+                      {cats.map((c) => by[c] ? <span key={c} style={{ width: `${(100 * by[c].count) / Math.max(1, g.orders)}%`, background: EDD_BAD_COLOR[c] ?? "#64748b" }} /> : null)}
+                    </div>
+                  </td>
+                  <td className="num">{num(g.valid)}<span className="ab-pc">{pct(by.valid?.pct)}</span></td>
+                  {cats.map((c) => (
+                    <td key={c} className="num">{by[c]
+                      ? <button type="button" className="ab-link" onClick={() => onOpen(c, g.group)} title={`List the ${EDD_LABEL[g.group]} orders with ${catLabel(c)}`}>{num(by[c].count)}<span className="ab-pc">{pct(by[c].pct)}</span></button>
+                      : <span className="dim">0</span>}</td>
+                  ))}
+                  <td className="num">{g.bad ? <button type="button" className="ab-link" onClick={() => onOpen("bad", g.group)}><BadPct v={g.badPct} n={g.bad} /></button> : <BadPct v={g.badPct} n={g.bad} />}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ConversionCard({ conv }: { conv: NonNullable<NonNullable<AbSummary["store"]>["conversion"]> }) {
+  const shown = conv.groups.find((g) => g.group === "shown");
+  const hidden = conv.groups.find((g) => g.group === "hidden");
+  const steps: [string, keyof AbConvGroup, keyof AbConvGroup, keyof AbConvGroup][] = [
+    ["PDP → COP", "pdpToCop", "pdp", "cop"], ["COP → OC", "copToOc", "cop", "oc"], ["PDP → OC (overall)", "pdpToOc", "pdp", "oc"]];
+  const utcDay = (ms: number) => new Date(ms).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+  const days = conv.fromDay && conv.toDay ? `${utcDay(conv.fromDay)} – ${utcDay(conv.toDay - 1)}` : "";
+  return (
+    <section className="card" style={{ overflow: "hidden" }}>
+      <CardHead title="Conversion: EDD shown vs hidden" sub={`Unique valid session IDs per page · whole UTC days ${days} · session IDs that aren't valid can't be followed and are left out`} />
+      <div className="ab-ua-legend">{(["shown", "hidden"] as AbEddName[]).map((g) => <span key={g}><i style={{ background: EDD_COLOR[g] }} />{EDD_LABEL[g]}</span>)}</div>
+      {steps.map(([label, rate, from, to]) => {
+        const rs = [shown, hidden].filter((g): g is AbConvGroup => !!g);
+        const top = Math.max(0.01, ...rs.map((g) => (g[rate] as number | null) ?? 0)) * 1.12;
+        const a = shown?.[rate] as number | null | undefined, b = hidden?.[rate] as number | null | undefined;
+        const diff = a !== null && a !== undefined && b !== null && b !== undefined ? a - b : null;
+        return (
+          <div key={label} className="ab-conv-step">
+            <div className="ab-conv-label">{label}</div>
+            <div>
+              {rs.map((g) => {
+                const r = g[rate] as number | null;
+                return (
+                  <div key={g.group} className="ab-conv-bar">
+                    <span className="bar" style={{ width: `${(70 * (r ?? 0)) / top}%`, background: EDD_COLOR[g.group] }} />
+                    <b>{pct(r)}</b><span className="hint">{num(g[to] as number)} of {num(g[from] as number)} sessions</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="ab-conv-diff">{diff === null ? <span className="dim">—</span> : <><b className={diff >= 0 ? "ok" : "bad"}>{pts(diff)}</b><span className="hint">shown vs hidden</span></>}</div>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
 // ------------------------------------------------------------------ browser / device of the shoppers
 const UA_TITLE: Record<AbUaDim, string> = { browser: "Browser", os: "OS", brand: "Device brand", app: "In-app browser" };
 const UA_SUB: Record<AbUaDim, string> = {
@@ -366,6 +534,7 @@ const UA_SUB: Record<AbUaDim, string> = {
 };
 /** A browser / device value as shown, and a tag for the ones that are not shoppers. */
 function uaLabel(dim: AbUaDim | string, v: string): { text: string; tag?: string } {
+  if (dim === "edd") return { text: EDD_LABEL[v as AbEddName] ?? v };
   if (v === "_other") return { text: "Other" };
   if (v === "(unknown)" || v === "") return { text: "Unknown", tag: "no browser data" };
   if (dim === "browser" && /^java$/i.test(v)) return { text: "Server call (Java)", tag: "not a shopper" };
@@ -450,7 +619,7 @@ const ALL_ROWS = 500_000;                           // Copy order IDs / CSV read
 
 function IdDialog({ store, source, page, category, from, to, zone, onClose, dim, value }: {
   store: string; source: AbSource; page: string; category: string; from: number; to: number; zone: ClockZone; onClose: () => void;
-  dim?: AbUaDim; value?: string;
+  dim?: ListDim; value?: string;
 }) {
   const toast = useToast();
   const q = useQuery({
@@ -470,14 +639,17 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose, dim,
   };
   const d = q.data;
   const what = category === "bad" ? "a bad session ID" : catLabel(category);
-  const by = dim && value !== undefined ? ` · ${UA_TITLE[dim]}: ${uaLabel(dim, value).text}` : "";
+  const by = dim === "edd" && value ? ` · ${EDD_LABEL[value as AbEddName] ?? value}`
+    : dim && value !== undefined ? ` · ${UA_TITLE[dim as AbUaDim]}: ${uaLabel(dim, value).text}` : "";
+  const money = page === "OC" && source === "session";
   const csv = async () => {
     const rows = await everything();
     if (!rows) return;
     const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
-    const lines = ["time,store,source,page,category,session_id,order_id,doc_id,browser,os,device,brand,in_app",
+    const lines = ["time,store,source,page,category,session_id,order_id,doc_id,browser,os,device,brand,in_app,edd,cart_total,shipping_cost",
       ...rows.map((r) => [localStamp(Date.parse(r.at), zone), store, source, r.page, r.category, r.sessionId, r.orderId, r.docId,
-        r.browser ?? "", r.os ?? "", r.device ?? "", r.brand ?? "", r.app ?? ""].map(esc).join(","))];
+        r.browser ?? "", r.os ?? "", r.device ?? "", r.brand ?? "", r.app ?? "", r.edd ?? "",
+        r.cart === null || r.cart === undefined ? "" : r.cart.toFixed(2), r.ship === null || r.ship === undefined ? "" : r.ship.toFixed(2)].map(esc).join(","))];
     downloadFile(`abtest-${store}-${source}-${page}-${category}-${stamp(from, zone)}-${stamp(to, zone)}.csv`, lines.join("\n") + "\n", "text/csv");
   };
   const copyOrders = async () => {
@@ -512,7 +684,7 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose, dim,
           </p>
           <div className="table-scroll ab-ids" style={{ maxHeight: 460 }}>
             <table className="table ops-table">
-              <thead><tr><th>Time</th><th>Order ID</th><th>Session ID</th><th>Browser</th><th>OS</th><th>Device</th><th>In-app</th></tr></thead>
+              <thead><tr><th>Time</th><th>Order ID</th><th>Session ID</th>{money && <><th>EDD</th><th className="num">Cart total</th><th className="num">Shipping</th></>}<th>Browser</th><th>OS</th><th>Device</th><th>In-app</th></tr></thead>
               <tbody>
                 {d.rows.map((r, i) => {
                   const t = Date.parse(r.at);
@@ -522,6 +694,11 @@ function IdDialog({ store, source, page, category, from, to, zone, onClose, dim,
                       <td className="mono">{r.orderId || <span className="dim">—</span>}</td>
                       <td className="mono ab-sid" title={r.sessionId}>{r.sessionId === "" ? <span className="dim">(empty)</span> : r.sessionId}
                         {r.sessionId !== r.category && <span className="hint"> · {catLabel(r.category)}</span>}</td>
+                      {money && <>
+                        <td>{r.edd ? <span className="ab-edd-tag" data-g={r.edd}>{EDD_LABEL[r.edd as AbEddName] ?? r.edd}</span> : <span className="dim">—</span>}</td>
+                        <td className="num">{r.cart === null || r.cart === undefined ? <span className="dim">—</span> : usd(r.cart)}</td>
+                        <td className="num">{r.ship === null || r.ship === undefined ? <span className="dim">—</span> : usd(r.ship)}</td>
+                      </>}
                       <td>{r.browser ? uaLabel("browser", r.browser).text : <span className="dim">—</span>}</td>
                       <td>{r.os || <span className="dim">—</span>}</td>
                       <td>{r.device || r.brand || <span className="dim">—</span>}</td>

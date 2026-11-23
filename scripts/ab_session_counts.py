@@ -30,9 +30,14 @@ and a backfill never add up twice.
                                                                     dim = browser, os, brand, app (in-app webview);
                                                                     the top 10 values per store / page / hour, the
                                                                     rest as _other; the current hour is rewritten
+    s3://<bucket>/es-ab-test/conv/dt=YYYY-MM-DD/part-00.csv.gz      unique valid session IDs per UTC day (conversion):
+        minute,store,page,group,sessions                            page PDP / COP / OC, group hidden / shown / none;
+                                                                    today refreshed every 15 minutes
     s3://<bucket>/es-ab-test/status.json                           every run: last run, last success, last error
 
   page      upper case (cop and COP are the same page)
+  EDD rows  OC only (session): category edd (orders), edd_cart / edd_ship (cents), edd:<kind> (orders per session
+            ID kind), value = hidden (responses.eddsHidden), shown (responseMetadata.atleastSingleEDDShown), none
   category  total, valid (session ID starts with M), health (fenix-health-… health checks),
             one per known bad value (NA, ORDER_LOOKUP_CALL, xyz123, novalue; AB_KNOWN_VALUES to change),
             empty (""), missing (no session ID, or longer than 256 characters), numbers (digits only),
@@ -85,13 +90,22 @@ KNOWN = [v for v in (x.strip() for x in os.environ.get("AB_KNOWN_VALUES", "NA,OR
          if v and not v.startswith("M") and not v.startswith("fenix-health-")]
 COUNT_COLUMNS = ["minute", "source", "store", "page", "category", "value", "count"]
 ID_COLUMNS = ["minute", "source", "store", "page", "category", "session_id", "order_id", "doc_id", "at",
-              "browser", "os", "device", "brand", "app"]
+              "browser", "os", "device", "brand", "app", "edd", "cart", "ship"]
 UA_COLUMNS = ["minute", "store", "page", "dim", "value", "entries", "bad"]
 # browser / device of the shopper (session_history only): dimension -> field under userAgentInfo
 UA_DIMS = {"browser": "browserName", "os": "osName", "brand": "deviceBrand", "app": "webviewAppName"}
 UA_TOP = 10                                    # values kept per store / page / dimension and hour; the rest = "_other"
 UA_OTHER = "_other"
 UA_UNKNOWN = "(unknown)"
+# order confirmations (session_history): EDD hidden / shown / none, per session ID kind, with cart and shipping (cents)
+EDD_PAGES = ["OC", "oc"]
+EDD_HIDDEN = {"term": {"responses.eddsHidden": True}}
+CART_FIELD, SHIP_FIELD = "request.billingInfo.cartTotal.amount", "request.billingInfo.shipCost.amount"
+# conversion: unique valid session IDs per day, store, page and EDD group
+CONV_PAGES = ["PDP", "pdp", "COP", "cop", "OC", "oc"]
+CONV_COLUMNS = ["minute", "store", "page", "group", "sessions"]
+CONV_EVERY = dt.timedelta(minutes=15)           # today's unique counts are refreshed this often
+CONV_PRECISION = 3000                           # cardinality precision_threshold (exact below, ~1-2 % above)
 
 SOURCES = {
     "session": {"pattern": "*-session_history-*", "ts": "requestDttm", "page": "pageType", "sid": "sessionId",
@@ -312,7 +326,9 @@ def bad_ids(cred: dict, name: str, a: dt.datetime, b: dt.datetime) -> tuple[list
     sid = src["sid"] + ".keyword"
     body = {"size": MAX_IDS, "track_total_hits": True, "sort": [{src["ts"]: "asc"}],
             "_source": [src["sid"], src["page"], *src["order"],
-                        *(src["ua"] + f for f in ("browserName", "osName", "deviceName", "deviceBrand", "webviewAppName"))],
+                        *(src["ua"] + f for f in ("browserName", "osName", "deviceName", "deviceBrand", "webviewAppName")),
+                        *(["responses.eddsHidden", "responseMetadata.atleastSingleEDDShown", CART_FIELD, SHIP_FIELD]
+                          if name == "session" else [])],
             "query": {"bool": {"filter": flt, "must_not": [{"prefix": {sid: "M"}}, {"prefix": {sid: "fenix-health-"}}]}}}
     res = search(cred, src["pattern"], body, f"{name} bad IDs {iso(a)} to {iso(b)}")
     rows = []
@@ -324,7 +340,7 @@ def bad_ids(cred: dict, name: str, a: dt.datetime, b: dt.datetime) -> tuple[list
         rows.append({"minute": minute_key(slot(at)), "source": name, "store": store_of(h["_index"]),
                      "page": str(_get(s, src["page"]) or "(none)").upper(), "category": classify(v),
                      "session_id": "" if v is None else str(v)[:120], "order_id": order, "doc_id": h.get("_id", ""),
-                     "at": iso(at), **_ua(s, src["ua"])})
+                     "at": iso(at), **_ua(s, src["ua"]), **(_edd(s) if name == "session" else {})})
     total = (res["hits"].get("total") or {}).get("value", len(rows))
     return rows, max(0, total - len(rows))
 
@@ -336,6 +352,102 @@ def _ua(doc: dict, prefix: str) -> dict:
         return "" if v in (None, "", "??") else str(v)[:60]
     return {"browser": g("browserName"), "os": g("osName"), "device": g("deviceName"), "brand": g("deviceBrand"),
             "app": g("webviewAppName")}
+
+
+def _edd(doc: dict) -> dict:
+    """EDD group (hidden / shown / none), cart total and shipping cost of one session_history entry."""
+    resp = doc.get("responses")
+    resp = resp if isinstance(resp, list) else [resp] if isinstance(resp, dict) else []
+    if any(isinstance(r, dict) and r.get("eddsHidden") is True for r in resp):
+        grp = "hidden"
+    elif _get(doc, "responseMetadata.atleastSingleEDDShown") is True:
+        grp = "shown"
+    else:
+        grp = "none"
+
+    def money(f):
+        v = _get(doc, f)
+        return "" if v is None or isinstance(v, (dict, list)) else f"{float(v):.2f}"
+    return {"edd": grp, "cart": money(CART_FIELD), "ship": money(SHIP_FIELD)}
+
+
+def edd_filters() -> dict:
+    """filters aggregation: hidden (the response hid the EDD), shown (an EDD was shown), none (the rest)."""
+    return {"filters": {"filters": {
+        "hidden": EDD_HIDDEN,
+        "shown": {"bool": {"filter": [{"term": {"responseMetadata.atleastSingleEDDShown": True}}], "must_not": [EDD_HIDDEN]}}},
+        "other_bucket_key": "none"}}
+
+
+def oc_query(a: dt.datetime, b: dt.datetime) -> dict:
+    src = SOURCES["session"]
+    sid = src["sid"] + ".keyword"
+    eg = edd_filters()
+    eg["aggs"] = {"cat": category_filters(sid), "cart": {"sum": {"field": CART_FIELD}}, "ship": {"sum": {"field": SHIP_FIELD}}}
+    return {"size": 0, "track_total_hits": False,
+            "query": {"bool": {"filter": [_range(src, a, b), {"terms": {src["page"] + ".keyword": EDD_PAGES}}],
+                               "must_not": [{"prefix": {sid: "fenix-health-"}}]}},
+            "aggs": {"t": {"date_histogram": {"field": src["ts"], "fixed_interval": "5m", "min_doc_count": 1},
+                           "aggs": {"idx": {"terms": {"field": "_index", "size": 2000}, "aggs": {"edd": eg}}}}}}
+
+
+def oc_counts(cred: dict, a: dt.datetime, b: dt.datetime) -> dict[tuple, int]:
+    """Order confirmations of session_history in [a, b) per 5-minute window, store and EDD group:
+    {(minute, "session", store, "OC", category, group): n} with category edd (orders), edd_cart / edd_ship (cents)
+    and edd:<session ID kind> (orders with that kind of session ID). Health checks left out; zeros not written."""
+    res = search(cred, SOURCES["session"]["pattern"], oc_query(a, b), f"OC EDD {iso(a)} to {iso(b)}")
+    out: dict[tuple, int] = {}
+
+    def add(k, n):
+        if n:
+            out[k] = out.get(k, 0) + n
+
+    for tb in res["aggregations"]["t"]["buckets"]:
+        m = minute_key(from_ms(tb["key"]))
+        for ib in tb["idx"]["buckets"]:
+            store = store_of(ib["key"])
+            for grp, eb in ib["edd"]["buckets"].items():
+                add((m, "session", store, "OC", "edd", grp), eb["doc_count"])
+                add((m, "session", store, "OC", "edd_cart", grp), round(((eb.get("cart") or {}).get("value") or 0) * 100))
+                add((m, "session", store, "OC", "edd_ship", grp), round(((eb.get("ship") or {}).get("value") or 0) * 100))
+                for cat, cb in eb["cat"]["buckets"].items():
+                    add((m, "session", store, "OC", f"edd:{cat}", grp), cb["doc_count"])
+    return out
+
+
+def conv_query(a: dt.datetime, b: dt.datetime) -> dict:
+    src = SOURCES["session"]
+    sid = src["sid"] + ".keyword"
+    eg = edd_filters()
+    eg["aggs"] = {"u": {"cardinality": {"field": sid, "precision_threshold": CONV_PRECISION}}}
+    return {"size": 0, "track_total_hits": False,
+            "query": {"bool": {"filter": [_range(src, a, b), {"terms": {src["page"] + ".keyword": CONV_PAGES}},
+                                          {"prefix": {sid: "M"}}]}},
+            "aggs": {"idx": {"terms": {"field": "_index", "size": 2000},
+                             "aggs": {"pt": {"terms": {"field": src["page"] + ".keyword", "size": 10}, "aggs": {"edd": eg}}}}}}
+
+
+def conv_day(cred: dict, day: dt.date, until: dt.datetime) -> list[dict]:
+    """Unique valid session IDs of one UTC day (up to `until` for today) per store, page and EDD group."""
+    a = dt.datetime(day.year, day.month, day.day, tzinfo=dt.timezone.utc)
+    b = min(a + dt.timedelta(days=1), until)
+    if b <= a:
+        return []
+    res = search(cred, SOURCES["session"]["pattern"], conv_query(a, b), f"unique sessions {day}")
+    acc: dict[tuple, int] = {}
+    for ib in res["aggregations"]["idx"]["buckets"]:
+        store = store_of(ib["key"])
+        for pb in ib["pt"]["buckets"]:
+            for grp, eb in pb["edd"]["buckets"].items():
+                n = int((eb.get("u") or {}).get("value") or 0)
+                if n:
+                    k = (store, str(pb["key"]).upper(), grp)
+                    acc[k] = acc.get(k, 0) + n          # two indexes of one store in a day (month change): added
+    return [{"minute": minute_key(a), "store": st, "page": pg, "group": g, "sessions": n} for (st, pg, g), n in sorted(acc.items())]
+
+
+def conv_write(s3, day: dt.date, rows: list[dict]) -> None:
+    write_rows(s3, block_key("conv", f"{day:%Y-%m-%d}T00:00Z"), CONV_COLUMNS, rows)
 
 
 def ua_query(dim: str, a: dt.datetime, b: dt.datetime) -> dict:
@@ -430,6 +542,8 @@ def replace_rows(s3, kind: str, columns: list[str], lo: str, hi: str, rows: list
     allr = kept + rows
     if kind == "counts":
         allr.sort(key=lambda r: (r["minute"], r["source"], r["store"] != ALL, r["store"], r["page"], r["category"], r["value"]))
+    elif kind == "conv":
+        allr.sort(key=lambda r: (r["minute"], r["store"], r["page"], r["group"]))
     elif kind == "ua":
         allr.sort(key=lambda r: (r["minute"], r["store"], r["page"], r["dim"], -int(r["entries"] or 0)))
     else:
@@ -468,6 +582,7 @@ def count_range(s3, cred: dict, a: dt.datetime, b: dt.datetime, dry_run: bool = 
                 got, left = bad_ids(cred, name, t, u)
                 irows += got
                 tot["idsLeftOut"] += left
+            crow.update(oc_counts(cred, t, u))
             t = u
         rows = [{"minute": k[0], "source": k[1], "store": k[2], "page": k[3], "category": k[4], "value": k[5], "count": n}
                 for k, n in crow.items()]
@@ -475,7 +590,7 @@ def count_range(s3, cred: dict, a: dt.datetime, b: dt.datetime, dry_run: bool = 
         for k, n in crow.items():
             if k[2] == ALL:
                 tot["entries"][k[1]] += n
-            elif k[4] not in ("total", "valid", "health", "variant"):
+            elif k[4] not in ("total", "valid", "health", "variant") and not k[4].startswith("edd"):
                 tot["bad"] += n
         tot["ids"] += len(irows)
         tot["rows"] += len(rows)
@@ -493,7 +608,7 @@ def count_range(s3, cred: dict, a: dt.datetime, b: dt.datetime, dry_run: bool = 
 def print_rows(rows: list[dict]) -> None:
     agg: dict[tuple, dict] = {}
     for r in rows:
-        if r["store"] == ALL or r["category"] == "variant":
+        if r["store"] == ALL or r["category"] == "variant" or r["category"].startswith("edd"):
             continue
         d = agg.setdefault((r["source"], r["store"], r["page"]), {})
         d[r["category"]] = d.get(r["category"], 0) + r["count"]
@@ -536,6 +651,17 @@ def run(s3, cred_fn, now: dt.datetime | None = None, state: dict | None = None) 
         cred = cred_fn()
         tot = count_range(s3, cred, start, end)
         tot["uaRows"] = ua_range(s3, cred, start, end)
+        today = end.date()
+        new_day = state.get("convDay") != str(today)
+        if new_day or not state.get("convAt") or now - dt.datetime.strptime(state["convAt"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=dt.timezone.utc) >= CONV_EVERY:
+            days = ([today - dt.timedelta(days=1)] if new_day else []) + [today]   # after midnight: yesterday's final count
+            tot["convRows"] = 0
+            for d in days:
+                rows = conv_day(cred, d, end)
+                conv_write(s3, d, rows)
+                tot["convRows"] += len(rows)
+            state.update(convAt=iso(now), convDay=str(today))
     except Exception as e:                                       # noqa: BLE001
         status.update(ok=False, lastError=str(e)[:500], lastErrorAt=iso(now), tookMs=int((time.monotonic() - t0) * 1000))
         log(f"failed: {status['lastError']}")
@@ -553,7 +679,8 @@ def run(s3, cred_fn, now: dt.datetime | None = None, state: dict | None = None) 
     log(f"ok: {minute_key(start)} to {minute_key(end)}: session {tot['entries']['session']:,}, cop {tot['entries']['cop']:,} "
         f"entries, {tot['bad']:,} bad session IDs, {tot['ids']:,} listed"
         + (f" ({tot['idsLeftOut']:,} left out)" if tot["idsLeftOut"] else "")
-        + f", {tot['uaRows']:,} browser / device rows ({took} ms)")
+        + f", {tot['uaRows']:,} browser / device rows"
+        + (f", {tot['convRows']:,} unique-session rows" if "convRows" in tot else "") + f" ({took} ms)")
     return status, state
 
 
@@ -581,6 +708,24 @@ def main() -> int:
             for dim in UA_DIMS:
                 top = sorted(((v, n) for (d, v), n in by.items() if d == dim), key=lambda x: -x[1][0])[:6]
                 print(f"{dim:8} " + ", ".join(f"{v} {n:,} ({bd:,} bad)" for v, (n, bd) in top))
+            oc = oc_counts(cred, end - LOOKBACK, end)
+            g: dict[str, list[int]] = {}
+            for (_, _, _, _, cat, grp), n in oc.items():
+                e = g.setdefault(grp, [0, 0, 0, 0])
+                if cat == "edd":
+                    e[0] += n
+                elif cat == "edd_cart":
+                    e[1] += n
+                elif cat == "edd_ship":
+                    e[2] += n
+                elif cat.startswith("edd:") and cat not in ("edd:valid", "edd:health"):
+                    e[3] += n
+            print("OC EDD   " + ", ".join(f"{k} {o:,} orders (cart ${c / 100:,.0f}, ship ${sh / 100:,.0f}, {b:,} bad)"
+                                          for k, (o, c, sh, b) in sorted(g.items())))
+            cv: dict[tuple, int] = {}
+            for r in conv_day(cred, end.date(), end):
+                cv[(r["page"], r["group"])] = cv.get((r["page"], r["group"]), 0) + r["sessions"]
+            print("sessions " + ", ".join(f"{p}/{gr} {n:,}" for (p, gr), n in sorted(cv.items())) + "  (unique, today UTC so far)")
         except Exception as e:                                   # noqa: BLE001
             log(f"failed: {e}")
             return 1
@@ -598,6 +743,14 @@ def main() -> int:
             tot = count_range(s3, cred, start, slot(now), verbose=True)
             log("browser / device counts per hour …")
             tot["uaRows"] = ua_range(s3, cred, start, slot(now))
+            log("unique sessions per day (conversion) …")
+            tot["convRows"] = 0
+            d = start.date()
+            while d <= now.date():
+                rows = conv_day(cred, d, slot(now))
+                conv_write(s3, d, rows)
+                tot["convRows"] += len(rows)
+                d += dt.timedelta(days=1)
         except Exception as e:                                   # noqa: BLE001
             log(f"backfill failed: {e}")
             return 1
@@ -607,7 +760,7 @@ def main() -> int:
             write_state(state)
         log(f"backfill done: {tot['windows']} windows, {tot['entries']}, {tot['bad']:,} bad session IDs, "
             f"{tot['ids']:,} listed" + (f", {tot['idsLeftOut']:,} left out" if tot["idsLeftOut"] else "")
-            + f", {tot['uaRows']:,} browser / device rows")
+            + f", {tot['uaRows']:,} browser / device rows, {tot['convRows']:,} unique-session rows")
         return 0
 
     status, state = run(s3, credentials, now, read_state())

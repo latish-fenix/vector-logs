@@ -80,8 +80,9 @@ def agg(windows):
 
 
 class FakeES:
-    def __init__(self, session=None, cop=None, hits=None, ua=None):
+    def __init__(self, session=None, cop=None, hits=None, ua=None, oc=None, conv=None):
         self.session, self.cop, self.hits, self.ua = session or {}, cop or {}, hits or {}, ua or {}
+        self.oc, self.conv = oc or {}, conv or {}       # oc: {minute: {index: {group: (n, cart $, ship $, {cat: n})}}}
         self.calls = []
 
     def __call__(self, cred, pattern, body, what):
@@ -90,6 +91,20 @@ class FakeES:
         r = next(iter(rng.values()))
         a, b = ab.from_ms(r["gte"]), ab.from_ms(r["lt"])
         self.calls.append((name, body["size"], a, b))
+        if body["size"] == 0 and "t" in body["aggs"] and "edd" in body["aggs"]["t"]["aggs"]["idx"]["aggs"]:   # OC EDD
+            return {"_shards": {"failed": 0}, "aggregations": {"t": {"buckets": [
+                {"key": ab.ms(m), "doc_count": 0, "idx": {"buckets": [
+                    {"key": ix, "doc_count": 0, "edd": {"buckets": {g: {"doc_count": n, "cart": {"value": c}, "ship": {"value": sh},
+                                                                         "cat": cats(**cs)} for g, (n, c, sh, cs) in grps.items()}}}
+                    for ix, grps in idx.items()]}}
+                for m, idx in self.oc.items() if a <= m < b]}}}
+        if body["size"] == 0 and "idx" in body["aggs"] and "edd" in body["aggs"]["idx"]["aggs"]["pt"]["aggs"]:   # unique sessions
+            idx = {}
+            for (ix, page), grps in self.conv.get(a, {}).items():
+                idx.setdefault(ix, []).append({"key": page, "doc_count": 0, "edd": {"buckets": {
+                    g: {"doc_count": n, "u": {"value": n}} for g, n in grps.items()}}})
+            return {"_shards": {"failed": 0}, "aggregations": {"idx": {"buckets": [
+                {"key": ix, "doc_count": 0, "pt": {"buckets": pts}} for ix, pts in idx.items()]}}}
         if body["size"] == 0 and "idx" in body["aggs"]:          # browser / device counts
             field = body["aggs"]["idx"]["aggs"]["pt"]["aggs"]["v"]["terms"]["field"]
             dim = next(d for d, f in ab.UA_DIMS.items() if field.endswith("." + f + ".keyword"))
@@ -173,7 +188,7 @@ def test_bad_ids_rows(monkeypatch):
     assert rows == [{"minute": "2026-11-19T10:05Z", "source": "session", "store": SPO, "page": "OC",
                      "category": "ORDER_LOOKUP_CALL", "session_id": "ORDER_LOOKUP_CALL", "order_id": "19004270313532",
                      "doc_id": "d1", "at": "2026-11-19T10:05:40Z", "browser": "Instagram", "os": "iOS",
-                     "device": "Apple iPhone", "brand": "Apple", "app": "Instagram"}]
+                     "device": "Apple iPhone", "brand": "Apple", "app": "Instagram", "edd": "none", "cart": "", "ship": ""}]
     rows, _ = ab.bad_ids({}, "cop", T, T + dt.timedelta(minutes=15))
     assert rows[0]["page"] == "COP" and rows[0]["order_id"] == "7798832857326" and rows[0]["category"] == "xyz123"
 
@@ -297,3 +312,48 @@ def test_run_writes_hourly_browser_rows_and_rewrites_the_current_hour(monkeypatc
     assert len(s3.rows("ua/dt=2026-11-19/part-08.csv.gz")) == 1
     ua_spans = sorted({(c[2], c[3]) for c in es.calls if c[0] == "session" and c[1] == 0})
     assert (T, T + dt.timedelta(minutes=35)) in ua_spans                 # the current hour up to the run, from its start
+
+
+def test_oc_edd_groups_money_and_bad_ids(monkeypatch):
+    m = T + dt.timedelta(minutes=5)
+    es = FakeES(oc={m: {SH: {"hidden": (11, 1540.25, 30.0, {"valid": 9, "NA": 2}), "shown": (19, 2601.5, 0.0, {"valid": 19}),
+                             "none": (1, 0, 0, {"ORDER_LOOKUP_CALL": 1})},
+                        f"{SPO}-session_history-2026.10": {"hidden": (1, 10.0, 1.0, {"valid": 1})}}})
+    monkeypatch.setattr(ab, "search", es)
+    out = ab.oc_counts({}, T, T + dt.timedelta(minutes=15))
+    k = lambda cat, g: ("2026-11-19T10:05Z", "session", SPO, "OC", cat, g)   # noqa: E731
+    assert out[k("edd", "hidden")] == 12 and out[k("edd", "shown")] == 19     # two indexes of one store add up
+    assert out[k("edd_cart", "hidden")] == 155025 and out[k("edd_ship", "hidden")] == 3100
+    assert out[k("edd:NA", "hidden")] == 2 and out[k("edd:valid", "shown")] == 19
+    assert k("edd_ship", "shown") not in out
+    q = ab.oc_query(T, T + dt.timedelta(minutes=5))
+    assert {"terms": {"pageType.keyword": ["OC", "oc"]}} in q["query"]["bool"]["filter"]
+    assert q["aggs"]["t"]["aggs"]["idx"]["aggs"]["edd"]["filters"]["filters"]["hidden"] == {"term": {"responses.eddsHidden": True}}
+
+
+def test_edd_of_one_entry():
+    assert ab._edd({"responses": [{"eddsHidden": False}, {"eddsHidden": True}]})["edd"] == "hidden"
+    assert ab._edd({"responses": [{"eddsHidden": False}], "responseMetadata": {"atleastSingleEDDShown": True},
+                    "request": {"billingInfo": {"cartTotal": {"amount": 141.5}, "shipCost": {"amount": 0}}}}) == \
+        {"edd": "shown", "cart": "141.50", "ship": "0.00"}
+    assert ab._edd({}) == {"edd": "none", "cart": "", "ship": ""}
+
+
+def test_unique_sessions_per_day_and_the_run_refreshes_them(monkeypatch):
+    day = dt.datetime(2026, 11, 19, tzinfo=UTC)
+    es = FakeES(conv={day: {(SH, "PDP"): {"shown": 400, "hidden": 380}, (SH, "cop"): {"shown": 30},
+                            (f"{SPO}-session_history-2026.10", "PDP"): {"shown": 5}}})
+    monkeypatch.setattr(ab, "search", es)
+    rows = {(r["page"], r["group"]): r["sessions"] for r in ab.conv_day({}, day.date(), T)}
+    assert rows == {("PDP", "shown"): 405, ("PDP", "hidden"): 380, ("COP", "shown"): 30}
+    q = ab.conv_query(day, T)
+    assert {"prefix": {"sessionId.keyword": "M"}} in q["query"]["bool"]["filter"]
+    s3 = FakeS3()
+    st, state = ab.run(s3, lambda: {}, now=T + dt.timedelta(minutes=15, seconds=5), state={})
+    assert len(s3.rows("conv/dt=2026-11-19/part-00.csv.gz")) == 3 and state["convDay"] == "2026-11-19"
+    n_conv = lambda: len([c for c in es.calls if c[1] == 0 and c[2] == day])   # noqa: E731
+    before = n_conv()
+    ab.run(s3, lambda: {}, now=T + dt.timedelta(minutes=20, seconds=5), state=state)   # 5 minutes later: not due
+    assert n_conv() == before
+    ab.run(s3, lambda: {}, now=T + dt.timedelta(minutes=31), state=state)              # 15 minutes later: refreshed
+    assert n_conv() == before + 1

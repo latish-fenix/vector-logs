@@ -309,3 +309,25 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .dialog.wide:has(.ab-ids) { width: 1100px; }
 .ab-ids td { white-space: nowrap; }
 .ab-ids .ab-sid { max-width: 300px; }
+
+.ab-edd-row { display: grid; grid-template-columns: minmax(0, 2.3fr) minmax(280px, 1fr); gap: 16px; }
+@media (max-width: 1100px) { .ab-edd-row { grid-template-columns: minmax(0, 1fr); } }
+.ab-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; }
+.ab-avg { display: flex; justify-content: space-around; align-items: flex-end; padding: 10px 16px 4px; min-height: 190px; }
+.ab-avg-group { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.ab-avg-bars { display: flex; gap: 10px; align-items: flex-end; border-bottom: 1px solid var(--border); padding: 0 6px; }
+.ab-avg-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.ab-avg-col .v { font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.ab-avg-col .bar { width: 42px; border-radius: 4px 4px 0 0; display: block; min-height: 2px; }
+.ab-avg-label { font-size: 12px; color: var(--muted); }
+.ab-stack-bar { display: flex; height: 12px; width: 180px; border-radius: 4px; overflow: hidden; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.ab-stack-bar span { display: block; height: 100%; }
+.ab-conv-step { display: grid; grid-template-columns: 180px minmax(0, 1fr) 120px; gap: 14px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--row-border); }
+.ab-conv-label { font-weight: 650; }
+.ab-conv-bar { display: flex; align-items: center; gap: 10px; margin: 4px 0; white-space: nowrap; }
+.ab-conv-bar .bar { display: block; height: 18px; border-radius: 4px; min-width: 2px; }
+.ab-conv-bar b { font-variant-numeric: tabular-nums; }
+.ab-conv-diff { text-align: right; display: flex; flex-direction: column; }
+.ab-conv-diff .ok { color: var(--success-text); } .ab-conv-diff .bad { color: var(--danger-text); }
+.ab-edd-tag { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); }
+.ab-edd-tag[data-g="shown"] { color: #1d4ed8; } .ab-edd-tag[data-g="hidden"] { color: #b45309; }

@@ -583,7 +583,17 @@ export interface AbStoreDetail extends Partial<Omit<AbStoreRow, "pages">> {
   variantSeries?: Record<string, (number | null)[]>;
   /** Browser / device of the shoppers (hourly counts), per page and dimension. */
   ua?: { pages: Record<string, Partial<Record<AbUaDim, AbUaItem[]>>>; from: number | null; to: number | null };
+  /** Order confirmations per EDD group (hidden / shown / none). */
+  edd?: { groups: AbEddGroup[]; series: Partial<Record<AbEddName, (number | null)[]>> } | null;
+  /** Unique valid session IDs per page and EDD group, whole UTC days. */
+  conversion?: { groups: AbConvGroup[]; fromDay: number | null; toDay: number | null } | null;
 }
+export type AbEddName = "shown" | "hidden" | "none";
+export interface AbEddGroup {
+  group: AbEddName; orders: number; share: number | null; cart: number; avgCart: number; ship: number; avgShip: number;
+  valid: number; bad: number; badPct: number | null; categories: AbCategory[];
+}
+export interface AbConvGroup { group: AbEddName; pdp: number; cop: number; oc: number; pdpToCop: number | null; copToOc: number | null; pdpToOc: number | null }
 export type AbUaDim = "browser" | "os" | "brand" | "app";
 export interface AbUaItem { value: string; entries: number; bad: number; pct: number | null }
 export interface AbCollectorStatus {
@@ -599,7 +609,7 @@ export interface AbIds {
   from: number; to: number; store: string; source: AbSource; page: string | null; category: string | null;
   total: number; truncated: boolean; values: { value: string; count: number }[];
   rows: { at: string; page: string; category: string; sessionId: string; orderId: string; docId: string;
-    browser: string; os: string; device: string; brand: string; app: string }[];
+    browser: string; os: string; device: string; brand: string; app: string; edd?: string; cart?: number | null; ship?: number | null }[];
   mix?: { browser: { value: string; count: number; pct: number | null }[]; os: { value: string; count: number; pct: number | null }[] };
   dim?: string | null; value?: string | null;
   error: string | null;
