@@ -443,6 +443,8 @@ function AvgBars({ groups }: { groups: AbEddGroup[] }) {
 }
 
 const EDD_BAD_COLOR: Record<string, string> = { NA: "#dc2626", ORDER_LOOKUP_CALL: "#f97316", xyz123: "#eab308", numbers: "#a855f7", uuid: "#0ea5e9" };
+const VALID_COLOR = "color-mix(in srgb, var(--accent) 28%, var(--surface))";
+const badColor = (c: string) => EDD_BAD_COLOR[c] ?? "#64748b";
 
 function EddBadTable({ groups, onOpen }: { groups: AbEddGroup[]; onOpen: (category: string, group: AbEddName) => void }) {
   const cats = useMemo(() => {
@@ -456,8 +458,8 @@ function EddBadTable({ groups, onOpen }: { groups: AbEddGroup[]; onOpen: (catego
       <CardHead title="Bad session IDs by EDD group" sub="Order confirmations per group by session ID kind · a click on a count lists those orders with session ID, order ID, cart total and shipping cost" />
       <div className="table-scroll" style={{ maxHeight: "none" }}>
         <table className="table ops-table ab-check">
-          <thead><tr><th>Group</th><th className="num">Orders</th><th aria-hidden="true" /><th className="num">Valid (M…)</th>
-            {cats.map((c) => <th key={c} className="num" title={CAT_TITLE[c]}>{catLabel(c)}</th>)}<th className="num">Bad %</th></tr></thead>
+          <thead><tr><th>Group</th><th className="num">Orders</th><th aria-hidden="true" /><th className="num"><i className="ab-sw" style={{ background: VALID_COLOR }} />Valid (M…)</th>
+            {cats.map((c) => <th key={c} className="num" title={CAT_TITLE[c]}><i className="ab-sw" style={{ background: badColor(c) }} />{catLabel(c)}</th>)}<th className="num">Bad %</th></tr></thead>
           <tbody>
             {groups.map((g) => {
               const by = Object.fromEntries(g.categories.map((c) => [c.category, c]));
@@ -467,8 +469,10 @@ function EddBadTable({ groups, onOpen }: { groups: AbEddGroup[]; onOpen: (catego
                   <td className="num" style={{ fontWeight: 600 }}>{num(g.orders)}</td>
                   <td aria-hidden="true">
                     <div className="ab-stack-bar">
-                      <span style={{ width: `${(100 * g.valid) / Math.max(1, g.orders)}%`, background: "color-mix(in srgb, var(--accent) 28%, var(--surface))" }} />
-                      {cats.map((c) => by[c] ? <span key={c} style={{ width: `${(100 * by[c].count) / Math.max(1, g.orders)}%`, background: EDD_BAD_COLOR[c] ?? "#64748b" }} /> : null)}
+                      <span style={{ width: `${(100 * g.valid) / Math.max(1, g.orders)}%`, background: VALID_COLOR }}
+                        title={`Valid (starts with M): ${num(g.valid)} · ${pct(by.valid?.pct)}`} />
+                      {cats.map((c) => by[c] ? <span key={c} style={{ width: `${(100 * by[c].count) / Math.max(1, g.orders)}%`, background: badColor(c) }}
+                        title={`${catLabel(c)}: ${num(by[c].count)} · ${pct(by[c].pct)}`} /> : null)}
                     </div>
                   </td>
                   <td className="num">{num(g.valid)}<span className="ab-pc">{pct(by.valid?.pct)}</span></td>
@@ -483,6 +487,10 @@ function EddBadTable({ groups, onOpen }: { groups: AbEddGroup[]; onOpen: (catego
             })}
           </tbody>
         </table>
+      </div>
+      <div className="ab-ua-legend ab-edd-legend">
+        <span><i style={{ background: VALID_COLOR }} />Valid (starts with M)</span>
+        {cats.map((c) => <span key={c} title={CAT_TITLE[c]}><i style={{ background: badColor(c) }} />{catLabel(c)}</span>)}
       </div>
     </section>
   );

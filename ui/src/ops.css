@@ -331,3 +331,5 @@ button.ops-kpi { cursor: pointer; } button.ops-kpi:hover { border-color: var(--b
 .ab-conv-diff .ok { color: var(--success-text); } .ab-conv-diff .bad { color: var(--danger-text); }
 .ab-edd-tag { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); }
 .ab-edd-tag[data-g="shown"] { color: #1d4ed8; } .ab-edd-tag[data-g="hidden"] { color: #b45309; }
+.ab-edd-legend { flex-wrap: wrap; padding: 10px 16px 14px; border-top: 1px solid var(--row-border); }
+.ab-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
