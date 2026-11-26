@@ -235,6 +235,12 @@ def test_api_gateway_p95_alert(env):
     assert not any(x.bad for x in f) and any("backend p95 190 ms" in x.message for x in f)
     f = svc.evaluate(validate_rule({"type": "apigw_latency", "params": {"p95Ms": 50, "stages": ["Alpha-EDDS-1/felina"]}}), MS(NOW))
     assert len(f) == 1 and f[0].bad
+    # API names with spaces and brackets can be picked
+    r = client.post(f"{URL}/rules", json={"type": "apigw_latency", "params": {"stages": ["Fenix EDD API (prod)/v1", "Vuori/vuori"]}},
+                    headers=ROOT_H)
+    assert r.status_code == 201 and r.json()["params"]["stages"] == ["Fenix EDD API (prod)/v1", "Vuori/vuori"]
+    assert client.post(f"{URL}/rules", json={"type": "apigw_latency", "params": {"stages": ["bad\nname"]}},
+                       headers=ROOT_H).status_code == 400
     # too few calls: watched but never bad
     f = svc.evaluate(validate_rule({"type": "apigw_latency", "params": {"p95Ms": 50, "minCalls": 1000}}), MS(NOW))
     assert [x.bad for x in f if "felina" in x.link] == [False]

@@ -108,6 +108,8 @@ MINUTE = 60_000
 LB_LAG_MINUTES = 10          # ALB files arrive every 5 minutes and are converted every 5 minutes
 WEBHOOK_RE = re.compile(r"^https://hooks\.slack\.com/(services|triggers|workflows)/[A-Za-z0-9/_\-]{10,300}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$")
+# API Gateway "api/stage": API names may have spaces, brackets and other characters
+STAGE_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,300}$")
 ZONE_RE = re.compile(r"^[A-Za-z_]+(/[A-Za-z0-9_+\-]+){0,2}$|^UTC$")
 
 
@@ -392,7 +394,8 @@ def validate_rule(body: dict, existing: dict | None = None) -> dict:
                 raise bad_request("INVALID_ALERT", f"'{label}' must be between {p['min']} and {p['max']}")
             v = int(v) if v == int(v) else v
         elif p["kind"] in ("logClusters", "ecsClusters", "lbs", "targetGroups", "apiStages"):
-            if not isinstance(v, list) or len(v) > 200 or not all(isinstance(x, str) and NAME_RE.match(x) for x in v):
+            pattern = STAGE_RE if p["kind"] == "apiStages" else NAME_RE
+            if not isinstance(v, list) or len(v) > 200 or not all(isinstance(x, str) and pattern.match(x) for x in v):
                 raise bad_request("INVALID_ALERT", f"'{label}' must be a list of names")
             v = sorted(set(v))
             if p.get("required") and not v:
