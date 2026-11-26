@@ -50,6 +50,13 @@
 .chan-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; vertical-align: 1px;
   background: var(--surface-3); color: var(--muted); border: 1px solid var(--border); }
 .chan-tag.main { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent-soft-border); }
+.chan-tag.added { background: color-mix(in srgb, #7c3aed 12%, var(--surface)); color: #6d28d9; border-color: color-mix(in srgb, #7c3aed 30%, var(--surface)); }
+.added-channels { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; border-top: 1px solid var(--border); }
+.added-channels > .label { margin-top: 10px; }
+.added-channel, .added-channel-new { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.added-channel { padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.added-channel .input, .added-channel-new .input { flex: 1 1 220px; min-width: 0; }
+.added-channel-new .input:first-child, .added-channel .input:first-child { flex: 0 1 220px; }
 
 /* Alerts page: a Slack message preview (the end-of-day summary) */
 .sk-msg { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 10px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px;

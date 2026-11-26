@@ -212,6 +212,8 @@ Cluster access is `{"<cluster>": "view", "*": "view", "<cluster>": "none"}`:
 | `PUT /admin/alerts/slack/infra` / `DELETE`, `POST /admin/alerts/slack/infra/_test` | admins | `{webhookUrl}`: the infra channel (every rule with `channel: "infra"`; Secrets Manager `<prefix>alerts-infra`). Not set = those alerts go to the main channel (`/admin/alerts/slack`) |
 | `PUT /admin/alerts/slack/digest` / `DELETE` | admins | `{webhookUrl}`: the summaries channel (daily + weekly summaries; kept in Secrets Manager `<prefix>alerts-digest`). Not set = summaries go to the alerts channel |
 | `POST /admin/alerts/slack/digest/_test` | admins | `{webhookUrl?}`: test message to the summaries channel |
+| `POST /admin/alerts/channels` | admins | `{name, webhookUrl}`: add a Slack channel (up to 10) that rules can post to (`channel: "c_…"` on the rule); webhook in Secrets Manager `<prefix>alerts-ch-<id>`, never returned. `GET /admin/alerts` lists them as `channels` (id, name, hint) |
+| `PUT /admin/alerts/channels/{id}` / `DELETE`, `POST /admin/alerts/channels/{id}/_test` | admins | `{name?, webhookUrl?}`: rename / change the webhook; DELETE removes it and puts its rules back on their default channel (`rulesMoved`); `_test` sends a test message |
 | `GET /alerts/history?limit=100` | everyone | Alerts sent (or not, with `error`): `event` `firing` / `escalated` / `lowered` / `repeat` / `resolved` / `muted` (with `mutedBy`) / `digest`, `level`, `snoozed`; members only see those about their clusters |
 
 ## Ops dashboard

@@ -81,13 +81,23 @@ DEFAULT_DAILY = {"enabled": True, "zone": "EST", "time": "00:20"}
 # status-code rules go to the main channel, everything else to the infra channel.
 RULE_CHANNELS = ("main", "infra")
 MAIN_CHANNEL_TYPES = frozenset({"lb_errors", "lb_status"})
+# More channels admins add on the Alerts page (name + webhook; config key "channels", secret
+# alerts-ch-<id>); a rule may post to one of them (channel = its id, "c_" + 8 hex).
+MAX_CHANNELS = 10
+CHANNEL_ID_RE = re.compile(r"^c_[0-9a-f]{8}$")
 
 
-def channel_of(rule: dict) -> str:
+def channel_of(rule: dict, extra: set[str] | frozenset = frozenset()) -> str:
+    """The channel a rule posts to: main, infra or one of the added channels (`extra` = their ids;
+    a rule whose added channel was removed goes back to its default)."""
     ch = rule.get("channel")
-    if ch in RULE_CHANNELS:
+    if ch in RULE_CHANNELS or ch in extra:
         return ch
     return "main" if rule.get("type") in MAIN_CHANNEL_TYPES else "infra"
+
+
+def channel_ids(cfg: dict) -> set[str]:
+    return {c["id"] for c in cfg.get("channels") or []}
 DAILY_ZONES = ("EST", "PST", "IST")
 DAILY_WINDOW_MINUTES = 180
 SNOOZE_MINUTES = (60, 240, 1440)
@@ -419,8 +429,8 @@ def validate_rule(body: dict, existing: dict | None = None) -> dict:
            "forMinutes": minutes("forMinutes", spec["forMinutes"], 1440)}
     ch = body.get("channel", (existing or {}).get("channel"))
     if ch is not None:
-        if ch not in RULE_CHANNELS:
-            raise bad_request("INVALID_ALERT", "channel must be main or infra")
+        if ch not in RULE_CHANNELS and not (isinstance(ch, str) and CHANNEL_ID_RE.match(ch)):
+            raise bad_request("INVALID_ALERT", "channel must be main, infra or the id of an added channel")
         out["channel"] = ch
     return out
 
@@ -589,10 +599,17 @@ class AlertService:
         self.config()
         return _update_with_retry(self.store, CONFIG_KEY, mutate, {"rules": []})
 
+    @staticmethod
+    def _known_channel(doc: dict, rule: dict) -> None:
+        ch = rule.get("channel")
+        if ch and ch not in RULE_CHANNELS and ch not in channel_ids(doc):
+            raise bad_request("INVALID_ALERT", "That channel doesn't exist (any more): pick another one")
+
     def add_rule(self, body: dict, actor: str) -> dict:
         rule = {"id": new_id()[:10], **validate_rule(body), "createdAt": iso(), "updatedAt": iso(), "updatedBy": actor}
 
         def mutate(doc):
+            self._known_channel(doc, rule)
             if len(doc["rules"]) >= MAX_RULES:
                 raise bad_request("TOO_MANY_ALERTS", f"At most {MAX_RULES} alert rules")
             doc["rules"].append(rule)
@@ -605,8 +622,11 @@ class AlertService:
                 if r["id"] == rule_id:
                     merged = {**r, **{k: v for k, v in body.items() if k in ("name", "enabled", "forMinutes", "channel")}}
                     merged["params"] = {**r.get("params", {}), **(body.get("params") or {})}
-                    doc["rules"][i] = {**r, **validate_rule(merged, existing=r), "updatedAt": iso(), "updatedBy": actor}
-                    return doc["rules"][i]
+                    new = {**r, **validate_rule(merged, existing=r), "updatedAt": iso(), "updatedBy": actor}
+                    if new.get("channel") != r.get("channel"):
+                        self._known_channel(doc, new)
+                    doc["rules"][i] = new
+                    return new
             raise not_found("ALERT_NOT_FOUND", "No alert rule with that id")
         return self._update(mutate)
 
@@ -754,7 +774,95 @@ class AlertService:
             return slack
         return self._update(mutate)
 
+    # -- channels added on the Alerts page (name + webhook)
+    @staticmethod
+    def _channel_name(name: Any) -> str:
+        name = str(name or "").strip()
+        if not 1 <= len(name) <= 60:
+            raise bad_request("INVALID_CHANNEL", "The channel name must have 1 to 60 characters, e.g. #api-latency")
+        return name
+
+    def add_channel(self, name: str, url: str, actor: str) -> dict:
+        name, url = self._channel_name(name), (url or "").strip()
+        if not WEBHOOK_RE.match(url):
+            raise bad_request("INVALID_WEBHOOK", "Paste a Slack incoming webhook URL (https://hooks.slack.com/services/…)")
+        cid = "c_" + new_id()[:8]
+
+        def check(doc):
+            chans = doc.get("channels") or []
+            if len(chans) >= MAX_CHANNELS:
+                raise bad_request("TOO_MANY_CHANNELS", f"At most {MAX_CHANNELS} added channels")
+            if any(c["name"].lower() == name.lower() for c in chans):
+                raise bad_request("CHANNEL_EXISTS", f"There is already a channel called {name}")
+        check(self.config())
+        self.secrets.put(f"alerts-ch-{cid}", {"slackWebhookUrl": url}, f"Vector Logs viewer: Slack webhook for {name}")
+
+        def mutate(doc):
+            check(doc)
+            ch = {"id": cid, "name": name, "configured": True, "hint": mask_webhook(url), "updatedAt": iso(),
+                  "updatedBy": actor, "version": 1}
+            doc.setdefault("channels", []).append(ch)
+            return ch
+        return self._update(mutate)
+
+    def update_channel(self, cid: str, actor: str, name: str | None = None, url: str | None = None) -> dict:
+        url = (url or "").strip()
+        if url and not WEBHOOK_RE.match(url):
+            raise bad_request("INVALID_WEBHOOK", "Paste a Slack incoming webhook URL (https://hooks.slack.com/services/…)")
+        new_name = self._channel_name(name) if name is not None else None
+        ch0 = next((c for c in self.config().get("channels") or [] if c["id"] == cid), None)
+        if ch0 is None:
+            raise not_found("CHANNEL_NOT_FOUND", "No added channel with that id")
+        if url:
+            self.secrets.put(f"alerts-ch-{cid}", {"slackWebhookUrl": url},
+                             f"Vector Logs viewer: Slack webhook for {new_name or ch0['name']}")
+
+        def mutate(doc):
+            for c in doc.get("channels") or []:
+                if c["id"] == cid:
+                    if new_name and any(o["name"].lower() == new_name.lower() and o["id"] != cid for o in doc["channels"]):
+                        raise bad_request("CHANNEL_EXISTS", f"There is already a channel called {new_name}")
+                    if new_name:
+                        c["name"] = new_name
+                    if url:
+                        c.update(configured=True, hint=mask_webhook(url), version=int(c.get("version", 0)) + 1)
+                    c.update(updatedAt=iso(), updatedBy=actor)
+                    return c
+            raise not_found("CHANNEL_NOT_FOUND", "No added channel with that id")
+        return self._update(mutate)
+
+    def delete_channel(self, cid: str, actor: str) -> dict:
+        """Remove an added channel; its rules go back to their default channel."""
+        def mutate(doc):
+            chans = doc.get("channels") or []
+            hit = next((c for c in chans if c["id"] == cid), None)
+            if hit is None:
+                raise not_found("CHANNEL_NOT_FOUND", "No added channel with that id")
+            doc["channels"] = [c for c in chans if c["id"] != cid]
+            moved = 0
+            for r in doc["rules"]:
+                if r.get("channel") == cid:
+                    r.pop("channel")
+                    moved += 1
+            return {"removed": hit["name"], "rulesMoved": moved}
+        out = self._update(mutate)
+        try:
+            self.secrets.delete(f"alerts-ch-{cid}")
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not delete the secret of channel %s: %s", cid, _err(e))
+        return out
+
     def webhook(self, cfg: dict | None = None, channel: str = "alerts") -> str | None:
+        if channel not in CHANNELS:                         # an added channel
+            cfg = cfg or self.config()
+            ch = next((c for c in cfg.get("channels") or [] if c["id"] == channel), None)
+            if ch is None or not ch.get("configured"):
+                return None
+            secret = f"alerts-ch-{channel}"
+            if ch.get("version", 0) != self._webhook_version.get(channel) and hasattr(self.secrets, "forget"):
+                self.secrets.forget(secret)
+            self._webhook_version[channel] = ch.get("version", 0)
+            return ((self.secrets.get(secret) or {}).get("slackWebhookUrl") or None)
         secret, key, _ = CHANNELS[channel]
         cfg = cfg or self.config()
         version = (cfg.get(key) or {}).get("version", 0)
@@ -782,9 +890,13 @@ class AlertService:
         if not WEBHOOK_RE.match(url):
             raise bad_request("INVALID_WEBHOOK", "That isn't a Slack incoming webhook URL")
         cfg = self.config()
-        what = {"alerts": "Load balancer error-rate alerts (HTTP 5xx / 4xx) will arrive here.",
-                "infra": "Infra alerts (ECS, logs, the viewer, slow responses) will arrive here.",
-                "digest": "The end-of-day and weekly summaries will arrive here."}[channel]
+        if channel in CHANNELS:
+            what = {"alerts": "Load balancer error-rate alerts (HTTP 5xx / 4xx) will arrive here.",
+                    "infra": "Infra alerts (ECS, logs, the viewer, slow responses) will arrive here.",
+                    "digest": "The end-of-day and weekly summaries will arrive here."}[channel]
+        else:
+            name = next((c["name"] for c in cfg.get("channels") or [] if c["id"] == channel), channel)
+            what = f"Alerts of the rules set to post to {name} will arrive here."
         text = f":wave: Test message from the Vector Logs viewer, sent by {actor}. {what}"
         self.sender(url, {"text": text, "blocks": [
             {"type": "section", "text": {"type": "mrkdwn", "text": _esc(text)}},
@@ -2009,17 +2121,19 @@ class AlertService:
             return None, "Notifications are paused"
         try:
             url = (self.summary_webhook(cfg) if summary else self.infra_webhook(cfg) if channel == "infra"
-                   else self.webhook(cfg))
+                   else self.webhook(cfg) if channel == "main"
+                   else self.webhook(cfg, channel) or self.webhook(cfg))     # an added channel, else main
             return url, None if url else "No Slack webhook set"
         except Exception as e:  # noqa: BLE001
             return None, f"Can't read the Slack webhook: {_err(e)}"
 
     def _notify(self, cfg: dict, batches, now: int) -> list[dict]:
-        targets = {ch: self._delivery(cfg, channel=ch) for ch in RULE_CHANNELS}
+        extra = channel_ids(cfg)
+        targets = {ch: self._delivery(cfg, channel=ch) for ch in (*RULE_CHANNELS, *sorted(extra))}
         entries = []
         order = {"muted": -1, "resolved": 0, "lowered": 1, "repeat": 2, "firing": 3, "escalated": 4}
         for rule, kind, level, items, snoozed in sorted(batches, key=lambda b: (order[b[1]], RANK[b[2]])):
-            url, error = targets[channel_of(rule)]
+            url, error = targets[channel_of(rule, extra)]
             if kind == "muted":
                 for f, cur in items:
                     entries.append({"id": new_id()[:12], "at": now, "ruleId": rule["id"], "ruleName": rule["name"],

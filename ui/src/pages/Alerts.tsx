@@ -3,6 +3,7 @@ import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   type AlertChannel,
+  type AddedChannel,
   type SlackHook,
   get, request,
   type AlertEvent, type AlertFinding, type AlertLevel, type AlertMuteEntry, type AlertOptions, type AlertPair, type AlertParamSpec, type AlertRule,
@@ -76,7 +77,7 @@ function AdminAlerts() {
       </section>
       <History />
       {adding && <TypePicker catalog={d.catalog} onClose={() => setAdding(false)} onPick={(type) => { setAdding(false); setEditing({ type }); }} />}
-      {editing?.type && <RuleDialog type={editing.type} rule={editing.rule} lag={d.lbLagMinutes} settings={d.settings} mainTypes={d.mainChannelTypes} onClose={() => setEditing(null)} />}
+      {editing?.type && <RuleDialog type={editing.type} rule={editing.rule} lag={d.lbLagMinutes} settings={d.settings} mainTypes={d.mainChannelTypes} channels={d.channels ?? []} onClose={() => setEditing(null)} />}
     </>
   );
 }
@@ -98,7 +99,7 @@ function SlackCard({ d }: { d: AlertsOverview }) {
   return (
     <section className="card">
       <div className="card-head">
-        <div className="grow"><span className="card-title">Slack</span><span className="hint">Three channels, each through a Slack incoming webhook. Each rule says which alert channel it posts to (change it in the rule). The URLs are kept in AWS Secrets Manager and never shown again.</span></div>
+        <div className="grow"><span className="card-title">Slack</span><span className="hint">Slack channels, each through an incoming webhook. Each rule says which channel it posts to (change it in the rule). The URLs are kept in AWS Secrets Manager and never shown again.</span></div>
         {d.slack.configured && (
           <button type="button" className="btn btn-sm" onClick={() => settings.mutate({ paused: !d.settings.paused })} disabled={busy}>
             {d.settings.paused ? "Resume notifications" : "Pause notifications"}
@@ -116,6 +117,7 @@ function SlackCard({ d }: { d: AlertsOverview }) {
             removeText="Remove the summaries webhook? Summaries will go to the main channel." onDone={done} onError={setError}
             empty="Not set: summaries go to the main channel." />
         </div>
+        <AddedChannels channels={d.channels ?? []} onDone={done} onError={setError} />
         <span className="hint">In Slack: <strong>Apps → Incoming WebHooks</strong> (or your Slack app's <em>Incoming Webhooks</em> page) → <strong>Add New Webhook</strong>, pick the channel, copy the URL. "Send test" tests the URL in the box, or the saved one when the box is empty.</span>
         <div className="grid-2" style={{ gap: 16 }}>
           <div className="field">
@@ -178,6 +180,73 @@ function WebhookField({ id, title, sub, hook, path, removeText, empty, onDone, o
         <button type="button" className="btn btn-sm" disabled={(!url.trim() && !hook.configured) || busy} onClick={() => test.mutate()}>{test.isPending ? <Spinner /> : <Icon name="external" />} Send test</button>
         {hook.configured && <button type="button" className="btn btn-ghost btn-danger btn-sm" disabled={busy} onClick={() => { if (window.confirm(removeText)) remove.mutate(); }}>Remove</button>}
       </div>
+    </div>
+  );
+}
+
+/** Which channel a rule posts to, as a small tag. */
+function ChanTag({ channel, channels }: { channel: AlertChannel; channels: AddedChannel[] }) {
+  const added = channels.find((c) => c.id === channel);
+  const label = added ? added.name : channel === "main" ? "main" : "infra";
+  const cls = added ? "added" : channel === "main" ? "main" : "infra";
+  return <span className={`chan-tag ${cls}`} title={`Posts to ${added ? added.name : `the ${label} channel`}`}>{label}</span>;
+}
+
+/** Channels added by admins (name + webhook) that rules can post to. */
+function AddedChannels({ channels, onDone, onError }: { channels: AddedChannel[]; onDone: (text: string) => void; onError: (e: unknown) => void }) {
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const add = useMutation({ mutationFn: () => request("/admin/alerts/channels", { method: "POST", body: { name: name.trim(), webhookUrl: url.trim() } }),
+    onSuccess: () => { onDone(`${name.trim()} added: pick it under "Post to" in a rule`); setName(""); setUrl(""); }, onError });
+  const busy = add.isPending;
+  return (
+    <div className="added-channels">
+      <div className="label">More channels <span className="hint">· e.g. a channel only for slow-response alerts; up to 10</span></div>
+      {channels.map((c) => <AddedChannelRow key={c.id} ch={c} onDone={onDone} onError={onError} />)}
+      <div className="added-channel-new">
+        <input aria-label="New channel name" className="input" placeholder="Name, e.g. #api-latency" maxLength={60} value={name} onChange={(e) => setName(e.target.value)} />
+        <input aria-label="New channel webhook URL" className="input mono" type="password" autoComplete="off" spellCheck={false}
+          placeholder="https://hooks.slack.com/services/T…/B…/…" value={url} onChange={(e) => setUrl(e.target.value)} />
+        <button type="button" className="btn btn-primary btn-sm" disabled={!name.trim() || !url.trim() || busy} onClick={() => add.mutate()}>{add.isPending ? <Spinner /> : <Icon name="plus" />} Add channel</button>
+      </div>
+    </div>
+  );
+}
+
+function AddedChannelRow({ ch, onDone, onError }: { ch: AddedChannel; onDone: (text: string) => void; onError: (e: unknown) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(ch.name);
+  const [url, setUrl] = useState("");
+  const path = `/admin/alerts/channels/${ch.id}`;
+  const save = useMutation({ mutationFn: () => request(path, { method: "PUT", body: { name: name.trim(), webhookUrl: url.trim() || null } }),
+    onSuccess: () => { setEditing(false); setUrl(""); onDone(`${name.trim()} saved`); }, onError });
+  const test = useMutation({ mutationFn: () => request(`${path}/_test`, { method: "POST", body: { webhookUrl: url.trim() || null } }),
+    onSuccess: () => onDone(`Test message sent to ${ch.name}`), onError });
+  const remove = useMutation({ mutationFn: () => request<{ rulesMoved: number }>(path, { method: "DELETE" }),
+    onSuccess: (r) => onDone(`${ch.name} removed${r.rulesMoved ? `; ${r.rulesMoved} rule${r.rulesMoved === 1 ? "" : "s"} back on their default channel` : ""}`), onError });
+  const busy = save.isPending || test.isPending || remove.isPending;
+  return (
+    <div className="added-channel">
+      {editing ? (
+        <>
+          <input aria-label="Channel name" className="input" maxLength={60} value={name} onChange={(e) => setName(e.target.value)} />
+          <input aria-label="New webhook URL" className="input mono" type="password" autoComplete="off" spellCheck={false}
+            placeholder="Paste a new URL to change it (empty = keep)" value={url} onChange={(e) => setUrl(e.target.value)} />
+          <button type="button" className="btn btn-primary btn-sm" disabled={!name.trim() || busy} onClick={() => save.mutate()}>{save.isPending ? <Spinner /> : null} Save</button>
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setEditing(false); setName(ch.name); setUrl(""); }}>Cancel</button>
+        </>
+      ) : (
+        <>
+          <div className="grow" style={{ minWidth: 0 }}>
+            <strong>{ch.name}</strong>{" "}
+            <span className="hint">· <span className="mono">{ch.hint}</span>{ch.updatedBy ? ` · by ${ch.updatedBy} ${ago(ch.updatedAt)}` : ""}</span>
+          </div>
+          <button type="button" className="btn btn-sm" disabled={busy} onClick={() => test.mutate()}>{test.isPending ? <Spinner /> : <Icon name="external" />} Send test</button>
+          <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Change</button>
+          <button type="button" className="btn btn-ghost btn-danger btn-sm" disabled={busy}
+            onClick={() => { if (window.confirm(`Remove ${ch.name}? Rules posting there go back to their default channel.`)) remove.mutate(); }}>Remove</button>
+        </>
+      )}
     </div>
   );
 }
@@ -633,7 +702,7 @@ function RulesTable({ d, onEdit }: { d: AlertsOverview; onEdit: (r: AlertRule) =
                     <tr>
                       <td><label className="check" title={r.enabled ? "Turn off" : "Turn on"}><input type="checkbox" checked={r.enabled} disabled={toggle.isPending} onChange={() => toggle.mutate(r)} /><span className="sr-only">On</span></label></td>
                       <td>
-                        <div style={{ fontWeight: 600 }}>{r.name} <span className={`chan-tag ${r.channel}`} title={r.channel === "main" ? "Posts to the main channel" : "Posts to the infra channel"}>{r.channel === "main" ? "main" : "infra"}</span></div>
+                        <div style={{ fontWeight: 600 }}>{r.name} <ChanTag channel={r.channel} channels={d.channels ?? []} /></div>
                         {r.name !== r.title && <div className="hint">{r.title}</div>}
                       </td>
                       <td style={{ maxWidth: 460 }}>{describeRule(r, d.settings)}<div className="hint" style={{ fontSize: 12 }}>{levelText(r.level)} · every {r.every === 1 ? "minute" : `${r.every ?? "?"} min`}{(r.confirm ?? 1) > 1 ? ` · ${r.confirm} checks in a row` : ""}</div></td>
@@ -707,7 +776,7 @@ function TypePicker({ catalog, onPick, onClose }: { catalog: AlertType[]; onPick
 
 // ------------------------------------------------------------------ the rule editor
 
-function RuleDialog({ type, rule, lag, settings, mainTypes, onClose }: { type: AlertType; rule?: AlertRule; lag: number; settings: AlertSettings; mainTypes: string[]; onClose: () => void }) {
+function RuleDialog({ type, rule, lag, settings, mainTypes, channels, onClose }: { type: AlertType; rule?: AlertRule; lag: number; settings: AlertSettings; mainTypes: string[]; channels: AddedChannel[]; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
   const needsOptions = type.params.some((p) => ["logClusters", "ecsClusters", "lbs", "targetGroups", "apiStages"].includes(p.kind));
@@ -771,6 +840,7 @@ function RuleDialog({ type, rule, lag, settings, mainTypes, onClose }: { type: A
             <select id="rchan" className="select" value={channel} onChange={(e) => setChannel(e.target.value as AlertChannel)}>
               <option value="main">Main channel (HTTP error-rate alerts)</option>
               <option value="infra">Infra channel (#infra-alerts)</option>
+              {channels.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
         </div>

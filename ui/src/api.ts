@@ -448,13 +448,17 @@ export interface AlertSettings {
   /** End-of-day ops summary: the day that just ended in `zone`, posted at `time` there. */
   daily: { enabled: boolean; zone: "EST" | "PST" | "IST"; time: string };
 }
-export type AlertChannel = "main" | "infra";
+/** main, infra or the id of an added channel (c_…). */
+export type AlertChannel = "main" | "infra" | string;
+export interface AddedChannel { id: string; name: string; configured: boolean; hint: string | null; updatedAt?: string; updatedBy?: string }
 export interface SlackHook { configured: boolean; hint: string | null; updatedAt?: string; updatedBy?: string }
 export interface AlertsOverview {
   settings: AlertSettings;
   slack: SlackHook;
   /** The infra channel: every alert not on the main channel; not set = they go to the main channel. */
   infraSlack: SlackHook;
+  /** Channels added on the page (name + webhook) that rules can post to. */
+  channels?: AddedChannel[];
   /** Rule types that post to the main channel unless moved. */
   mainChannelTypes: string[];
   /** The summaries channel (daily + weekly); not set = they go to the main channel. */

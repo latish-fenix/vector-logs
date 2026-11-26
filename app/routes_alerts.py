@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from .alerts import (CATALOG, DAILY_ZONES, DAYS, LB_LAG_MINUTES, MAIN_CHANNEL_TYPES, SNOOZE_MINUTES, TYPES,
-                     AlertService, _err, channel_of, confirm_of, now_ms, settings_of, validate_rule)
+                     AlertService, _err, channel_ids, channel_of, confirm_of, now_ms, settings_of, validate_rule)
 from .errors import ApiError, not_found
 from .identity import User, current_user, require_admin
 
@@ -24,8 +24,9 @@ class RuleBody(BaseModel):
     enabled: bool | None = None
     params: dict[str, Any] | None = None
     forMinutes: int | None = Field(None, description="Must be bad this long before it alerts (0 = at once)")
-    channel: str | None = Field(None, description='"main" or "infra": the Slack channel this rule posts to '
-                                '(default: main for HTTP error-rate and status-code rules, infra for the rest)')
+    channel: str | None = Field(None, description='"main", "infra" or the id of an added channel (c_…): the Slack '
+                                'channel this rule posts to (default: main for HTTP error-rate and status-code '
+                                'rules, infra for the rest)')
 
 
 class SettingsBody(BaseModel):
@@ -58,6 +59,12 @@ class WebhookBody(BaseModel):
     webhookUrl: str = Field(..., max_length=400)
 
 
+class ChannelBody(BaseModel):
+    name: str | None = Field(None, max_length=60, description="What it is called on the page, e.g. #api-latency")
+    webhookUrl: str | None = Field(None, max_length=400, description="Slack incoming webhook URL (kept in Secrets "
+                                   "Manager, never shown again); on a change, leave out to keep the saved one")
+
+
 class TestBody(BaseModel):
     webhookUrl: str | None = Field(None, max_length=400, description="Test this URL instead of the saved one")
 
@@ -74,7 +81,7 @@ def _event(request: Request, user: User, action: str, **fields: Any) -> None:
                                     "requestId": request.state.request_id, **fields})
 
 
-def _public_rule(rule: dict, status: dict | None, snoozes: dict) -> dict:
+def _public_rule(rule: dict, status: dict | None, snoozes: dict, extra: set[str] | frozenset = frozenset()) -> dict:
     status = status or {}
     subjects = status.get("subjects", {})
     now = now_ms()
@@ -90,7 +97,7 @@ def _public_rule(rule: dict, status: dict | None, snoozes: dict) -> dict:
             out.append({"subject": k, **v, "snooze": sn})
         return sorted(out, key=lambda x: (-{"critical": 2, "warning": 1}.get(x.get("level"), 0), x["subject"]))
     spec = TYPES.get(rule["type"], {})
-    return {**rule, "channel": channel_of(rule), "title": spec.get("title", rule["type"]), "level": spec.get("level"),
+    return {**rule, "channel": channel_of(rule, extra), "title": spec.get("title", rule["type"]), "level": spec.get("level"),
             "every": spec.get("every"), "confirm": confirm_of(rule),
             "status": {"lastRunAt": status.get("lastRunAt"), "lastError": status.get("lastError"),
                        "tookMs": status.get("tookMs"), "firing": items("firing"), "pending": items("pending"),
@@ -122,7 +129,10 @@ def overview(request: Request, user: User = Depends(require_admin)):
                         "intervalSeconds": request.app.state.settings.alerts_interval_seconds,
                         "background": request.app.state.settings.alerts_background,
                         "digestSentFor": st.get("digestSentFor"), "dailySentFor": st.get("dailySentFor")},
-            "rules": [_public_rule(r, st.get("rules", {}).get(r["id"]), snoozes) for r in cfg.get("rules", [])],
+            "channels": [{k: c.get(k) for k in ("id", "name", "configured", "hint", "updatedAt", "updatedBy")}
+                         for c in cfg.get("channels") or []],
+            "rules": [_public_rule(r, st.get("rules", {}).get(r["id"]), snoozes, channel_ids(cfg))
+                      for r in cfg.get("rules", [])],
             "snoozes": sorted((s for s in snoozes.values() if s.get("until") is None or s["until"] > now),
                               key=lambda s: s.get("at", 0), reverse=True),
             "snoozeMinutes": list(SNOOZE_MINUTES), "days": list(DAYS),
@@ -260,6 +270,38 @@ def preview_daily(request: Request, day: str | None = Query(None, description="Y
     from .daily_summary import as_text
     msg = _svc(request).daily_message(day)
     return {"text": as_text(msg["blocks"]), "summary": msg["summary"], "blocks": msg["blocks"]}
+
+
+@admin.post("/channels", status_code=201, summary="Add a Slack channel (name + incoming webhook) that rules can post to")
+def add_channel(body: ChannelBody, request: Request, user: User = Depends(require_admin)):
+    ch = _svc(request).add_channel(body.name or "", body.webhookUrl or "", user.username)
+    _event(request, user, "ALERT_CHANNEL_ADD", channelId=ch["id"], name=ch["name"], hint=ch.get("hint"))
+    return {k: ch.get(k) for k in ("id", "name", "configured", "hint", "updatedAt", "updatedBy")}
+
+
+@admin.put("/channels/{channel_id}", summary="Rename an added channel and / or change its webhook")
+def change_channel(channel_id: str, body: ChannelBody, request: Request, user: User = Depends(require_admin)):
+    ch = _svc(request).update_channel(channel_id, user.username, name=body.name, url=body.webhookUrl)
+    _event(request, user, "ALERT_CHANNEL_CHANGE", channelId=channel_id, name=ch["name"],
+           webhookChanged=bool((body.webhookUrl or "").strip()))
+    return {k: ch.get(k) for k in ("id", "name", "configured", "hint", "updatedAt", "updatedBy")}
+
+
+@admin.delete("/channels/{channel_id}", summary="Remove an added channel (its rules go back to their default channel)")
+def remove_channel(channel_id: str, request: Request, user: User = Depends(require_admin)):
+    out = _svc(request).delete_channel(channel_id, user.username)
+    _event(request, user, "ALERT_CHANNEL_REMOVE", channelId=channel_id, name=out["removed"])
+    return out
+
+
+@admin.post("/channels/{channel_id}/_test", summary="Send a test message to an added channel (or to the URL given)")
+def test_channel(channel_id: str, body: TestBody, request: Request, user: User = Depends(require_admin)):
+    svc = _svc(request)
+    if channel_id not in channel_ids(svc.config()):
+        raise not_found("CHANNEL_NOT_FOUND", "No added channel with that id")
+    out = svc.send_test(body.webhookUrl, user.username, channel_id)
+    _event(request, user, "ALERT_SLACK_TEST", channel=channel_id)
+    return out
 
 
 @admin.put("/slack/infra", summary="Save (or change) the infra channel webhook (every alert not on the main channel)")

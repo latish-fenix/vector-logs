@@ -241,3 +241,37 @@ def test_api_gateway_p95_alert(env):
     # numbers too old: an error, not a judgement
     with pytest.raises(ApiError):
         svc.evaluate(validate_rule({"type": "apigw_latency"}), MS(NOW) + 60 * MINUTE)
+
+
+def test_added_channels(env):
+    client, svc, slack = env
+    hook = "https://hooks.slack.com/services/T000/B222/latencylatencylatency"
+    assert client.post(f"{URL}/channels", json={"name": "#api-latency", "webhookUrl": "nope"}, headers=ROOT_H).status_code == 400
+    r = client.post(f"{URL}/channels", json={"name": "#api-latency", "webhookUrl": hook}, headers=ROOT_H)
+    assert r.status_code == 201
+    ch = r.json()
+    assert ch["id"].startswith("c_") and ch["hint"] and hook not in json.dumps(ch)
+    assert client.post(f"{URL}/channels", json={"name": "#API-latency", "webhookUrl": hook}, headers=ROOT_H).json()["error"]["code"] == "CHANNEL_EXISTS"
+    assert svc.secrets.get(f"alerts-ch-{ch['id']}") == {"slackWebhookUrl": hook}
+    assert hook not in json.dumps(svc.config()) and hook not in client.get(URL, headers=ROOT_H).text
+    assert client.post(f"{URL}/channels/{ch['id']}/_test", json={}, headers=ROOT_H).json() == {"sent": True}
+    assert slack.sent[-1][0] == hook and "#api-latency" in json.dumps(slack.sent[-1][1])
+    # a rule posts to it
+    rule = client.post(f"{URL}/rules", json={"type": "apigw_latency", "channel": ch["id"]}, headers=ROOT_H).json()
+    assert client.post(f"{URL}/rules", json={"type": "apigw_latency", "channel": "c_00000000"}, headers=ROOT_H).status_code == 400
+    listed = client.get(URL, headers=ROOT_H).json()
+    assert next(x for x in listed["rules"] if x["id"] == rule["id"])["channel"] == ch["id"]
+    assert [c["name"] for c in listed["channels"]] == ["#api-latency"]
+    assert _fire(svc, "apigw_latency", MS(NOW))[0]["delivered"] and slack.sent[-1][0] == hook
+    # rename + new webhook
+    hook2 = hook.replace("B222", "B333")
+    r = client.put(f"{URL}/channels/{ch['id']}", json={"name": "#p95", "webhookUrl": hook2}, headers=ROOT_H)
+    assert r.status_code == 200 and r.json()["name"] == "#p95"
+    _fire(svc, "apigw_latency", MS(NOW))
+    assert slack.sent[-1][0] == hook2
+    # removed: the rule goes back to its default (infra, else main)
+    assert client.delete(f"{URL}/channels/{ch['id']}", headers=ROOT_H).json() == {"removed": "#p95", "rulesMoved": 1}
+    assert svc.secrets.get(f"alerts-ch-{ch['id']}") is None
+    assert next(x for x in client.get(URL, headers=ROOT_H).json()["rules"] if x["id"] == rule["id"])["channel"] == "infra"
+    _fire(svc, "apigw_latency", MS(NOW))
+    assert slack.sent[-1][0] == ALERTS_HOOK
