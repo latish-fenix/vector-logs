@@ -529,6 +529,7 @@ export function describeRule(r: { type: string; params: Record<string, unknown>;
     lb_errors: () => `${scope(p.targetGroups, "All target groups")}: ${p.statusClass} ≥ ${lbCrit(p.thresholdPercent, p.criticalPercent, "%")} of requests (${num(p.minRequests)}+) within ${p.minutes} min`,
     lb_status: () => `${scope(p.targetGroups, "All target groups")}: requests with ${p.codes} ≥ ${lbCrit(p.threshold, p.criticalThreshold, "")}${Number(p.thresholdPercent) ? ` and ≥ ${p.thresholdPercent}%` : ""} within ${p.minutes} min`,
     lb_latency: () => `${scope(p.targetGroups, "All target groups")}: p95 ≥ ${num(p.p95Ms)} ms (${num(p.minRequests)}+ requests) within ${p.minutes} min`,
+    apigw_latency: () => `${scope(p.stages, "All stages")}: ${p.measure === "integration" ? "backend p95" : "p95"} ≥ ${num(p.p95Ms)} ms warning, ${num(Number(p.criticalMs) || Number(p.p95Ms) * 2)} ms critical (${num(p.minCalls)}+ calls) within ${p.minutes} min`,
     ecs_targets: () => `${scope(p.clusters, "All clusters")}: ${p.minUnhealthy}+ unhealthy target${p.minUnhealthy === 1 ? "" : "s"} (warning) · a target group with none healthy (critical)`,
     ecs_tasks: () => `${scope(p.clusters, "All clusters")}: a service runs no task (critical) or fewer than desired (warning)`,
     ecs_instances: () => `${scope(p.clusters, "All clusters")}: an instance loses its ECS agent, or leaves while services are short of tasks`,
@@ -709,7 +710,7 @@ function TypePicker({ catalog, onPick, onClose }: { catalog: AlertType[]; onPick
 function RuleDialog({ type, rule, lag, settings, mainTypes, onClose }: { type: AlertType; rule?: AlertRule; lag: number; settings: AlertSettings; mainTypes: string[]; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
-  const needsOptions = type.params.some((p) => ["logClusters", "ecsClusters", "lbs", "targetGroups"].includes(p.kind));
+  const needsOptions = type.params.some((p) => ["logClusters", "ecsClusters", "lbs", "targetGroups", "apiStages"].includes(p.kind));
   const opts = useQuery({ queryKey: ["alert-options"], queryFn: () => get<AlertOptions>("/admin/alerts/options"), enabled: needsOptions, staleTime: 60_000 });
   const [name, setName] = useState(rule?.name ?? type.title);
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);

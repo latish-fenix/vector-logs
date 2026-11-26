@@ -1,6 +1,8 @@
 """End-of-day ops summary (#daily-ops-digest) and the second Slack channel for summaries."""
 from __future__ import annotations
 
+import json
+
 import shutil
 from datetime import date, datetime, timedelta, timezone
 
@@ -206,3 +208,36 @@ def test_error_rate_alerts_on_main_channel_the_rest_on_infra(env):
     assert client.delete(f"{URL}/slack/infra", headers=ROOT_H).json() == {"configured": False}
     _fire(svc, "app_disk", now)
     assert slack.sent[-1][0] == ALERTS_HOOK                                    # back to the main channel
+
+
+def test_api_gateway_p95_alert(env):
+    from app.alerts import validate_rule
+    from app.errors import ApiError
+    client, svc, slack = env
+    svc._update(lambda doc: [r.update(enabled=False) for r in doc["rules"]])
+    r = client.post(f"{URL}/rules", json={"type": "apigw_latency", "params": {"p95Ms": 150, "minCalls": 100, "minutes": 15}},
+                    headers=ROOT_H)
+    assert r.status_code == 201
+    opts = client.get(f"{URL}/options", headers=ROOT_H).json()
+    assert {"Vuori/vuori", "Alpha-EDDS-1/felina"} <= set(opts["apiStages"])
+    # vuori p95 200 ms (warning at 150, critical at the doubled 300); felina 100 ms is fine
+    out = svc.run_once(MS(NOW))
+    fired = [(e["subject"], e["level"]) for e in out["events"] if e["event"] == "firing"]
+    assert len(fired) == 1 and fired[0][1] == "warning" and "vuori" in fired[0][0].lower()
+    sent = [(u, json.dumps(m)) for u, m in slack.sent if "Slow responses (p95)" in json.dumps(m)]
+    assert len(sent) == 1 and "p95 200 ms over 1,500 calls" in sent[0][1]
+    assert sent[0][0] == ALERTS_HOOK                               # no infra webhook: the main one
+    # a custom critical line; the backend-only measure; a stage filter
+    f = svc.evaluate(validate_rule({"type": "apigw_latency", "params": {"p95Ms": 150, "criticalMs": 180}}), MS(NOW))
+    v = next(x for x in f if x.bad)
+    assert v.level_now("warning") == "critical" and v.link.startswith("/ui/ops?tab=history&stage=Vuori")
+    f = svc.evaluate(validate_rule({"type": "apigw_latency", "params": {"p95Ms": 195, "measure": "integration"}}), MS(NOW))
+    assert not any(x.bad for x in f) and any("backend p95 190 ms" in x.message for x in f)
+    f = svc.evaluate(validate_rule({"type": "apigw_latency", "params": {"p95Ms": 50, "stages": ["Alpha-EDDS-1/felina"]}}), MS(NOW))
+    assert len(f) == 1 and f[0].bad
+    # too few calls: watched but never bad
+    f = svc.evaluate(validate_rule({"type": "apigw_latency", "params": {"p95Ms": 50, "minCalls": 1000}}), MS(NOW))
+    assert [x.bad for x in f if "felina" in x.link] == [False]
+    # numbers too old: an error, not a judgement
+    with pytest.raises(ApiError):
+        svc.evaluate(validate_rule({"type": "apigw_latency"}), MS(NOW) + 60 * MINUTE)

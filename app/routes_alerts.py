@@ -130,10 +130,11 @@ def overview(request: Request, user: User = Depends(require_admin)):
             "catalog": CATALOG, "lbLagMinutes": LB_LAG_MINUTES}
 
 
-@admin.get("/options", summary="Names to pick in rules: log clusters, ECS clusters, load balancers, target groups")
+@admin.get("/options", summary="Names to pick in rules: log clusters, ECS clusters, load balancers, target groups, API Gateway stages")
 def options(request: Request, user: User = Depends(require_admin)):
     st = request.app.state
-    out: dict[str, Any] = {"logClusters": [], "ecsClusters": [], "lbs": [], "targetGroups": [], "errors": []}
+    out: dict[str, Any] = {"logClusters": [], "ecsClusters": [], "lbs": [], "targetGroups": [], "apiStages": [],
+                           "errors": []}
     try:
         out["logClusters"] = st.logs.clusters()
     except Exception as e:  # noqa: BLE001
@@ -152,6 +153,11 @@ def options(request: Request, user: User = Depends(require_admin)):
                                                                  for t in x["targetGroups"] if t.get("name")})
     except Exception as e:  # noqa: BLE001
         out["errors"].append(f"Load balancers: {_err(e)}")
+    try:
+        if getattr(st, "ops", None) is not None:
+            out["apiStages"] = st.ops.stage_ids()
+    except Exception as e:  # noqa: BLE001
+        out["errors"].append(f"API Gateway: {_err(e)}")
     return out
 
 

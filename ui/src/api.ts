@@ -407,7 +407,7 @@ export interface EcsServiceMetrics {
 }
 
 // ------------------------------------------------------------------ alerts
-export type AlertParamKind = "number" | "logClusters" | "ecsClusters" | "lbs" | "targetGroups" | "select" | "text" | "codes" | "bool";
+export type AlertParamKind = "number" | "logClusters" | "ecsClusters" | "lbs" | "targetGroups" | "apiStages" | "select" | "text" | "codes" | "bool";
 export interface AlertParamSpec {
   key: string; kind: AlertParamKind; label: string; default: unknown; help?: string;
   min?: number; max?: number; unit?: string; required?: boolean; options?: { value: string; label: string }[];
@@ -470,7 +470,7 @@ export interface AlertsOverview {
   catalog: AlertType[];
   lbLagMinutes: number;
 }
-export interface AlertOptions { logClusters: string[]; ecsClusters: string[]; lbs: string[]; targetGroups: string[]; errors: string[] }
+export interface AlertOptions { logClusters: string[]; ecsClusters: string[]; lbs: string[]; targetGroups: string[]; apiStages?: string[]; errors: string[] }
 export interface AlertFinding {
   subject: string; bad: boolean; level?: AlertLevel | null; message: string; mutedBy?: string[]; mutedLevel?: AlertLevel | null; value: number | null; lines?: AlertLines | null;
   link: string | null; details?: string[]; links?: [string, string][];

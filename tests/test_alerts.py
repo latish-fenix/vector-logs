@@ -65,7 +65,7 @@ def test_default_rules_and_catalog(env):
     d = client.get(URL, headers=ROOT_H).json()
     types = [r["type"] for r in d["rules"]]
     assert {"app_aws", "app_converter", "logs_stale", "ecs_targets", "lb_errors"} <= set(types)
-    assert len(d["catalog"]) == 14 and d["slack"]["configured"] is False
+    assert len(d["catalog"]) == 15 and d["slack"]["configured"] is False
     assert d["settings"]["timeZone"] == "Asia/Kolkata"
     assert d["settings"]["thresholds"]["cpu"] == {"warning": 70, "critical": 80}
     assert d["settings"]["repeat"] == {"warning": 60, "critical": 15}

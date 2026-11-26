@@ -214,6 +214,18 @@ CATALOG: list[dict] = [
                 _num("p95Ms", "p95 at least", 2000, 10, 600_000, "ms"),
                 _num("minRequests", "Only with at least", 50, 1, 10_000_000, "requests"),
                 _num("minutes", "Within", 15, 5, 240, "min")]},
+    {"type": "apigw_latency", "group": "API Gateway", "title": "Slow responses (p95)", "level": "two",
+     "description": "95th percentile response time per API Gateway stage, from the API Gateway metrics of the Ops "
+                    "dashboard (the call-weighted average of each minute's p95, so approximate). Warning at your "
+                    "value, critical at the second one. The metrics are a few minutes behind.",
+     "every": 5, "forMinutes": 0,
+     "params": [_pick("stages", "apiStages", "Stages"),
+                _select("measure", "Measure", [("total", "Whole request (API Gateway latency)"),
+                                               ("integration", "Backend only (integration latency)")], "total"),
+                _num("p95Ms", "Warning at p95", 1000, 10, 600_000, "ms"),
+                _num("criticalMs", "Critical at p95", 0, 0, 600_000, "ms (0 = double the warning)"),
+                _num("minCalls", "Only with at least", 100, 1, 10_000_000, "calls"),
+                _num("minutes", "Within", 15, 5, 240, "min")]},
     {"type": "ecs_targets", "group": "ECS", "title": "Unhealthy targets", "level": "two", "confirm": 2,
      "description": "Targets of an ECS cluster's target groups fail their health checks (unhealthy, draining, "
                     "unavailable or still starting). Warning when some are unhealthy, critical when a target "
@@ -369,7 +381,7 @@ def validate_rule(body: dict, existing: dict | None = None) -> dict:
             if not p["min"] <= v <= p["max"]:
                 raise bad_request("INVALID_ALERT", f"'{label}' must be between {p['min']} and {p['max']}")
             v = int(v) if v == int(v) else v
-        elif p["kind"] in ("logClusters", "ecsClusters", "lbs", "targetGroups"):
+        elif p["kind"] in ("logClusters", "ecsClusters", "lbs", "targetGroups", "apiStages"):
             if not isinstance(v, list) or len(v) > 200 or not all(isinstance(x, str) and NAME_RE.match(x) for x in v):
                 raise bad_request("INVALID_ALERT", f"'{label}' must be a list of names")
             v = sorted(set(v))
@@ -1280,6 +1292,35 @@ class AlertService:
             out.append(Finding(r["tg"], bad, f"p95 {ms:,.0f} ms over {r['requests']:,} requests ({span})",
                                value=round(ms), cluster=r.get("cluster"),
                                link="/ui/lb?" + self._q(tg=r["tg"], start=iso_ms(start), end=iso_ms(end))))
+        return out
+
+    # -- API Gateway
+    def _check_apigw_latency(self, p: dict, now: int) -> list[Finding]:
+        data = self._need("ops").stage_latency(p["minutes"])
+        if data["asOf"] is None:
+            raise ApiError(503, "NO_API_METRICS", "No API Gateway metrics in the last hours"
+                           + (f" ({data['error']})" if data.get("error") else ""))
+        behind = (now - (data["asOf"] + 60_000)) // 60_000
+        if behind > API_STALE_MINUTES:
+            raise ApiError(503, "API_METRICS_STALE", f"The API Gateway metrics are {behind} min behind")
+        cfg, out = self.config(), []
+        span = self._span(cfg, data["from"], data["to"])
+        lines = {**_lb_lines(p["p95Ms"], p.get("criticalMs"), pct=False), "unit": " ms"}
+        key = "integrationP95" if p.get("measure") == "integration" else "p95"
+        what = "backend p95" if key == "integrationP95" else "p95"
+        rows = [s for s in data["stages"] if not p["stages"] or s["id"] in p["stages"]]
+        dup = {n for n in (s["name"] for s in rows) if sum(1 for x in rows if x["name"] == n) > 1}
+        for s in rows:
+            ms = s.get(key)
+            if ms is None:
+                continue
+            watch = s["calls"] >= p["minCalls"]
+            subject = s["name"] if s["name"] not in dup else f"{s['name']} ({s['api']})"
+            out.append(Finding(subject, watch and ms >= lines["warning"],
+                               f"{what} {ms:,.0f} ms over {s['calls']:,} calls ({span})",
+                               value=round(ms), lines=lines if watch else None,
+                               link="/ui/ops?" + self._q(tab="history", stage=s["id"]),
+                               extra={"span": span, "stage": s["id"]}))
         return out
 
     # -- ECS
@@ -2281,6 +2322,9 @@ def _err(e: Exception) -> str:
     if isinstance(e, ApiError):
         return f"{e.code}: {e.message}"[:400]
     return f"{type(e).__name__}: {e}"[:400]
+
+
+API_STALE_MINUTES = 20     # the p95 rule reports an error instead of judging older API Gateway numbers
 
 
 def _lb_lines(warning: float, critical: float | None, pct: bool) -> dict:

@@ -1133,6 +1133,30 @@ class OpsService:
                            "newestMs": (self._day_orders(now.date()) or {}).get("newestMs")},
                 "thresholds": cfg.status}
 
+    def stage_latency(self, minutes: int) -> dict:
+        """Per API Gateway stage over the newest `minutes` of metrics (for the p95 alert): calls and the
+        call-weighted p95 of the whole request and of the integration; `asOf` = the newest minute."""
+        now_ms = int(self.now().timestamp() * 1000)
+        cfg = self.config.get()
+        con = _db()
+        try:
+            lo = now_ms - minutes * MIN - 2 * 3600_000     # enough to find the newest minute
+            _load_metrics(con, self.metrics.paths(lo, now_ms, now_ms), [(lo, now_ms + MIN)])
+            row = con.execute("SELECT max(t) FROM m WHERE t >= ?", [lo]).fetchone()
+            as_of = int(row[0]) if row and row[0] is not None else None
+            rows = self._stage_rows(con, as_of + MIN - minutes * MIN, as_of + MIN) if as_of is not None else {}
+        finally:
+            con.close()
+        stages = [{"id": f"{api}/{stage}", "api": api, "stage": stage, "name": cfg.name(stage), "calls": w["calls"],
+                   "p95": w["p95"], "integrationP95": w["integrationP95"]}
+                  for (api, stage), w in sorted(rows.items()) if w["calls"]]
+        return {"asOf": as_of, "from": None if as_of is None else as_of + MIN - minutes * MIN,
+                "to": None if as_of is None else as_of + MIN, "stages": stages, "error": self.metrics.error}
+
+    def stage_ids(self) -> list[str]:
+        """api/stage of every stage with calls in the last day (names to pick in alert rules)."""
+        return [s["id"] for s in self.stage_latency(24 * 60)["stages"]]
+
     def history(self, day: str | None = None, stage: str | None = None, service: str | None = None,
                 store: str | None = None, zone: str = "UTC") -> dict:
         now = self.now()
